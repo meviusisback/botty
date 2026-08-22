@@ -30,6 +30,17 @@
 
 ---
 
+## ⌨️ Global Keyboard Shortcuts
+
+Configured in `~/.config/hypr/bindings.lua`:
+
+| Shortcut | Action | Description |
+|---|---|---|
+| **`SUPER + A`** | **Toggle Botty** | Opens/closes Botty and auto-focuses the chat input immediately. |
+| **`SUPER + SHIFT + A`** | **Ask with Window Context** | Captures the active window screenshot, attaches it as visual context, opens Botty, and focuses the chat input for typing. |
+
+---
+
 ## 🚀 Installation & Window Rules
 
 ### 1. Link Plugin to Omarchy
@@ -50,19 +61,7 @@ o.window({ title = ".*(Open File|Select File|Choose File|Open Folder|Save File).
 o.window("xdg-desktop-portal.*", { float = true, center = true, size = { 740, 500 } })
 ```
 
-### 3. Global Keyboard Shortcuts
-
-Add to your `~/.config/hypr/bindings.lua`:
-
-```lua
--- Toggle Botty Assistant
-o.bind("SUPER + B", "Botty Assistant", "omarchy shell meviusisback.botty toggle")
-
--- Quick Ask with Screen Context
-o.bind("SUPER + SHIFT + B", "Botty Screen Query", "omarchy shell meviusisback.botty captureAndAsk")
-```
-
-### 4. Reload Omarchy Shell & Hyprland
+### 3. Reload Omarchy Shell & Hyprland
 
 ```bash
 hyprctl reload

@@ -623,6 +623,7 @@ Panel {
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
     function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
+    function captureWindowContext(): void { root.captureScreenNow(); root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
@@ -636,6 +637,7 @@ Panel {
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
     function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
+    function captureWindowContext(): void { root.captureScreenNow(); root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }

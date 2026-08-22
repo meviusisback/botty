@@ -48,7 +48,12 @@ Panel {
   })
 
   property var historyData: ({ session_id: "botty-widget", messages: [] })
-  property var modelsData: []
+  property int lastMessageCount: 0
+
+  property var modelsCatalog: ({ providers: [] })
+  property string selectedProviderId: "opencode-go"
+  property string modelSearchFilter: ""
+
   property var memoriesData: []
   property var skillsData: []
 
@@ -58,6 +63,10 @@ Panel {
   property string attachedImageFilename: ""
   property bool screenContextEnabled: false
   property var lastCaptureInfo: null
+
+  // Voice dictation state
+  property bool isRecordingVoice: false
+  property bool isTranscribingVoice: false
 
   property bool isProcessing: rawStatus && rawStatus.state === "working"
 
@@ -141,6 +150,7 @@ Panel {
   function clearChat() {
     clearProc.command = ["python3", root.scriptPath(), "clear"]
     clearProc.running = true
+    root.lastMessageCount = 0
   }
 
   function selectModel(modelId, providerId) {
@@ -151,6 +161,17 @@ Panel {
     }
     setModelProc.command = cmd
     setModelProc.running = true
+  }
+
+  function toggleVoiceDictation() {
+    if (root.isRecordingVoice) {
+      root.isTranscribingVoice = true
+      dictateStopProc.command = ["python3", root.scriptPath(), "dictate-stop"]
+      dictateStopProc.running = true
+    } else {
+      dictateStartProc.command = ["python3", root.scriptPath(), "dictate-start"]
+      dictateStartProc.running = true
+    }
   }
 
   function copyText(text) {
@@ -199,6 +220,15 @@ Panel {
     NumberAnimation { to: 1.0; duration: 700; easing.type: Easing.InOutQuad }
   }
 
+  // Voice recording pulsing animation
+  property real voicePulseOpacity: 1.0
+  SequentialAnimation on voicePulseOpacity {
+    running: root.isRecordingVoice
+    loops: Animation.Infinite
+    NumberAnimation { to: 0.25; duration: 500; easing.type: Easing.InOutQuad }
+    NumberAnimation { to: 1.0; duration: 500; easing.type: Easing.InOutQuad }
+  }
+
   // ------------------------------------------------------------- Process Handlers
   Process {
     id: statusProc
@@ -225,9 +255,17 @@ Panel {
         try {
           var data = JSON.parse(text || "{}")
           if (data && data.ok && data.history) {
+            var msgs = data.history.messages || []
+            var newCount = msgs.length
+            var shouldScroll = (newCount > root.lastMessageCount)
+            root.lastMessageCount = newCount
             root.historyData = data.history
-            if (chatListView.count > 0) {
-              chatListView.positionViewAtEnd()
+            if (shouldScroll) {
+              Qt.callLater(function() {
+                if (chatListView.count > 0) {
+                  chatListView.positionViewAtEnd()
+                }
+              })
             }
           }
         } catch (e) {}
@@ -307,9 +345,12 @@ Panel {
         try {
           var data = JSON.parse(text || "{}")
           if (data && data.ok) {
-            root.modelsData = data.models || []
+            root.modelsCatalog = data
             root.rawStatus.active_model = data.active_model
             root.rawStatus.active_provider = data.active_provider
+            if (data.active_provider) {
+              root.selectedProviderId = data.active_provider
+            }
           }
         } catch (e) {}
       }
@@ -323,6 +364,38 @@ Panel {
       onStreamFinished: {
         root.fetchStatus()
         root.fetchModels()
+      }
+    }
+  }
+
+  Process {
+    id: dictateStartProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          root.isRecordingVoice = Boolean(data && data.ok && data.recording)
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: dictateStopProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.isRecordingVoice = false
+        root.isTranscribingVoice = false
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok && data.text) {
+            var current = promptInput.text.trim()
+            promptInput.text = current.length > 0 ? (current + " " + data.text) : data.text
+            promptInput.forceActiveFocus()
+          }
+        } catch (e) {}
       }
     }
   }
@@ -636,7 +709,7 @@ Panel {
           // Model & Settings Button
           Button {
             iconText: "󰒓"
-            tooltipText: "Models & Settings"
+            tooltipText: "Models & Providers"
             selected: root.currentView === "settings"
             implicitWidth: Style.space(32)
             implicitHeight: Style.space(32)
@@ -962,7 +1035,7 @@ Panel {
               }
 
               Text {
-                text: "Botty is reading context and thinking…"
+                text: "Botty is reading screen and thinking…"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 color: root.foreground
@@ -1093,7 +1166,7 @@ Panel {
               }
             }
 
-            // Input Row
+            // Input Row with Voice Dictation & Send
             RowLayout {
               Layout.fillWidth: true
               spacing: Style.space(6)
@@ -1101,7 +1174,7 @@ Panel {
               TextField {
                 id: promptInput
                 Layout.fillWidth: true
-                placeholderText: "Ask Botty or command a desktop action… (Enter to send)"
+                placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic again to transcribe)" : "Ask Botty or command a desktop action… (Enter to send)"
                 font.pixelSize: Style.font.body
                 onAccepted: {
                   if (text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled) {
@@ -1110,6 +1183,19 @@ Panel {
                 }
               }
 
+              // Voice Dictation Button
+              Button {
+                id: micBtn
+                iconText: root.isRecordingVoice ? "󰍬" : "󰍭"
+                tooltipText: root.isRecordingVoice ? "Stop recording & transcribe" : "Voice Dictation (Click to speak)"
+                selected: root.isRecordingVoice
+                opacity: root.isRecordingVoice ? root.voicePulseOpacity : 1.0
+                implicitHeight: promptInput.implicitHeight
+                implicitWidth: promptInput.implicitHeight
+                onClicked: root.toggleVoiceDictation()
+              }
+
+              // Send Button
               Button {
                 iconText: "󰒭"
                 text: "Send"
@@ -1335,116 +1421,185 @@ Panel {
         }
       }
 
-      // ========================================================= VIEW: SETTINGS & MODELS
+      // ========================================================= VIEW: SETTINGS & MODELS (DUAL MENU)
       Item {
         id: settingsViewItem
         visible: root.currentView === "settings"
         Layout.fillWidth: true
         Layout.fillHeight: true
 
+        readonly property var allProviders: (root.modelsCatalog && root.modelsCatalog.providers) ? root.modelsCatalog.providers : []
+        readonly property var currentProviderObj: {
+          for (var i = 0; i < allProviders.length; i++) {
+            if (allProviders[i].id === root.selectedProviderId) return allProviders[i]
+          }
+          return (allProviders.length > 0) ? allProviders[0] : ({ id: "opencode-go", name: "OpenCode Go", models: [] })
+        }
+
+        readonly property var filteredModels: {
+          var list = (currentProviderObj && currentProviderObj.models) ? currentProviderObj.models : []
+          var filter = root.modelSearchFilter.trim().toLowerCase()
+          if (!filter) return list
+          return list.filter(function(m) {
+            var id = String(m.id || "").toLowerCase()
+            var name = String(m.name || "").toLowerCase()
+            return id.indexOf(filter) !== -1 || name.indexOf(filter) !== -1
+          })
+        }
+
         ColumnLayout {
           anchors.fill: parent
-          spacing: Style.space(10)
+          spacing: Style.space(8)
 
           Text {
-            text: "Model Selection"
+            text: "Model & Provider Catalog"
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
             font.bold: true
             color: root.foreground
           }
 
-          Text {
-            text: "Select the LLM model used underneath by Botty profile:"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            color: root.dim
+          // ----------------------------------------------------- Step 1: Provider Selector
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(4)
+
+            Text {
+              text: "1. Select Inference Provider (" + settingsViewItem.allProviders.length + " available):"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              color: root.accent
+            }
+
+            ScrollView {
+              Layout.fillWidth: true
+              implicitHeight: Style.space(38)
+              ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+              ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+
+              RowLayout {
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: settingsViewItem.allProviders
+                  delegate: Button {
+                    text: modelData.name || modelData.id
+                    fontSize: Style.space(11)
+                    selected: modelData.id === root.selectedProviderId
+                    implicitHeight: Style.space(30)
+                    onClicked: {
+                      root.selectedProviderId = modelData.id
+                      root.modelSearchFilter = ""
+                    }
+                  }
+                }
+              }
+            }
           }
 
-          ScrollView {
+          // ----------------------------------------------------- Step 2: Model Search & Selector
+          ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
+            spacing: Style.space(6)
 
-            ListView {
-              id: modelsList
-              model: root.modelsData
+            RowLayout {
+              Layout.fillWidth: true
               spacing: Style.space(6)
 
-              delegate: Item {
-                width: modelsList.width
-                implicitHeight: modelCard.implicitHeight + Style.space(4)
-                readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
+              Text {
+                text: "2. Select Model (" + settingsViewItem.filteredModels.length + " in " + settingsViewItem.currentProviderObj.name + "):"
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                color: root.accent
+              }
 
-                BorderSurface {
-                  id: modelCard
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  implicitHeight: modelRow.implicitHeight + Style.space(16)
-                  radius: Style.space(8)
-                  color: isCurrent ? root.alpha(root.accent, 0.15) : root.alpha(root.foreground, 0.04)
-                  borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
+              Item { Layout.fillWidth: true }
+            }
 
-                  RowLayout {
-                    id: modelRow
+            TextField {
+              id: modelSearchInput
+              Layout.fillWidth: true
+              placeholderText: "🔍 Filter models under " + settingsViewItem.currentProviderObj.name + "…"
+              font.pixelSize: Style.font.body
+              text: root.modelSearchFilter
+              onTextChanged: root.modelSearchFilter = text
+            }
+
+            ScrollView {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              clip: true
+
+              ListView {
+                id: modelsList
+                model: settingsViewItem.filteredModels
+                spacing: Style.space(6)
+
+                delegate: Item {
+                  width: modelsList.width
+                  implicitHeight: modelCard.implicitHeight + Style.space(4)
+                  readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
+
+                  BorderSurface {
+                    id: modelCard
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.margins: Style.space(8)
-                    spacing: Style.space(10)
+                    implicitHeight: modelRow.implicitHeight + Style.space(16)
+                    radius: Style.space(8)
+                    color: isCurrent ? root.alpha(root.accent, 0.15) : root.alpha(root.foreground, 0.04)
+                    borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
 
-                    Text {
-                      text: isCurrent ? "󰄬" : "🐼"
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.icon
-                      color: isCurrent ? "#10B981" : root.muted
-                    }
-
-                    ColumnLayout {
-                      Layout.fillWidth: true
-                      spacing: Style.space(2)
-
-                      RowLayout {
-                        spacing: Style.space(6)
-
-                        Text {
-                          text: modelData.name || modelData.id
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.body
-                          font.bold: isCurrent
-                          color: isCurrent ? root.accent : root.foreground
-                        }
-
-                        Rectangle {
-                          radius: Style.space(3)
-                          color: root.alpha(root.foreground, 0.08)
-                          implicitWidth: catText.implicitWidth + Style.space(6)
-                          implicitHeight: catText.implicitHeight + Style.space(2)
-
-                          Text {
-                            id: catText
-                            anchors.centerIn: parent
-                            text: modelData.category || modelData.provider
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.space(8)
-                            color: root.muted
-                          }
-                        }
-                      }
+                    RowLayout {
+                      id: modelRow
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.top: parent.top
+                      anchors.margins: Style.space(8)
+                      spacing: Style.space(10)
 
                       Text {
-                        text: modelData.id
-                        textFormat: Text.PlainText
-                        font.family: "JetBrainsMono Nerd Font"
-                        font.pixelSize: Style.space(10)
-                        color: root.dim
+                        text: isCurrent ? "󰄬" : "🐼"
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.icon
+                        color: isCurrent ? "#10B981" : root.muted
                       }
-                    }
 
-                    Button {
-                      text: isCurrent ? "Active" : "Select"
-                      selected: isCurrent
-                      onClicked: root.selectModel(modelData.id, modelData.provider)
+                      ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: Style.space(2)
+
+                        RowLayout {
+                          spacing: Style.space(6)
+
+                          Text {
+                            text: modelData.name || modelData.id
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.bold: isCurrent
+                            color: isCurrent ? root.accent : root.foreground
+                            elide: Text.ElideRight
+                          }
+                        }
+
+                        Text {
+                          text: modelData.id
+                          textFormat: Text.PlainText
+                          font.family: "JetBrainsMono Nerd Font"
+                          font.pixelSize: Style.space(10)
+                          color: root.dim
+                          elide: Text.ElideMiddle
+                          Layout.fillWidth: true
+                        }
+                      }
+
+                      Button {
+                        text: isCurrent ? "Active" : "Select"
+                        selected: isCurrent
+                        onClicked: root.selectModel(modelData.id, root.selectedProviderId)
+                      }
                     }
                   }
                 }

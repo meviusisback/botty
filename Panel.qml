@@ -706,14 +706,19 @@ Panel {
                   id: msgCard
                   anchors.left: isUser ? undefined : parent.left
                   anchors.right: isUser ? parent.right : undefined
-                  width: Math.min(parent.width * 0.94, Math.max(contentCol.implicitWidth + Style.space(20), Style.space(180)))
+                  anchors.leftMargin: isUser ? 0 : Style.space(4)
+                  anchors.rightMargin: isUser ? Style.space(4) : 0
+                  width: isUser ? Math.min(parent.width * 0.88, Math.max(contentCol.implicitWidth + Style.space(24), Style.space(140))) : (parent.width - Style.space(8))
+                  implicitHeight: contentCol.implicitHeight + Style.space(20)
                   radius: Style.space(10)
                   color: isUser ? root.alpha(root.accent, 0.12) : Color.layer(Color.surface, 1)
                   borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.1), root.accent)
 
                   ColumnLayout {
                     id: contentCol
-                    anchors.fill: parent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
                     anchors.margins: Style.space(10)
                     spacing: Style.space(6)
 
@@ -723,7 +728,7 @@ Panel {
                       spacing: Style.space(6)
 
                       Text {
-                        text: isUser ? "You" : "Botty"
+                        text: isUser ? "You" : "Botty 󰎲"
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         font.bold: true
@@ -787,72 +792,66 @@ Panel {
                       model: blocks
                       delegate: Item {
                         Layout.fillWidth: true
-                        implicitHeight: blockLoader.implicitHeight
+                        implicitHeight: modelData.type === "code" ? codeCard.implicitHeight : (textBlock.implicitHeight + Style.space(2))
 
-                        Loader {
-                          id: blockLoader
-                          anchors.fill: parent
-                          sourceComponent: modelData.type === "code" ? codeComponent : textComponent
+                        // Text / Markdown Block
+                        Text {
+                          id: textBlock
+                          visible: modelData.type !== "code"
+                          width: parent.width
+                          text: modelData.text || ""
+                          textFormat: Text.MarkdownText
+                          wrapMode: Text.Wrap
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                          color: root.foreground
+                          linkColor: root.accent
+                          onLinkActivated: function(link) { Qt.openUrlExternally(link) }
                         }
 
-                        // Component for Text / Markdown
-                        Component {
-                          id: textComponent
-                          Text {
-                            text: modelData.text || ""
-                            textFormat: Text.MarkdownText
-                            wrapMode: Text.Wrap
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            color: root.foreground
-                            linkColor: root.accent
-                            onLinkActivated: function(link) { Qt.openUrlExternally(link) }
-                          }
-                        }
+                        // Code Block
+                        BorderSurface {
+                          id: codeCard
+                          visible: modelData.type === "code"
+                          width: parent.width
+                          radius: Style.space(6)
+                          color: Color.layer(Color.surface, 2)
+                          borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
 
-                        // Component for Code Blocks with Syntax Styling & Copy
-                        Component {
-                          id: codeComponent
-                          BorderSurface {
-                            radius: Style.space(6)
-                            color: Color.layer(Color.surface, 2)
-                            borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
+                          ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: Style.space(8)
+                            spacing: Style.space(4)
 
-                            ColumnLayout {
-                              anchors.fill: parent
-                              anchors.margins: Style.space(6)
-                              spacing: Style.space(4)
-
-                              // Code header
-                              RowLayout {
-                                Layout.fillWidth: true
-                                Text {
-                                  text: (modelData.language || "code").toUpperCase()
-                                  font.family: "JetBrainsMono Nerd Font"
-                                  font.pixelSize: Style.space(9)
-                                  font.bold: true
-                                  color: root.accent
-                                }
-                                Item { Layout.fillWidth: true }
-                                Button {
-                                  iconText: "󰆏"
-                                  text: "Copy"
-                                  fontSize: Style.space(10)
-                                  implicitHeight: Style.space(22)
-                                  onClicked: root.copyText(modelData.code)
-                                }
-                              }
-
-                              // Code content
+                            // Code header
+                            RowLayout {
+                              Layout.fillWidth: true
                               Text {
-                                text: modelData.code || ""
-                                textFormat: Text.PlainText
+                                text: (modelData.language || "CODE").toUpperCase()
                                 font.family: "JetBrainsMono Nerd Font"
-                                font.pixelSize: Style.space(11)
-                                color: root.foreground
-                                wrapMode: Text.Wrap
-                                Layout.fillWidth: true
+                                font.pixelSize: Style.space(9)
+                                font.bold: true
+                                color: root.accent
                               }
+                              Item { Layout.fillWidth: true }
+                              Button {
+                                iconText: "󰆏"
+                                text: "Copy"
+                                fontSize: Style.space(10)
+                                implicitHeight: Style.space(22)
+                                onClicked: root.copyText(modelData.code)
+                              }
+                            }
+
+                            // Code content
+                            Text {
+                              text: modelData.code || ""
+                              textFormat: Text.PlainText
+                              font.family: "JetBrainsMono Nerd Font"
+                              font.pixelSize: Style.space(11)
+                              color: root.foreground
+                              wrapMode: Text.Wrap
+                              Layout.fillWidth: true
                             }
                           }
                         }

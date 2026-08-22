@@ -321,19 +321,21 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
         win_class = win.get("class", "")
         ocr_text = captured_context.get("ocr_text", "")
         
-        prompt_parts.append("[SCREEN CONTEXT]")
+        prompt_parts.append("[ACTIVE WINDOW CONTEXT]")
         if win_title or win_class:
-            prompt_parts.append(f"Active Application: {win_class} - {win_title}")
+            prompt_parts.append(f"Application: {win_class} | Window Title: {win_title}")
         if ocr_text:
-            prompt_parts.append(f"Visible Text on Screen:\n{ocr_text}")
-        prompt_parts.append("[END SCREEN CONTEXT]\n")
+            clean_lines = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
+            if clean_lines:
+                prompt_parts.append("Visible Text Extracted:\n" + "\n".join(clean_lines[:30]))
+        prompt_parts.append("[END CONTEXT]\n")
 
-    prompt_parts.append(query if query.strip() else "Please analyze the attached image/screen context.")
+    user_query = query.strip() if query.strip() else "Analyze the active window context."
+    prompt_parts.append(f"User Request: {user_query}")
     final_prompt = "\n".join(prompt_parts)
 
     # Save user message to history
-    add_history_message("user", query or "Analyze attached screen/media", attachments=attachments)
-
+    add_history_message("user", user_query, attachments=attachments)
     # Save query to temporary file to avoid shell escaping issues
     query_tmp = BOTTY_DATA_DIR / "current_query.txt"
     query_tmp.write_text(final_prompt, encoding="utf-8")

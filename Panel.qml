@@ -647,7 +647,7 @@ Panel {
     bar: root.bar
     owner: root
     open: root.opened
-    contentWidth: Style.space(520)
+    contentWidth: Style.space(560)
     contentHeight: Style.space(680)
 
     onOpenChanged: {
@@ -1553,17 +1553,18 @@ Panel {
               color: root.accent
             }
 
-            RowLayout {
+            Flow {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
               Repeater {
                 model: settingsViewItem.allEngines
                 delegate: Button {
-                  text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.name || modelData.id)
+                  text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.id === "hermes" ? "Hermes (Botty)" : (modelData.id === "omp" ? "OMP" : (modelData.id === "claude" ? "Claude" : "Codex")))
+                  tooltipText: modelData.name + " (" + modelData.desc + ")"
                   fontSize: Style.space(11)
                   selected: modelData.id === (root.rawStatus.active_engine || "hermes")
-                  implicitHeight: Style.space(30)
+                  implicitHeight: Style.space(28)
                   onClicked: root.selectEngine(modelData.id)
                 }
               }
@@ -1585,26 +1586,20 @@ Panel {
               color: root.accent
             }
 
-            ScrollView {
+            Flow {
               Layout.fillWidth: true
-              implicitHeight: Style.space(36)
-              ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-              ScrollBar.vertical.policy: ScrollBar.AlwaysOff
+              spacing: Style.space(6)
 
-              RowLayout {
-                spacing: Style.space(6)
-
-                Repeater {
-                  model: settingsViewItem.allProviders
-                  delegate: Button {
-                    text: modelData.name || modelData.id
-                    fontSize: Style.space(11)
-                    selected: modelData.id === root.selectedProviderId
-                    implicitHeight: Style.space(28)
-                    onClicked: {
-                      root.selectedProviderId = modelData.id
-                      root.modelSearchFilter = ""
-                    }
+              Repeater {
+                model: settingsViewItem.allProviders
+                delegate: Button {
+                  text: modelData.name || modelData.id
+                  fontSize: Style.space(11)
+                  selected: modelData.id === root.selectedProviderId
+                  implicitHeight: Style.space(28)
+                  onClicked: {
+                    root.selectedProviderId = modelData.id
+                    root.modelSearchFilter = ""
                   }
                 }
               }
@@ -1660,7 +1655,9 @@ Panel {
                     id: modelCard
                     anchors.left: parent.left
                     anchors.right: parent.right
-                    implicitHeight: modelRow.implicitHeight + Style.space(16)
+                    anchors.leftMargin: Style.space(2)
+                    anchors.rightMargin: Style.space(2)
+                    implicitHeight: modelRow.implicitHeight + Style.space(14)
                     radius: Style.space(8)
                     color: isCurrent ? root.alpha(root.accent, 0.15) : root.alpha(root.foreground, 0.04)
                     borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
@@ -1670,8 +1667,8 @@ Panel {
                       anchors.left: parent.left
                       anchors.right: parent.right
                       anchors.top: parent.top
-                      anchors.margins: Style.space(8)
-                      spacing: Style.space(10)
+                      anchors.margins: Style.space(7)
+                      spacing: Style.space(8)
 
                       Text {
                         text: isCurrent ? "󰄬" : "🐼"
@@ -1684,17 +1681,14 @@ Panel {
                         Layout.fillWidth: true
                         spacing: Style.space(2)
 
-                        RowLayout {
-                          spacing: Style.space(6)
-
-                          Text {
-                            text: modelData.name || modelData.id
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            font.bold: isCurrent
-                            color: isCurrent ? root.accent : root.foreground
-                            elide: Text.ElideRight
-                          }
+                        Text {
+                          text: modelData.name || modelData.id
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                          font.bold: isCurrent
+                          color: isCurrent ? root.accent : root.foreground
+                          elide: Text.ElideRight
+                          Layout.fillWidth: true
                         }
 
                         Text {
@@ -1703,7 +1697,7 @@ Panel {
                           font.family: "JetBrainsMono Nerd Font"
                           font.pixelSize: Style.space(10)
                           color: root.dim
-                          elide: Text.ElideMiddle
+                          elide: Text.ElideRight
                           Layout.fillWidth: true
                         }
                       }
@@ -1711,6 +1705,8 @@ Panel {
                       Button {
                         text: isCurrent ? "Active" : "Select"
                         selected: isCurrent
+                        implicitHeight: Style.space(26)
+                        fontSize: Style.space(10)
                         onClicked: root.selectModel(modelData.id, root.selectedProviderId)
                       }
                     }

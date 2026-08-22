@@ -3,8 +3,8 @@
 botty_backend.py - Native backend for Botty Omarchy bar widget and desktop assistant.
 Standard-library only. Interfaces with Hermes Agent profile "botty", OMP, Claude, and other agents,
 captures screen context, attaches any file/document/media, manages conversation history,
-handles model & provider selection, continuous learning, memory deletion, voice dictation,
-out-of-process floating file picker, and local AES-256 encrypted memory vault management.
+handles dynamic per-engine model & provider selection, continuous learning, memory deletion,
+voice dictation, out-of-process floating file picker, and local AES-256 encrypted memory vault management.
 """
 
 import sys
@@ -96,10 +96,6 @@ def save_json_file(path: Path, data: Any) -> None:
 # ── Out-of-Process File Picker ─────────────────────────────────────────────────
 
 def pick_file_dialog() -> Dict[str, Any]:
-    """
-    Opens a native floating GTK3 file chooser dialog out-of-process.
-    Completely isolates Quickshell from in-process glib/GIO DBus assertions.
-    """
     try:
         import gi
         gi.require_version("Gtk", "3.0")
@@ -264,23 +260,25 @@ def set_active_engine(engine: str) -> Dict[str, Any]:
     cfg = load_json_file(CONFIG_FILE, {"agent_engine": "hermes"})
     cfg["agent_engine"] = engine
     save_json_file(CONFIG_FILE, cfg)
-    set_status(get_status().get("state", "idle"), headline=f"Agent engine: {engine.upper()}")
-    return {"ok": True, "active_engine": engine}
+    
+    current_model = get_active_model_for_engine(engine)
+    set_status(get_status().get("state", "idle"), headline=f"Agent: {engine.upper()} ({current_model.get('model', '')})")
+    return {"ok": True, "active_engine": engine, "active_model": current_model.get("model", ""), "active_provider": current_model.get("provider", "")}
 
 def get_agent_engines() -> Dict[str, Any]:
     current_engine = get_active_engine()
     engines = [
         {
             "id": "hermes",
-            "name": "Hermes Agent (Botty)",
-            "desc": "Persistent assistant with desktop screen awareness, memory, skills & multi-model support",
+            "name": "Hermes (Botty)",
+            "desc": "Persistent desktop assistant with screen awareness, memory, skills & multi-model support",
             "icon": "🐼",
             "available": bool(shutil.which("hermes"))
         },
         {
             "id": "omp",
             "name": "OMP (Oh My Pi)",
-            "desc": "Coding harness & parallel subagent orchestrator",
+            "desc": "High-speed parallel coding harness and orchestrator",
             "icon": "󰘦",
             "available": bool(shutil.which("omp"))
         },
@@ -305,25 +303,39 @@ def get_agent_engines() -> Dict[str, Any]:
         "engines": engines
     }
 
-def get_active_model() -> Dict[str, str]:
-    if not HERMES_CONFIG_FILE.exists():
-        return {"model": "ox-alpha-free", "provider": "opencode-go"}
-    try:
-        with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-        model_match = re.search(r"model:\s*\n\s*default:\s*([^\n]+)", content)
-        provider_match = re.search(r"model:\s*\n(?:[^\n]+\n)*?\s*provider:\s*([^\n]+)", content)
-        model = model_match.group(1).strip() if model_match else "ox-alpha-free"
-        provider = provider_match.group(1).strip() if provider_match else "opencode-go"
-        model = model.strip("'\"")
-        provider = provider.strip("'\"")
-        return {"model": model, "provider": provider}
-    except Exception:
-        return {"model": "ox-alpha-free", "provider": "opencode-go"}
+def get_active_model_for_engine(engine: Optional[str] = None) -> Dict[str, str]:
+    """Reads the active model and provider for the specified engine."""
+    eng = engine or get_active_engine()
+    cfg = load_json_file(CONFIG_FILE, {})
+    engine_models = cfg.get("engine_models", {})
+
+    if eng == "hermes":
+        if not HERMES_CONFIG_FILE.exists():
+            return {"model": "ox-alpha-free", "provider": "opencode-go"}
+        try:
+            with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
+                content = f.read()
+            model_match = re.search(r"model:\s*\n\s*default:\s*([^\n]+)", content)
+            provider_match = re.search(r"model:\s*\n(?:[^\n]+\n)*?\s*provider:\s*([^\n]+)", content)
+            model = model_match.group(1).strip() if model_match else "ox-alpha-free"
+            provider = provider_match.group(1).strip() if provider_match else "opencode-go"
+            model = model.strip("'\"")
+            provider = provider.strip("'\"")
+            return {"model": model, "provider": provider}
+        except Exception:
+            return {"model": "ox-alpha-free", "provider": "opencode-go"}
+    elif eng == "omp":
+        return engine_models.get("omp", {"model": "google/gemini-3.7-flash", "provider": "google"})
+    elif eng == "claude":
+        return engine_models.get("claude", {"model": "claude-3-7-sonnet", "provider": "anthropic"})
+    elif eng == "codex":
+        return engine_models.get("codex", {"model": "gpt-4o", "provider": "openai"})
+    
+    return {"model": "default", "provider": "auto"}
 
 def get_status() -> Dict[str, Any]:
-    active_m = get_active_model()
     active_eng = get_active_engine()
+    active_m = get_active_model_for_engine(active_eng)
     default_status = {
         "ok": True,
         "state": "idle",
@@ -332,8 +344,8 @@ def get_status() -> Dict[str, Any]:
         "last_answer": "",
         "last_error": "",
         "active_engine": active_eng,
-        "active_model": active_m["model"],
-        "active_provider": active_m["provider"],
+        "active_model": active_m.get("model", "ox-alpha-free"),
+        "active_provider": active_m.get("provider", "opencode-go"),
         "session_turns": 0,
         "memory_count": count_memories(),
         "skills_count": count_skills(),
@@ -343,6 +355,8 @@ def get_status() -> Dict[str, Any]:
     }
     status = load_json_file(STATUS_FILE, default_status)
     status["active_engine"] = active_eng
+    status["active_model"] = active_m.get("model", "ox-alpha-free")
+    status["active_provider"] = active_m.get("provider", "opencode-go")
     status["is_recording"] = VOICE_PID_FILE.exists()
     
     if LOCK_FILE.exists():
@@ -374,10 +388,11 @@ def set_status(state: str, headline: str = "", last_query: str = "", last_answer
     if last_error:
         current["last_error"] = last_error
     current["timestamp"] = int(time.time())
-    active = get_active_model()
-    current["active_engine"] = get_active_engine()
-    current["active_model"] = active["model"]
-    current["active_provider"] = active["provider"]
+    active_eng = get_active_engine()
+    active_m = get_active_model_for_engine(active_eng)
+    current["active_engine"] = active_eng
+    current["active_model"] = active_m.get("model", "")
+    current["active_provider"] = active_m.get("provider", "")
     current["memory_count"] = count_memories()
     current["skills_count"] = count_skills()
     current["is_recording"] = VOICE_PID_FILE.exists()
@@ -581,14 +596,25 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     query_tmp.write_text(final_prompt, encoding="utf-8")
 
     engine = get_active_engine()
+    active_m = get_active_model_for_engine(engine)
+    selected_model = model or active_m.get("model", "")
     cmd = []
 
     if engine == "omp":
-        cmd = ["omp", "-p", "--allow-home", final_prompt]
+        cmd = ["omp", "-p", "--allow-home"]
+        if selected_model:
+            cmd.extend(["--model", selected_model])
+        cmd.append(final_prompt)
     elif engine == "claude":
-        cmd = ["claude", "-p", final_prompt]
+        cmd = ["claude", "-p"]
+        if selected_model:
+            cmd.extend(["--model", selected_model])
+        cmd.append(final_prompt)
     elif engine == "codex":
-        cmd = ["codex", "exec", final_prompt]
+        cmd = ["codex", "exec"]
+        if selected_model:
+            cmd.extend(["--model", selected_model])
+        cmd.append(final_prompt)
     else:
         cmd = [
             "hermes",
@@ -602,8 +628,8 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         ]
         if target_image and os.path.exists(target_image):
             cmd.extend(["--image", target_image])
-        if model:
-            cmd.extend(["-m", model])
+        if selected_model:
+            cmd.extend(["-m", selected_model])
         if provider:
             cmd.extend(["--provider", provider])
 
@@ -669,153 +695,261 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         LOCK_FILE.unlink(missing_ok=True)
         query_tmp.unlink(missing_ok=True)
 
-# ── Providers & Models Discovery (Active Key Filtered) ──────────────────────────
+# ── Dynamic Per-Engine Models & Providers Discovery ────────────────────────────
 
-def get_active_configured_providers() -> Dict[str, Any]:
-    active = get_active_model()
-    
-    env_files = [HERMES_BOTTY_DIR / ".env", HERMES_DIR / ".env"]
-    env_vars: Dict[str, str] = {}
-    for ef in env_files:
-        if ef.exists():
-            for line in ef.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    v = v.strip().strip("\"'")
-                    if len(v) > 3 and not v.startswith("REDACTED"):
-                        env_vars[k.strip()] = v
+def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, Any]:
+    """Returns dynamic provider and model choices based strictly on the selected agent engine."""
+    engine = engine_name or get_active_engine()
+    active_m = get_active_model_for_engine(engine)
 
-    active_provider_ids = set()
-    if "OPENCODE_GO_API_KEY" in env_vars:
-        active_provider_ids.add("opencode-go")
-        active_provider_ids.add("opencode-free")
-    if "OPENCODE_ZEN_API_KEY" in env_vars:
-        active_provider_ids.add("opencode-zen")
-    if "OPENROUTER_API_KEY" in env_vars:
-        active_provider_ids.add("openrouter")
-    if "ANTHROPIC_API_KEY" in env_vars:
-        active_provider_ids.add("anthropic")
-    if "OPENAI_API_KEY" in env_vars:
-        active_provider_ids.add("openai")
-    if "GEMINI_API_KEY" in env_vars or "GOOGLE_API_KEY" in env_vars:
-        active_provider_ids.add("google")
-    if "GLM_API_KEY" in env_vars:
-        active_provider_ids.add("z.ai")
-    if "KIMI_API_KEY" in env_vars:
-        active_provider_ids.add("kimi")
-    if "MINIMAX_API_KEY" in env_vars:
-        active_provider_ids.add("minimax")
-    if "GROQ_API_KEY" in env_vars:
-        active_provider_ids.add("groq")
-    if "NOVITA_API_KEY" in env_vars:
-        active_provider_ids.add("novita")
-    if "FIREWORKS_API_KEY" in env_vars:
-        active_provider_ids.add("fireworks")
-    if "DEEPINFRA_API_KEY" in env_vars:
-        active_provider_ids.add("deepinfra")
+    if engine == "hermes":
+        # 1. Scan Hermes .env files for populated keys
+        env_files = [HERMES_BOTTY_DIR / ".env", HERMES_DIR / ".env"]
+        env_vars: Dict[str, str] = {}
+        for ef in env_files:
+            if ef.exists():
+                for line in ef.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        v = v.strip().strip("\"'")
+                        if len(v) > 3 and not v.startswith("REDACTED"):
+                            env_vars[k.strip()] = v
 
-    if HERMES_CONFIG_FILE.exists():
-        try:
-            cfg_text = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
-            if "ollama:" in cfg_text:
-                active_provider_ids.add("ollama")
-        except Exception:
-            pass
+        active_provider_ids = set()
+        if "OPENCODE_GO_API_KEY" in env_vars:
+            active_provider_ids.add("opencode-go")
+            active_provider_ids.add("opencode-free")
+        if "OPENCODE_ZEN_API_KEY" in env_vars:
+            active_provider_ids.add("opencode-zen")
+        if "OPENROUTER_API_KEY" in env_vars:
+            active_provider_ids.add("openrouter")
+        if "ANTHROPIC_API_KEY" in env_vars:
+            active_provider_ids.add("anthropic")
+        if "OPENAI_API_KEY" in env_vars:
+            active_provider_ids.add("openai")
+        if "GEMINI_API_KEY" in env_vars or "GOOGLE_API_KEY" in env_vars:
+            active_provider_ids.add("google")
+        if "GLM_API_KEY" in env_vars:
+            active_provider_ids.add("z.ai")
+        if "KIMI_API_KEY" in env_vars:
+            active_provider_ids.add("kimi")
+        if "MINIMAX_API_KEY" in env_vars:
+            active_provider_ids.add("minimax")
+        if "GROQ_API_KEY" in env_vars:
+            active_provider_ids.add("groq")
+        if "NOVITA_API_KEY" in env_vars:
+            active_provider_ids.add("novita")
+        if "FIREWORKS_API_KEY" in env_vars:
+            active_provider_ids.add("fireworks")
+        if "DEEPINFRA_API_KEY" in env_vars:
+            active_provider_ids.add("deepinfra")
 
-    p_cache_file = HERMES_DIR / "provider_models_cache.json"
-    p_data: Dict[str, Any] = {}
-    if p_cache_file.exists():
-        try:
-            with open(p_cache_file, "r", encoding="utf-8") as f:
-                p_data = json.load(f)
-        except Exception:
-            pass
+        if HERMES_CONFIG_FILE.exists():
+            try:
+                cfg_text = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
+                if "ollama:" in cfg_text:
+                    active_provider_ids.add("ollama")
+            except Exception:
+                pass
 
-    if active.get("provider"):
-        active_provider_ids.add(active["provider"])
+        p_cache_file = HERMES_DIR / "provider_models_cache.json"
+        p_data: Dict[str, Any] = {}
+        if p_cache_file.exists():
+            try:
+                with open(p_cache_file, "r", encoding="utf-8") as f:
+                    p_data = json.load(f)
+            except Exception:
+                pass
 
-    providers_dict: Dict[str, Dict[str, Any]] = {}
+        if active_m.get("provider"):
+            active_provider_ids.add(active_m["provider"])
 
-    for p_id in active_provider_ids:
-        p_name = p_id.replace("-", " ").title()
-        models_list = []
+        providers_dict: Dict[str, Dict[str, Any]] = {}
 
-        if p_id in p_data:
-            for m in p_data[p_id].get("models", []):
-                name = m.split("/")[-1].replace("-", " ").title() if "/" in m else m
-                models_list.append({"id": m, "name": name})
+        for p_id in active_provider_ids:
+            p_name = p_id.replace("-", " ").title()
+            models_list = []
 
-        if p_id == "opencode-go" and not models_list:
-            models_list = [
-                {"id": "ox-alpha-free", "name": "OpenCode Alpha Free"},
-                {"id": "kimi-k2.5", "name": "Kimi K2.5"},
-                {"id": "glm-5", "name": "GLM-5"},
-                {"id": "minimax-m2.5", "name": "MiniMax M2.5"}
-            ]
-        elif p_id == "ollama" and not models_list:
-            models_list = [
-                {"id": "ornith:latest", "name": "Ornith / Llama (Local)"},
-                {"id": "ornith:9b", "name": "Ornith 9B"}
-            ]
+            if p_id in p_data:
+                for m in p_data[p_id].get("models", []):
+                    name = m.split("/")[-1].replace("-", " ").title() if "/" in m else m
+                    models_list.append({"id": m, "name": name})
 
-        if models_list or p_id in active_provider_ids:
-            providers_dict[p_id] = {
-                "id": p_id,
-                "name": p_name,
-                "models": models_list
+            if p_id == "opencode-go" and not models_list:
+                models_list = [
+                    {"id": "ox-alpha-free", "name": "OpenCode Alpha Free"},
+                    {"id": "kimi-k2.5", "name": "Kimi K2.5"},
+                    {"id": "glm-5", "name": "GLM-5"},
+                    {"id": "minimax-m2.5", "name": "MiniMax M2.5"}
+                ]
+            elif p_id == "ollama" and not models_list:
+                models_list = [
+                    {"id": "ornith:latest", "name": "Ornith / Llama (Local)"},
+                    {"id": "ornith:9b", "name": "Ornith 9B"}
+                ]
+
+            if models_list or p_id in active_provider_ids:
+                providers_dict[p_id] = {
+                    "id": p_id,
+                    "name": p_name,
+                    "models": models_list
+                }
+
+        sorted_providers = []
+        priority = ["opencode-go", "openrouter", "opencode-free", "ollama", "google", "anthropic", "openai"]
+        for p in priority:
+            if p in providers_dict:
+                sorted_providers.append(providers_dict.pop(p))
+        for p in sorted(providers_dict.keys()):
+            sorted_providers.append(providers_dict[p])
+
+        return {
+            "ok": True,
+            "engine": "hermes",
+            "active_engine": "hermes",
+            "active_model": active_m.get("model", "ox-alpha-free"),
+            "active_provider": active_m.get("provider", "opencode-go"),
+            "providers": sorted_providers
+        }
+
+    elif engine == "omp":
+        omp_providers = [
+            {
+                "id": "google",
+                "name": "Google",
+                "models": [
+                    {"id": "google/gemini-3.7-flash", "name": "Gemini 3.7 Flash (Default)"},
+                    {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+                    {"id": "google-antigravity/gemini-3.7-flash", "name": "Gemini 3.7 Flash (Antigravity)"}
+                ]
+            },
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "models": [
+                    {"id": "anthropic/claude-3-7-sonnet", "name": "Claude 3.7 Sonnet"},
+                    {"id": "anthropic/claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
+                    {"id": "anthropic/claude-3-5-haiku", "name": "Claude 3.5 Haiku"}
+                ]
+            },
+            {
+                "id": "openai",
+                "name": "OpenAI",
+                "models": [
+                    {"id": "openai/gpt-4o", "name": "GPT-4o"},
+                    {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"},
+                    {"id": "openai/o3-mini", "name": "o3-mini (Reasoning)"},
+                    {"id": "openai/o1", "name": "o1 (Reasoning)"}
+                ]
+            },
+            {
+                "id": "deepseek",
+                "name": "DeepSeek",
+                "models": [
+                    {"id": "deepseek/deepseek-chat", "name": "DeepSeek V3"},
+                    {"id": "deepseek/deepseek-reasoner", "name": "DeepSeek R1"}
+                ]
+            },
+            {
+                "id": "qwen",
+                "name": "Qwen",
+                "models": [
+                    {"id": "qwen/qwen-2.5-coder-32b-instruct", "name": "Qwen 2.5 Coder 32B"}
+                ]
             }
+        ]
+        return {
+            "ok": True,
+            "engine": "omp",
+            "active_engine": "omp",
+            "active_model": active_m.get("model", "google/gemini-3.7-flash"),
+            "active_provider": active_m.get("provider", "google"),
+            "providers": omp_providers
+        }
 
-    sorted_providers = []
-    priority = ["opencode-go", "openrouter", "opencode-free", "ollama", "google", "anthropic", "openai"]
-    for p in priority:
-        if p in providers_dict:
-            sorted_providers.append(providers_dict.pop(p))
-    for p in sorted(providers_dict.keys()):
-        sorted_providers.append(providers_dict[p])
+    elif engine == "claude":
+        claude_providers = [
+            {
+                "id": "anthropic",
+                "name": "Anthropic",
+                "models": [
+                    {"id": "claude-3-7-sonnet", "name": "Claude 3.7 Sonnet (Default)"},
+                    {"id": "claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
+                    {"id": "claude-3-5-haiku", "name": "Claude 3.5 Haiku"},
+                    {"id": "claude-3-opus", "name": "Claude 3 Opus"}
+                ]
+            }
+        ]
+        return {
+            "ok": True,
+            "engine": "claude",
+            "active_engine": "claude",
+            "active_model": active_m.get("model", "claude-3-7-sonnet"),
+            "active_provider": active_m.get("provider", "anthropic"),
+            "providers": claude_providers
+        }
 
-    return {
-        "ok": True,
-        "active_engine": get_active_engine(),
-        "active_model": active["model"],
-        "active_provider": active["provider"],
-        "providers": sorted_providers
-    }
+    elif engine == "codex":
+        codex_providers = [
+            {
+                "id": "openai",
+                "name": "OpenAI",
+                "models": [
+                    {"id": "gpt-4o", "name": "GPT-4o (Default)"},
+                    {"id": "gpt-4o-mini", "name": "GPT-4o Mini"},
+                    {"id": "o3-mini", "name": "o3-mini (Reasoning)"},
+                    {"id": "o1", "name": "o1 (Reasoning)"},
+                    {"id": "gpt-4-turbo", "name": "GPT-4 Turbo"}
+                ]
+            }
+        ]
+        return {
+            "ok": True,
+            "engine": "codex",
+            "active_engine": "codex",
+            "active_model": active_m.get("model", "gpt-4o"),
+            "active_provider": active_m.get("provider", "openai"),
+            "providers": codex_providers
+        }
 
-def set_model(model_id: str, provider_id: Optional[str] = None) -> Dict[str, Any]:
-    if not HERMES_CONFIG_FILE.exists():
-        return {"ok": False, "error": f"Config file not found: {HERMES_CONFIG_FILE}"}
-    
+    return {"ok": False, "error": f"Unknown engine {engine}"}
+
+def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Optional[str] = None) -> Dict[str, Any]:
+    engine = engine_name or get_active_engine()
+    cfg = load_json_file(CONFIG_FILE, {"agent_engine": engine, "engine_models": {}})
+    if "engine_models" not in cfg:
+        cfg["engine_models"] = {}
+
     if not provider_id:
         if "/" in model_id:
-            provider_id = "openrouter"
-        elif ":" in model_id:
-            provider_id = "ollama"
+            provider_id = model_id.split("/")[0]
         else:
-            provider_id = "opencode-go"
+            provider_id = "default"
 
-    try:
-        with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
+    cfg["engine_models"][engine] = {"model": model_id, "provider": provider_id}
+    save_json_file(CONFIG_FILE, cfg)
 
-        new_content = re.sub(
-            r"(model:\s*\n\s*default:\s*)[^\n]+",
-            rf"\g<1>{model_id}",
-            content
-        )
-        new_content = re.sub(
-            r"(model:\s*\n(?:[^\n]+\n)*?\s*provider:\s*)[^\n]+",
-            rf"\g<1>{provider_id}",
-            new_content
-        )
+    if engine == "hermes":
+        if HERMES_CONFIG_FILE.exists():
+            try:
+                content = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
+                new_content = re.sub(
+                    r"(model:\s*\n\s*default:\s*)[^\n]+",
+                    rf"\g<1>{model_id}",
+                    content
+                )
+                new_content = re.sub(
+                    r"(model:\s*\n(?:[^\n]+\n)*?\s*provider:\s*)[^\n]+",
+                    rf"\g<1>{provider_id}",
+                    new_content
+                )
+                HERMES_CONFIG_FILE.write_text(new_content, encoding="utf-8")
+            except Exception as e:
+                return {"ok": False, "error": f"Failed to set Hermes model: {str(e)}"}
 
-        with open(HERMES_CONFIG_FILE, "w", encoding="utf-8") as f:
-            f.write(new_content)
-
-        set_status(get_status().get("state", "idle"), headline=f"Model: {model_id}")
-        return {"ok": True, "model": model_id, "provider": provider_id}
-    except Exception as e:
-        return {"ok": False, "error": f"Failed to set model: {str(e)}"}
+    set_status(get_status().get("state", "idle"), headline=f"{engine.upper()}: {model_id}")
+    return {"ok": True, "engine": engine, "model": model_id, "provider": provider_id}
 
 # ── Voice Dictation ────────────────────────────────────────────────────────────
 
@@ -1068,11 +1202,14 @@ def main():
 
     subparsers.add_parser("history", help="Get conversation history")
     subparsers.add_parser("clear", help="Clear conversation history")
-    subparsers.add_parser("models", help="List active providers and models")
     
-    set_m = subparsers.add_parser("set-model", help="Set active model")
+    models_p = subparsers.add_parser("models", help="List active providers and models for an engine")
+    models_p.add_argument("--engine", dest="engine", default=None, help="Agent engine name (hermes, omp, claude, codex)")
+    
+    set_m = subparsers.add_parser("set-model", help="Set active model for engine")
     set_m.add_argument("model", help="Model identifier")
     set_m.add_argument("--provider", dest="provider", default=None, help="Provider name")
+    set_m.add_argument("--engine", dest="engine", default=None, help="Engine name")
 
     subparsers.add_parser("engines", help="List available agent engines")
     set_e = subparsers.add_parser("set-engine", help="Set active agent engine (hermes, omp, claude, codex)")
@@ -1126,9 +1263,9 @@ def main():
     elif args.command == "clear":
         print(json.dumps(clear_history(), ensure_ascii=False))
     elif args.command == "models":
-        print(json.dumps(get_active_configured_providers(), ensure_ascii=False))
+        print(json.dumps(get_dynamic_engine_models(args.engine), ensure_ascii=False))
     elif args.command == "set-model":
-        print(json.dumps(set_model(args.model, args.provider), ensure_ascii=False))
+        print(json.dumps(set_model(args.model, args.provider, args.engine), ensure_ascii=False))
     elif args.command == "engines":
         print(json.dumps(get_agent_engines(), ensure_ascii=False))
     elif args.command == "set-engine":

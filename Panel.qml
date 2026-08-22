@@ -97,7 +97,9 @@ Panel {
     }
   }
 
-  function fetchModels() {
+  function fetchModels(engine) {
+    var eng = engine || root.rawStatus.active_engine || "hermes"
+    modelsProc.command = ["python3", root.scriptPath(), "models", "--engine", eng]
     if (!modelsProc.running) {
       modelsProc.running = true
     }
@@ -183,12 +185,14 @@ Panel {
   }
 
   function selectEngine(engineId) {
+    root.rawStatus.active_engine = engineId
     setEngineProc.command = ["python3", root.scriptPath(), "set-engine", engineId]
     setEngineProc.running = true
   }
 
   function selectModel(modelId, providerId) {
-    var cmd = ["python3", root.scriptPath(), "set-model", modelId]
+    var eng = root.rawStatus.active_engine || "hermes"
+    var cmd = ["python3", root.scriptPath(), "set-model", modelId, "--engine", eng]
     if (providerId) {
       cmd.push("--provider")
       cmd.push(providerId)
@@ -459,14 +463,14 @@ Panel {
       waitForEnd: true
       onStreamFinished: {
         root.fetchStatus()
-        root.fetchModels()
+        root.fetchModels(root.rawStatus.active_engine)
       }
     }
   }
 
   Process {
     id: modelsProc
-    command: ["python3", root.scriptPath(), "models"]
+    command: ["python3", root.scriptPath(), "models", "--engine", (root.rawStatus.active_engine || "hermes")]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -478,6 +482,8 @@ Panel {
             root.rawStatus.active_provider = data.active_provider
             if (data.active_provider) {
               root.selectedProviderId = data.active_provider
+            } else if (data.providers && data.providers.length > 0) {
+              root.selectedProviderId = data.providers[0].id
             }
           }
         } catch (e) {}

@@ -1,6 +1,6 @@
 # Botty — Omarchy Desktop Agent Assistant Bar Widget
 
-**Botty** is an interactive, native Omarchy bar widget and desktop assistant powered by the Hermes Agent profile `botty`. It integrates directly into your top bar to provide instant screen awareness, multimodal media understanding, persistent memory, continuous learning, model switching, and desktop automation actions.
+**Botty** is an interactive, native Omarchy bar widget and desktop assistant powered by the Hermes Agent profile `botty`, with support for OMP, Claude Code, and Codex. It integrates directly into your top bar to provide instant ambient screen awareness, universal file & document context, persistent memory, continuous learning, model switching, and desktop automation actions.
 
 ![Botty Preview](preview.png)
 
@@ -8,27 +8,29 @@
 
 ## ✨ Features
 
-- 󰚩 **Native Omarchy Bar Widget**: Status-aware bar icon that indicates live state:
-  - **Thinking / Processing**: Animated pulsing accent spinner (`󰑐`).
-  - **Waiting / Prompt**: Amber indicator (`󰌵`).
+- 🐼 **Native Omarchy Bar Widget**: Status-aware bar icon that indicates live state:
+  - **Ready / Done**: Steady Panda glyph (`🐼`) in theme foreground.
+  - **Thinking / Processing**: Animated pulsing spinner (`󰑐`) in accent blue.
+  - **Prompt / Waiting**: Amber lightbulb / prompt indicator (`󰌵`).
   - **Error / Alert**: Urgent red glyph (`󰅚`).
-  - **Ready / Done**: Theme foreground robot glyph (`󰚩`).
-- 󰹑 **Live Screen Awareness**: Automatically captures active Hyprland windows, extracts OCR text, and injects visual context into queries with one click.
-- 󰋩 **Multimodal Media Support**: Attach screenshots, images, or clipboard visuals (`wl-paste`) for visual reasoning and troubleshooting.
-- 󰭹 **Graphical Response Rendering**:
-  - Concise answers without chain-of-thought bloat.
-  - Native Markdown text formatting (bold, headers, bullet lists).
-  - Monospaced code blocks with syntax badges and one-click **Copy** button.
-  - Computer action execution receipts and memory badges.
-- 󰒓 **Dynamic Model Switching**: Switch the underlying LLM directly from the widget (OpenCode Go, Claude 3.7 Sonnet, GPT-4o / 5.5, Gemini 2.0 / 3.7 Flash, DeepSeek V3, or local Ollama).
-- 󰋚 **Continuous Learning & Persistent Memory**:
-  - Automatically compacts and distills conversation learnings into long-term memory (`MEMORY.md` / `USER.md`).
-  - Create and inspect custom Hermes skills.
-- 󰘦 **Desktop Actions**: Executes terminal commands, file modifications, and Hyprland workspace / window operations directly on your Omarchy system.
+- 󰹑 **Ambient Visual Screen Awareness**: Captures active Hyprland windows and attaches visual screenshots directly for multimodal models (zero raw OCR dump clutter).
+- 󰐕 **Universal File & Context Attachments (`+`)**:
+  - **Consolidated `+` Button**: Attach any code file (`.py`, `.js`, `.rs`, `.json`, `.toml`, etc.), document (`.pdf`, `.docx`, `.md`, `.txt`, `.csv`), or media file directly into your prompt.
+  - **Floating Native File Chooser**: Automatically floats and centers on top of the widget without disturbing your tiling window layout.
+  - **Right-Click Clipboard Paste**: Right-click `+` to instantly attach a screenshot from your clipboard.
+- 🎙️ **Voice Dictation**: Click `󰍬` next to Send to record audio with PipeWire and transcribe locally via `voxtype` (Whisper).
+- 󰒓 **Multi-Agent & Model Switching**:
+  - **Agent Engine Switcher**: Toggle between **Hermes Agent (Botty)**, **OMP (Oh My Pi)**, **Claude Code**, and **OpenAI Codex**.
+  - **Active Provider Filter**: Shows only configured inference providers with populated API keys (`OpenCode Go`, `OpenRouter`, `Ollama Local`, etc.).
+  - **Searchable Model Catalog**: Browse and switch among hundreds of models with real-time config synchronization.
+- 󰋚 **Continuous Learning, Memory Management & Encryption**:
+  - **Single-Click Memory Deletion**: Delete and cancel stored facts directly from the `󰋚 Memories` tab.
+  - **Local AES-256 Memory Vault**: Hardware-bound PBKDF2 encrypted vault backup with owner-only `0600` POSIX permission isolation.
+- 󰘦 **Desktop Automation Actions**: Runs terminal commands, manages files, and interacts with Hyprland and system apps.
 
 ---
 
-## 🚀 Installation
+## 🚀 Installation & Window Rules
 
 ### 1. Link Plugin to Omarchy
 
@@ -37,21 +39,18 @@ mkdir -p ~/.config/omarchy/plugins
 ln -s ~/repo/botty ~/.config/omarchy/plugins/meviusisback.botty
 ```
 
-### 2. Validate Plugin
+### 2. Configure Floating File Dialogs in Hyprland
 
-```bash
-omarchy plugin validate ~/.config/omarchy/plugins/meviusisback.botty
+Add to your `~/.config/hypr/hyprland.lua`:
+
+```lua
+-- Float, center, and size file dialogs on top of the widget
+o.window({ title = ".*Attach File.*" }, { float = true, center = true, size = { 740, 500 }, stay_focused = true })
+o.window({ title = ".*(Open File|Select File|Choose File|Open Folder|Save File).*" }, { float = true, center = true, size = { 740, 500 }, stay_focused = true })
+o.window("xdg-desktop-portal.*", { float = true, center = true, size = { 740, 500 } })
 ```
 
-### 3. Restart Omarchy Shell
-
-```bash
-omarchy restart shell
-```
-
----
-
-## ⌨️ Global Keybindings
+### 3. Global Keyboard Shortcuts
 
 Add to your `~/.config/hypr/bindings.lua`:
 
@@ -60,36 +59,15 @@ Add to your `~/.config/hypr/bindings.lua`:
 o.bind("SUPER + B", "Botty Assistant", "omarchy shell meviusisback.botty toggle")
 
 -- Quick Ask with Screen Context
-o.bind("SUPER + SHIFT + B", "Botty Screen Query", "omarchy shell meviusisback.botty capture_and_ask")
+o.bind("SUPER + SHIFT + B", "Botty Screen Query", "omarchy shell meviusisback.botty captureAndAsk")
 ```
 
----
-
-## 🛠️ CLI & IPC Commands
-
-You can interact with Botty directly via CLI or IPC:
+### 4. Reload Omarchy Shell & Hyprland
 
 ```bash
-# Toggle popup panel
-omarchy shell meviusisback.botty toggle
-
-# Ask a direct question
-omarchy shell meviusisback.botty ask "How do I configure Hyprland animations?"
-
-# Read screen and ask
-omarchy shell meviusisback.botty captureAndAsk "What is shown on my active window?"
-
-# Clear chat history
-omarchy shell meviusisback.botty clear
+hyprctl reload
+omarchy restart shell
 ```
-
----
-
-## 🔒 Security & Privacy
-
-- **Secret Redaction**: API keys (OpenAI, Anthropic, OpenRouter, GitHub tokens) and Bearer headers are masked prior to UI rendering.
-- **Controlled Approvals**: Inherits Hermes profile `botty` smart approval policies and dangerous command deny-lists.
-- **Local Storage**: All history, screenshots, and memories are stored locally in `~/.local/share/botty/` and `~/.hermes/profiles/botty/`.
 
 ---
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 botty_backend.py - Native backend for Botty Omarchy bar widget and desktop assistant.
-Standard-library only. Interfaces with Hermes Agent profile "botty", captures screen context,
-manages conversation history, handles model selection, continuous learning, memory, and voice dictation.
+Standard-library only. Interfaces with Hermes Agent profile "botty", OMP, Claude, and other agents,
+captures screen context, manages conversation history, handles model & provider selection,
+continuous learning, memory deletion, and voice dictation.
 """
 
 import sys
@@ -22,6 +23,7 @@ from typing import Dict, Any, List, Optional, Tuple
 BOTTY_DATA_DIR = Path.home() / ".local" / "share" / "botty"
 BOTTY_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+CONFIG_FILE = BOTTY_DATA_DIR / "config.json"
 STATUS_FILE = BOTTY_DATA_DIR / "status.json"
 HISTORY_FILE = BOTTY_DATA_DIR / "history.json"
 LOCK_FILE = BOTTY_DATA_DIR / "running.pid"
@@ -84,6 +86,58 @@ def save_json_file(path: Path, data: Any) -> None:
             tmp_path.unlink()
         raise e
 
+def get_active_engine() -> str:
+    cfg = load_json_file(CONFIG_FILE, {"agent_engine": "hermes"})
+    return cfg.get("agent_engine", "hermes")
+
+def set_active_engine(engine: str) -> Dict[str, Any]:
+    valid = ["hermes", "omp", "claude", "codex"]
+    if engine not in valid:
+        return {"ok": False, "error": f"Invalid engine '{engine}'. Valid options: {valid}"}
+    cfg = load_json_file(CONFIG_FILE, {"agent_engine": "hermes"})
+    cfg["agent_engine"] = engine
+    save_json_file(CONFIG_FILE, cfg)
+    set_status(get_status().get("state", "idle"), headline=f"Agent engine: {engine.upper()}")
+    return {"ok": True, "active_engine": engine}
+
+def get_agent_engines() -> Dict[str, Any]:
+    current_engine = get_active_engine()
+    engines = [
+        {
+            "id": "hermes",
+            "name": "Hermes Agent (Botty)",
+            "desc": "Persistent assistant with desktop screen awareness, memory, skills & multi-model support",
+            "icon": "🐼",
+            "available": bool(shutil.which("hermes"))
+        },
+        {
+            "id": "omp",
+            "name": "OMP (Oh My Pi)",
+            "desc": "Coding harness & parallel subagent orchestrator",
+            "icon": "󰘦",
+            "available": bool(shutil.which("omp"))
+        },
+        {
+            "id": "claude",
+            "name": "Claude Code",
+            "desc": "Anthropic Claude coding and terminal assistant",
+            "icon": "󰚩",
+            "available": bool(shutil.which("claude"))
+        },
+        {
+            "id": "codex",
+            "name": "OpenAI Codex",
+            "desc": "OpenAI coding and shell automation assistant",
+            "icon": "󰚩",
+            "available": bool(shutil.which("codex"))
+        }
+    ]
+    return {
+        "ok": True,
+        "active_engine": current_engine,
+        "engines": engines
+    }
+
 def get_active_model() -> Dict[str, str]:
     """Reads the active model and provider from botty profile config.yaml."""
     if not HERMES_CONFIG_FILE.exists():
@@ -103,6 +157,8 @@ def get_active_model() -> Dict[str, str]:
 
 def get_status() -> Dict[str, Any]:
     """Returns the current state for bar widget polling."""
+    active_m = get_active_model()
+    active_eng = get_active_engine()
     default_status = {
         "ok": True,
         "state": "idle",
@@ -110,8 +166,9 @@ def get_status() -> Dict[str, Any]:
         "last_query": "",
         "last_answer": "",
         "last_error": "",
-        "active_model": get_active_model()["model"],
-        "active_provider": get_active_model()["provider"],
+        "active_engine": active_eng,
+        "active_model": active_m["model"],
+        "active_provider": active_m["provider"],
         "session_turns": 0,
         "memory_count": count_memories(),
         "skills_count": count_skills(),
@@ -120,6 +177,7 @@ def get_status() -> Dict[str, Any]:
         "is_recording": VOICE_PID_FILE.exists()
     }
     status = load_json_file(STATUS_FILE, default_status)
+    status["active_engine"] = active_eng
     status["is_recording"] = VOICE_PID_FILE.exists()
     
     if LOCK_FILE.exists():
@@ -152,6 +210,7 @@ def set_status(state: str, headline: str = "", last_query: str = "", last_answer
         current["last_error"] = last_error
     current["timestamp"] = int(time.time())
     active = get_active_model()
+    current["active_engine"] = get_active_engine()
     current["active_model"] = active["model"]
     current["active_provider"] = active["provider"]
     current["memory_count"] = count_memories()
@@ -180,10 +239,6 @@ def count_skills() -> int:
     return count
 
 def capture_screen(mode: str = "activewindow") -> Dict[str, Any]:
-    """
-    Captures a clean screenshot of the screen/active window using grim + hyprctl.
-    Does NOT extract OCR text; passes image directly to multimodal model.
-    """
     timestamp = int(time.time() * 1000)
     capture_path = SCREENSHOT_DIR / f"capture_{timestamp}.png"
     
@@ -273,12 +328,12 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
 
 def ask(query: str, image_path: Optional[str] = None, screen_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
     """
-    Executes a query through Hermes profile 'botty', attaching screenshot or media.
+    Executes a query through the active agent engine (Hermes, OMP, Claude, or Codex).
     """
     if not query.strip() and not image_path and not screen_context:
         return {"ok": False, "error": "Empty query and no attachment provided."}
 
-    # Prevent concurrent duplicate requests
+    # Reject concurrent executions
     if LOCK_FILE.exists():
         try:
             pid = int(LOCK_FILE.read_text().strip())
@@ -289,6 +344,7 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
 
     set_status("working", headline="Botty is thinking…", last_query=query)
     LOCK_FILE.write_text(str(os.getpid()))
+
     captured_context: Optional[Dict[str, Any]] = None
     target_image = image_path
 
@@ -317,7 +373,7 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
             "window_title": win_title
         })
 
-    # Prepare prompt text (clean ambient context, NO raw OCR dump)
+    # Prepare prompt text
     prompt_parts = []
     if captured_context:
         win = captured_context.get("active_window", {})
@@ -330,30 +386,38 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
     prompt_parts.append(user_query)
     final_prompt = "\n".join(prompt_parts)
 
-    # Save clean user message to history
     add_history_message("user", user_query, attachments=attachments)
 
     query_tmp = BOTTY_DATA_DIR / "current_query.txt"
     query_tmp.write_text(final_prompt, encoding="utf-8")
 
-    cmd = [
-        "hermes",
-        "-p", "botty",
-        "chat",
-        "-Q",
-        "--query-file", str(query_tmp),
-        "--continue", "botty-widget",
-        "--create-if-missing",
-        "--yolo"
-    ]
+    engine = get_active_engine()
+    cmd = []
 
-    if target_image and os.path.exists(target_image):
-        cmd.extend(["--image", target_image])
-
-    if model:
-        cmd.extend(["-m", model])
-    if provider:
-        cmd.extend(["--provider", provider])
+    if engine == "omp":
+        cmd = ["omp", "-p", "--allow-home", final_prompt]
+    elif engine == "claude":
+        cmd = ["claude", "-p", final_prompt]
+    elif engine == "codex":
+        cmd = ["codex", "exec", final_prompt]
+    else:
+        # Default: Hermes Agent profile botty
+        cmd = [
+            "hermes",
+            "-p", "botty",
+            "chat",
+            "-Q",
+            "--query-file", str(query_tmp),
+            "--continue", "botty-widget",
+            "--create-if-missing",
+            "--yolo"
+        ]
+        if target_image and os.path.exists(target_image):
+            cmd.extend(["--image", target_image])
+        if model:
+            cmd.extend(["-m", model])
+        if provider:
+            cmd.extend(["--provider", provider])
 
     try:
         proc = subprocess.Popen(
@@ -368,9 +432,9 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
         cleaned_response = strip_reasoning(stdout_data)
         
         if proc.returncode != 0 and not cleaned_response:
-            err_msg = stderr_data.strip() or f"Hermes process exited with code {proc.returncode}"
+            err_msg = stderr_data.strip() or f"Agent process exited with code {proc.returncode}"
             set_status("error", headline="Error", last_error=err_msg)
-            add_history_message("assistant", f"⚠️ Error executing request: {err_msg}")
+            add_history_message("assistant", f"⚠️ Error: {err_msg}")
             return {"ok": False, "error": err_msg}
 
         if not cleaned_response:
@@ -412,84 +476,125 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
         LOCK_FILE.unlink(missing_ok=True)
         query_tmp.unlink(missing_ok=True)
 
-def get_providers_and_models() -> Dict[str, Any]:
-    """Returns the full catalog of providers and all selectable models from Hermes."""
-    active = get_active_model()
-    providers_dict: Dict[str, Dict[str, Any]] = {}
+# ── Providers & Models Discovery (Active Key Filtered) ──────────────────────────
 
-    # 1. Read provider_models_cache.json
+def get_active_configured_providers() -> Dict[str, Any]:
+    """
+    Returns ONLY the active providers that have a populated key/credentials in Hermes,
+    along with their genuine model catalogs.
+    """
+    active = get_active_model()
+    
+    # 1. Scan Hermes .env files for populated keys
+    env_files = [HERMES_BOTTY_DIR / ".env", HERMES_DIR / ".env"]
+    env_vars: Dict[str, str] = {}
+    for ef in env_files:
+        if ef.exists():
+            for line in ef.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    v = v.strip().strip("\"'")
+                    if len(v) > 3 and not v.startswith("REDACTED"):
+                        env_vars[k.strip()] = v
+
+    active_provider_ids = set()
+    if "OPENCODE_GO_API_KEY" in env_vars:
+        active_provider_ids.add("opencode-go")
+        active_provider_ids.add("opencode-free")
+    if "OPENCODE_ZEN_API_KEY" in env_vars:
+        active_provider_ids.add("opencode-zen")
+    if "OPENROUTER_API_KEY" in env_vars:
+        active_provider_ids.add("openrouter")
+    if "ANTHROPIC_API_KEY" in env_vars:
+        active_provider_ids.add("anthropic")
+    if "OPENAI_API_KEY" in env_vars:
+        active_provider_ids.add("openai")
+    if "GEMINI_API_KEY" in env_vars or "GOOGLE_API_KEY" in env_vars:
+        active_provider_ids.add("google")
+    if "GLM_API_KEY" in env_vars:
+        active_provider_ids.add("z.ai")
+    if "KIMI_API_KEY" in env_vars:
+        active_provider_ids.add("kimi")
+    if "MINIMAX_API_KEY" in env_vars:
+        active_provider_ids.add("minimax")
+    if "GROQ_API_KEY" in env_vars:
+        active_provider_ids.add("groq")
+    if "NOVITA_API_KEY" in env_vars:
+        active_provider_ids.add("novita")
+    if "FIREWORKS_API_KEY" in env_vars:
+        active_provider_ids.add("fireworks")
+    if "DEEPINFRA_API_KEY" in env_vars:
+        active_provider_ids.add("deepinfra")
+
+    # 2. Check local providers in config.yaml
+    if HERMES_CONFIG_FILE.exists():
+        try:
+            cfg_text = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
+            if "ollama:" in cfg_text:
+                active_provider_ids.add("ollama")
+        except Exception:
+            pass
+
+    # Ensure at least opencode-go and openrouter exist if present in provider cache
     p_cache_file = HERMES_DIR / "provider_models_cache.json"
+    p_data: Dict[str, Any] = {}
     if p_cache_file.exists():
         try:
             with open(p_cache_file, "r", encoding="utf-8") as f:
                 p_data = json.load(f)
-            for p_id, info in p_data.items():
-                models_list = info.get("models", [])
-                if p_id not in providers_dict:
-                    providers_dict[p_id] = {
-                        "id": p_id,
-                        "name": p_id.replace("-", " ").title(),
-                        "models": []
-                    }
-                for m in models_list:
-                    name = m.split("/")[-1].replace("-", " ").title() if "/" in m else m
-                    providers_dict[p_id]["models"].append({"id": m, "name": name})
         except Exception:
             pass
 
-    # 2. Read models_dev_cache.json
-    dev_cache_file = HERMES_DIR / "models_dev_cache.json"
-    if dev_cache_file.exists():
-        try:
-            with open(dev_cache_file, "r", encoding="utf-8") as f:
-                dev_data = json.load(f)
-            for p_id, p_info in dev_data.items():
-                if isinstance(p_info, dict):
-                    p_name = p_info.get("name", p_id.replace("-", " ").title())
-                    models_dict = p_info.get("models", {})
-                    if p_id not in providers_dict:
-                        providers_dict[p_id] = {
-                            "id": p_id,
-                            "name": p_name,
-                            "models": []
-                        }
-                    existing_ids = {m["id"] for m in providers_dict[p_id]["models"]}
-                    if isinstance(models_dict, dict):
-                        for m_id, m_data in models_dict.items():
-                            if m_id not in existing_ids:
-                                m_name = m_data.get("name", m_id) if isinstance(m_data, dict) else m_id
-                                providers_dict[p_id]["models"].append({"id": m_id, "name": m_name})
-                    elif isinstance(models_dict, list):
-                        for m in models_dict:
-                            m_id = m if isinstance(m, str) else m.get("id", str(m))
-                            if m_id not in existing_ids:
-                                providers_dict[p_id]["models"].append({"id": m_id, "name": m_id})
-        except Exception:
-            pass
+    # Always ensure the currently active provider is recognized
+    if active.get("provider"):
+        active_provider_ids.add(active["provider"])
 
-    # Ensure Ollama local is present
-    if "ollama" not in providers_dict:
-        providers_dict["ollama"] = {
-            "id": "ollama",
-            "name": "Ollama (Local)",
-            "models": [
+    providers_dict: Dict[str, Dict[str, Any]] = {}
+
+    # Populate active providers with models from provider_models_cache.json
+    for p_id in active_provider_ids:
+        p_name = p_id.replace("-", " ").title()
+        models_list = []
+
+        if p_id in p_data:
+            for m in p_data[p_id].get("models", []):
+                name = m.split("/")[-1].replace("-", " ").title() if "/" in m else m
+                models_list.append({"id": m, "name": name})
+
+        # Add fallback models for active providers if cache was sparse
+        if p_id == "opencode-go" and not models_list:
+            models_list = [
+                {"id": "ox-alpha-free", "name": "OpenCode Alpha Free"},
+                {"id": "kimi-k2.5", "name": "Kimi K2.5"},
+                {"id": "glm-5", "name": "GLM-5"},
+                {"id": "minimax-m2.5", "name": "MiniMax M2.5"}
+            ]
+        elif p_id == "ollama" and not models_list:
+            models_list = [
                 {"id": "ornith:latest", "name": "Ornith / Llama (Local)"},
                 {"id": "ornith:9b", "name": "Ornith 9B"}
             ]
-        }
 
-    # Sort and prioritize primary providers
-    priority = ["opencode-go", "openrouter", "ollama", "google", "anthropic", "openai", "copilot", "kimi", "z.ai", "minimax", "groq", "novita"]
+        if models_list or p_id in active_provider_ids:
+            providers_dict[p_id] = {
+                "id": p_id,
+                "name": p_name,
+                "models": models_list
+            }
+
+    # Order providers cleanly
     sorted_providers = []
+    priority = ["opencode-go", "openrouter", "opencode-free", "ollama", "google", "anthropic", "openai"]
     for p in priority:
-        if p in providers_dict and providers_dict[p]["models"]:
+        if p in providers_dict:
             sorted_providers.append(providers_dict.pop(p))
     for p in sorted(providers_dict.keys()):
-        if providers_dict[p]["models"]:
-            sorted_providers.append(providers_dict[p])
+        sorted_providers.append(providers_dict[p])
 
     return {
         "ok": True,
+        "active_engine": get_active_engine(),
         "active_model": active["model"],
         "active_provider": active["provider"],
         "providers": sorted_providers
@@ -526,7 +631,7 @@ def set_model(model_id: str, provider_id: Optional[str] = None) -> Dict[str, Any
         with open(HERMES_CONFIG_FILE, "w", encoding="utf-8") as f:
             f.write(new_content)
 
-        set_status(get_status().get("state", "idle"), headline="Model updated")
+        set_status(get_status().get("state", "idle"), headline=f"Model: {model_id}")
         return {"ok": True, "model": model_id, "provider": provider_id}
     except Exception as e:
         return {"ok": False, "error": f"Failed to set model: {str(e)}"}
@@ -534,15 +639,13 @@ def set_model(model_id: str, provider_id: Optional[str] = None) -> Dict[str, Any
 # ── Voice Dictation ────────────────────────────────────────────────────────────
 
 def dictate_start() -> Dict[str, Any]:
-    """Starts voice recording from microphone to WAV file."""
     if VOICE_PID_FILE.exists():
-        dictate_stop() # clear stale
+        dictate_stop()
 
     if VOICE_WAV_FILE.exists():
         VOICE_WAV_FILE.unlink()
 
     try:
-        # Record with ffmpeg from default PulseAudio / PipeWire capture
         proc = subprocess.Popen(
             ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ac", "1", "-ar", "16000", str(VOICE_WAV_FILE)],
             stdout=subprocess.DEVNULL,
@@ -554,14 +657,12 @@ def dictate_start() -> Dict[str, Any]:
         return {"ok": False, "error": f"Failed to start recording: {str(e)}"}
 
 def dictate_stop() -> Dict[str, Any]:
-    """Stops voice recording and runs local transcription via voxtype."""
     if not VOICE_PID_FILE.exists():
         return {"ok": False, "error": "No active recording."}
 
     try:
         pid = int(VOICE_PID_FILE.read_text().strip())
-        # Terminate ffmpeg gracefully
-        os.kill(pid, 15) # SIGTERM
+        os.kill(pid, 15)
         time.sleep(0.3)
     except Exception:
         pass
@@ -571,15 +672,11 @@ def dictate_stop() -> Dict[str, Any]:
     if not VOICE_WAV_FILE.exists() or VOICE_WAV_FILE.stat().st_size < 1000:
         return {"ok": False, "error": "Audio capture was empty."}
 
-    # Transcribe via voxtype
     try:
         res = subprocess.run(["voxtype", "transcribe", str(VOICE_WAV_FILE)], capture_output=True, text=True, timeout=15)
-        # Parse transcribed text
         output_lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-        # Filter out voxtype INFO/log lines
         text_lines = [l for l in output_lines if not l.startswith("Loading audio file") and not l.startswith("Audio format") and not l.startswith("Processing") and not re.search(r"^\d{4}-\d{2}-\d{2}T", l) and not l.startswith("whisper_")]
         transcribed = " ".join(text_lines).strip()
-        
         return {"ok": True, "text": transcribed}
     except Exception as e:
         return {"ok": False, "error": f"Transcription failed: {str(e)}"}
@@ -587,7 +684,7 @@ def dictate_stop() -> Dict[str, Any]:
 def dictate_status() -> Dict[str, Any]:
     return {"ok": True, "recording": VOICE_PID_FILE.exists()}
 
-# ── Memory & Skills ────────────────────────────────────────────────────────────
+# ── Memory Management (Add & Delete) ──────────────────────────────────────────
 
 def get_memories() -> Dict[str, Any]:
     memories = []
@@ -599,6 +696,7 @@ def get_memories() -> Dict[str, Any]:
             for idx, entry in enumerate(entries):
                 memories.append({
                     "id": f"mem_{idx}",
+                    "index": idx,
                     "type": "system",
                     "text": redact_secrets(entry),
                     "source": "MEMORY.md"
@@ -614,6 +712,7 @@ def get_memories() -> Dict[str, Any]:
             for idx, entry in enumerate(entries):
                 memories.append({
                     "id": f"user_{idx}",
+                    "index": idx,
                     "type": "user",
                     "text": redact_secrets(entry),
                     "source": "USER.md"
@@ -645,6 +744,28 @@ def add_memory(text: str, is_user_fact: bool = False) -> Dict[str, Any]:
         return {"ok": True, "message": "Memory saved successfully."}
     except Exception as e:
         return {"ok": False, "error": f"Failed to save memory: {str(e)}"}
+
+def delete_memory(memory_id: str, is_user_fact: bool = False) -> Dict[str, Any]:
+    """Deletes/cancels a specific memory entry by index/id from MEMORY.md or USER.md."""
+    target_file = (HERMES_MEMORY_DIR / "USER.md") if is_user_fact else (HERMES_MEMORY_DIR / "MEMORY.md")
+    if not target_file.exists():
+        return {"ok": False, "error": "Memory file not found."}
+
+    try:
+        content = target_file.read_text(encoding="utf-8")
+        entries = [e.strip() for e in content.split("§") if e.strip()]
+        
+        idx = int(str(memory_id).split("_")[-1])
+        if 0 <= idx < len(entries):
+            removed = entries.pop(idx)
+            new_content = ("\n§\n".join(entries) + "\n") if entries else ""
+            target_file.write_text(new_content, encoding="utf-8")
+            set_status(get_status().get("state", "idle"), headline="Memory deleted")
+            return {"ok": True, "message": "Memory deleted.", "removed": removed}
+        else:
+            return {"ok": False, "error": "Memory index out of range."}
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to delete memory: {str(e)}"}
 
 def compact_memory() -> Dict[str, Any]:
     set_status("working", headline="Compacting memory…")
@@ -752,13 +873,16 @@ def main():
 
     subparsers.add_parser("history", help="Get conversation history")
     subparsers.add_parser("clear", help="Clear conversation history")
-    subparsers.add_parser("models", help="List available providers and models")
+    subparsers.add_parser("models", help="List active providers and models")
     
     set_m = subparsers.add_parser("set-model", help="Set active model")
     set_m.add_argument("model", help="Model identifier")
     set_m.add_argument("--provider", dest="provider", default=None, help="Provider name")
 
-    # Dictation commands
+    subparsers.add_parser("engines", help="List available agent engines")
+    set_e = subparsers.add_parser("set-engine", help="Set active agent engine (hermes, omp, claude, codex)")
+    set_e.add_argument("engine", help="Engine name")
+
     subparsers.add_parser("dictate-start", help="Start voice recording")
     subparsers.add_parser("dictate-stop", help="Stop voice recording & transcribe")
     subparsers.add_parser("dictate-status", help="Check voice recording status")
@@ -768,6 +892,10 @@ def main():
     add_m = subparsers.add_parser("add-memory", help="Add persistent memory")
     add_m.add_argument("text", help="Memory content")
     add_m.add_argument("--user", dest="user", action="store_true", help="Store as user fact in USER.md")
+
+    del_m = subparsers.add_parser("delete-memory", help="Delete a persistent memory")
+    del_m.add_argument("id", help="Memory ID or index")
+    del_m.add_argument("--user", dest="user", action="store_true", help="Delete from USER.md")
 
     subparsers.add_parser("compact", help="Compact session memory")
     subparsers.add_parser("skills", help="List skills")
@@ -796,9 +924,13 @@ def main():
     elif args.command == "clear":
         print(json.dumps(clear_history(), ensure_ascii=False))
     elif args.command == "models":
-        print(json.dumps(get_providers_and_models(), ensure_ascii=False))
+        print(json.dumps(get_active_configured_providers(), ensure_ascii=False))
     elif args.command == "set-model":
         print(json.dumps(set_model(args.model, args.provider), ensure_ascii=False))
+    elif args.command == "engines":
+        print(json.dumps(get_agent_engines(), ensure_ascii=False))
+    elif args.command == "set-engine":
+        print(json.dumps(set_active_engine(args.engine), ensure_ascii=False))
     elif args.command == "dictate-start":
         print(json.dumps(dictate_start(), ensure_ascii=False))
     elif args.command == "dictate-stop":
@@ -809,6 +941,8 @@ def main():
         print(json.dumps(get_memories(), ensure_ascii=False))
     elif args.command == "add-memory":
         print(json.dumps(add_memory(args.text, is_user_fact=args.user), ensure_ascii=False))
+    elif args.command == "delete-memory":
+        print(json.dumps(delete_memory(args.id, is_user_fact=args.user), ensure_ascii=False))
     elif args.command == "compact":
         print(json.dumps(compact_memory(), ensure_ascii=False))
     elif args.command == "skills":

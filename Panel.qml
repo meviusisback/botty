@@ -39,6 +39,7 @@ Panel {
     headline: "Ready",
     last_query: "",
     last_answer: "",
+    active_engine: "hermes",
     active_model: "ox-alpha-free",
     active_provider: "opencode-go",
     session_turns: 0,
@@ -51,6 +52,7 @@ Panel {
   property int lastMessageCount: 0
 
   property var modelsCatalog: ({ providers: [] })
+  property var enginesData: ({ engines: [] })
   property string selectedProviderId: "opencode-go"
   property string modelSearchFilter: ""
 
@@ -68,7 +70,7 @@ Panel {
   property bool isRecordingVoice: false
   property bool isTranscribingVoice: false
 
-  property bool isProcessing: rawStatus && rawStatus.state === "working"
+  property bool isProcessing: (rawStatus && rawStatus.state === "working") || askProc.running
 
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
 
@@ -92,6 +94,9 @@ Panel {
     if (!modelsProc.running) {
       modelsProc.running = true
     }
+    if (!enginesProc.running) {
+      enginesProc.running = true
+    }
   }
 
   function fetchMemories() {
@@ -108,11 +113,13 @@ Panel {
 
   function sendQuery(text, imagePath, useScreen) {
     if (askProc.running || root.rawStatus.state === "working") return
+
     var q = text || promptInput.text || ""
     var img = imagePath || root.attachedImagePath || ""
     var scr = (useScreen !== undefined) ? useScreen : root.screenContextEnabled
 
     if (!q.trim() && !img && !scr) return
+
     var cmd = ["python3", root.scriptPath(), "ask", q]
     if (img) {
       cmd.push("--image")
@@ -153,6 +160,11 @@ Panel {
     root.lastMessageCount = 0
   }
 
+  function selectEngine(engineId) {
+    setEngineProc.command = ["python3", root.scriptPath(), "set-engine", engineId]
+    setEngineProc.running = true
+  }
+
   function selectModel(modelId, providerId) {
     var cmd = ["python3", root.scriptPath(), "set-model", modelId]
     if (providerId) {
@@ -191,6 +203,13 @@ Panel {
     if (isUser) cmd.push("--user")
     addMemProc.command = cmd
     addMemProc.running = true
+  }
+
+  function deleteMemoryNow(memId, isUser) {
+    var cmd = ["python3", root.scriptPath(), "delete-memory", String(memId)]
+    if (isUser) cmd.push("--user")
+    delMemProc.command = cmd
+    delMemProc.running = true
   }
 
   // Periodic status poll
@@ -337,6 +356,34 @@ Panel {
   }
 
   Process {
+    id: enginesProc
+    command: ["python3", root.scriptPath(), "engines"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            root.enginesData = data
+            root.rawStatus.active_engine = data.active_engine
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: setEngineProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.fetchStatus()
+        root.fetchModels()
+      }
+    }
+  }
+
+  Process {
     id: modelsProc
     command: ["python3", root.scriptPath(), "models"]
     stdout: StdioCollector {
@@ -412,6 +459,17 @@ Panel {
             root.memoriesData = data.memories || []
           }
         } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: delMemProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.fetchStatus()
+        root.fetchMemories()
       }
     }
   }
@@ -665,6 +723,25 @@ Panel {
                 color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
               }
             }
+
+            // Engine Badge
+            Rectangle {
+              radius: Style.space(4)
+              color: root.alpha(root.foreground, 0.08)
+              implicitWidth: engineText.implicitWidth + Style.space(8)
+              implicitHeight: engineText.implicitHeight + Style.space(3)
+
+              Text {
+                id: engineText
+                anchors.centerIn: parent
+                text: String(root.rawStatus.active_engine || "hermes").toUpperCase()
+                textFormat: Text.PlainText
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(9)
+                font.bold: true
+                color: root.accent
+              }
+            }
           }
 
           Text {
@@ -709,7 +786,7 @@ Panel {
           // Model & Settings Button
           Button {
             iconText: "󰒓"
-            tooltipText: "Models & Providers"
+            tooltipText: "Agents, Providers & Models"
             selected: root.currentView === "settings"
             implicitWidth: Style.space(32)
             implicitHeight: Style.space(32)
@@ -818,7 +895,7 @@ Panel {
                       }
                     }
 
-                    // Context / Attachment Badge (Clean text pill, no screen image)
+                    // Context / Attachment Badge
                     Repeater {
                       model: attachments
                       delegate: BorderSurface {
@@ -1035,7 +1112,7 @@ Panel {
               }
 
               Text {
-                text: "Botty is reading screen and thinking…"
+                text: "Botty is processing your request…"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 color: root.foreground
@@ -1044,7 +1121,7 @@ Panel {
             }
           }
 
-          // Active Context Strip (Compact text badge, no screen image preview)
+          // Active Context Strip
           BorderSurface {
             id: contextStrip
             visible: root.attachedImagePath.length > 0 || root.screenContextEnabled
@@ -1159,7 +1236,7 @@ Panel {
               Item { Layout.fillWidth: true }
 
               Text {
-                text: (root.rawStatus.active_model || "ox-alpha-free")
+                text: (root.rawStatus.active_engine || "hermes").toUpperCase() + " • " + (root.rawStatus.active_model || "ox-alpha-free")
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(10)
                 color: root.muted
@@ -1341,6 +1418,14 @@ Panel {
                       implicitHeight: Style.space(24)
                       onClicked: root.copyText(modelData.text)
                     }
+
+                    Button {
+                      iconText: "󰆴"
+                      tooltipText: "Delete / cancel this memory"
+                      implicitWidth: Style.space(24)
+                      implicitHeight: Style.space(24)
+                      onClicked: root.deleteMemoryNow(modelData.id, modelData.type === "user")
+                    }
                   }
                 }
               }
@@ -1424,13 +1509,14 @@ Panel {
         }
       }
 
-      // ========================================================= VIEW: SETTINGS & MODELS (DUAL MENU)
+      // ========================================================= VIEW: AGENTS, PROVIDERS & MODELS
       Item {
         id: settingsViewItem
         visible: root.currentView === "settings"
         Layout.fillWidth: true
         Layout.fillHeight: true
 
+        readonly property var allEngines: (root.enginesData && root.enginesData.engines) ? root.enginesData.engines : []
         readonly property var allProviders: (root.modelsCatalog && root.modelsCatalog.providers) ? root.modelsCatalog.providers : []
         readonly property var currentProviderObj: {
           for (var i = 0; i < allProviders.length; i++) {
@@ -1452,23 +1538,47 @@ Panel {
 
         ColumnLayout {
           anchors.fill: parent
-          spacing: Style.space(8)
+          spacing: Style.space(10)
 
-          Text {
-            text: "Model & Provider Catalog"
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            color: root.foreground
-          }
-
-          // ----------------------------------------------------- Step 1: Provider Selector
+          // ----------------------------------------------------- Section 1: Agent Engine
           ColumnLayout {
             Layout.fillWidth: true
             spacing: Style.space(4)
 
             Text {
-              text: "1. Select Inference Provider (" + settingsViewItem.allProviders.length + " available):"
+              text: "1. Agent Engine (Backend Runner):"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              color: root.accent
+            }
+
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+
+              Repeater {
+                model: settingsViewItem.allEngines
+                delegate: Button {
+                  text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.name || modelData.id)
+                  fontSize: Style.space(11)
+                  selected: modelData.id === (root.rawStatus.active_engine || "hermes")
+                  implicitHeight: Style.space(30)
+                  onClicked: root.selectEngine(modelData.id)
+                }
+              }
+            }
+          }
+
+          PanelSeparator { Layout.fillWidth: true }
+
+          // ----------------------------------------------------- Section 2: Active Hermes Providers
+          ColumnLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(4)
+
+            Text {
+              text: "2. Active Inference Providers in Hermes (" + settingsViewItem.allProviders.length + " configured with keys):"
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
@@ -1477,7 +1587,7 @@ Panel {
 
             ScrollView {
               Layout.fillWidth: true
-              implicitHeight: Style.space(38)
+              implicitHeight: Style.space(36)
               ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
               ScrollBar.vertical.policy: ScrollBar.AlwaysOff
 
@@ -1490,7 +1600,7 @@ Panel {
                     text: modelData.name || modelData.id
                     fontSize: Style.space(11)
                     selected: modelData.id === root.selectedProviderId
-                    implicitHeight: Style.space(30)
+                    implicitHeight: Style.space(28)
                     onClicked: {
                       root.selectedProviderId = modelData.id
                       root.modelSearchFilter = ""
@@ -1501,7 +1611,7 @@ Panel {
             }
           }
 
-          // ----------------------------------------------------- Step 2: Model Search & Selector
+          // ----------------------------------------------------- Section 3: Model Search & Selector
           ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -1512,7 +1622,7 @@ Panel {
               spacing: Style.space(6)
 
               Text {
-                text: "2. Select Model (" + settingsViewItem.filteredModels.length + " in " + settingsViewItem.currentProviderObj.name + "):"
+                text: "3. Select Model (" + settingsViewItem.filteredModels.length + " in " + settingsViewItem.currentProviderObj.name + "):"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -1525,7 +1635,7 @@ Panel {
             TextField {
               id: modelSearchInput
               Layout.fillWidth: true
-              placeholderText: "🔍 Filter models under " + settingsViewItem.currentProviderObj.name + "…"
+              placeholderText: "🔍 Search models under " + settingsViewItem.currentProviderObj.name + "…"
               font.pixelSize: Style.font.body
               text: root.modelSearchFilter
               onTextChanged: root.modelSearchFilter = text

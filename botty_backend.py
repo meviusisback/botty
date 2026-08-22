@@ -44,6 +44,11 @@ HERMES_CONFIG_FILE = HERMES_BOTTY_DIR / "config.yaml"
 HERMES_MEMORY_DIR = HERMES_BOTTY_DIR / "memories"
 HERMES_SKILLS_DIR = HERMES_BOTTY_DIR / "skills"
 
+OMP_DIR = Path.home() / ".omp"
+OMP_AGENT_DIR = OMP_DIR / "agent"
+OMP_CONFIG_FILE = OMP_AGENT_DIR / "config.yml"
+OMP_MODELS_DB = OMP_AGENT_DIR / "models.db"
+
 # Redaction patterns for security
 REDACTION_PATTERNS = [
     (re.compile(r"\b(sk-[a-zA-Z0-9_-]{8})[a-zA-Z0-9_-]{12,}\b"), r"\1…[REDACTED]"),
@@ -304,7 +309,6 @@ def get_agent_engines() -> Dict[str, Any]:
     }
 
 def get_active_model_for_engine(engine: Optional[str] = None) -> Dict[str, str]:
-    """Reads the active model and provider for the specified engine."""
     eng = engine or get_active_engine()
     cfg = load_json_file(CONFIG_FILE, {})
     engine_models = cfg.get("engine_models", {})
@@ -325,7 +329,18 @@ def get_active_model_for_engine(engine: Optional[str] = None) -> Dict[str, str]:
         except Exception:
             return {"model": "ox-alpha-free", "provider": "opencode-go"}
     elif eng == "omp":
-        return engine_models.get("omp", {"model": "google/gemini-3.7-flash", "provider": "google"})
+        # Check ~/.omp/agent/config.yml directly for ground truth
+        if OMP_CONFIG_FILE.exists():
+            try:
+                text = OMP_CONFIG_FILE.read_text(encoding="utf-8")
+                m = re.search(r"default:\s*([^\n]+)", text)
+                if m:
+                    active_m = m.group(1).strip().strip("'\"")
+                    prov = active_m.split("/")[0] if "/" in active_m else "google-antigravity"
+                    return {"model": active_m, "provider": prov}
+            except Exception:
+                pass
+        return engine_models.get("omp", {"model": "google-antigravity/gemini-3.7-flash", "provider": "google-antigravity"})
     elif eng == "claude":
         return engine_models.get("claude", {"model": "claude-3-7-sonnet", "provider": "anthropic"})
     elif eng == "codex":
@@ -698,12 +713,12 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
 # ── Dynamic Per-Engine Models & Providers Discovery ────────────────────────────
 
 def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, Any]:
-    """Returns dynamic provider and model choices based strictly on the selected agent engine."""
+    """Returns dynamic provider and model choices checked strictly against each agent's real config."""
     engine = engine_name or get_active_engine()
     active_m = get_active_model_for_engine(engine)
 
     if engine == "hermes":
-        # 1. Scan Hermes .env files for populated keys
+        # Check Hermes .env and config.yaml
         env_files = [HERMES_BOTTY_DIR / ".env", HERMES_DIR / ".env"]
         env_vars: Dict[str, str] = {}
         for ef in env_files:
@@ -814,57 +829,66 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
         }
 
     elif engine == "omp":
-        omp_providers = [
-            {
-                "id": "google",
-                "name": "Google",
-                "models": [
-                    {"id": "google/gemini-3.7-flash", "name": "Gemini 3.7 Flash (Default)"},
-                    {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-                    {"id": "google-antigravity/gemini-3.7-flash", "name": "Gemini 3.7 Flash (Antigravity)"}
-                ]
-            },
-            {
-                "id": "anthropic",
-                "name": "Anthropic",
-                "models": [
-                    {"id": "anthropic/claude-3-7-sonnet", "name": "Claude 3.7 Sonnet"},
-                    {"id": "anthropic/claude-3-5-sonnet", "name": "Claude 3.5 Sonnet"},
-                    {"id": "anthropic/claude-3-5-haiku", "name": "Claude 3.5 Haiku"}
-                ]
-            },
-            {
-                "id": "openai",
-                "name": "OpenAI",
-                "models": [
-                    {"id": "openai/gpt-4o", "name": "GPT-4o"},
-                    {"id": "openai/gpt-4o-mini", "name": "GPT-4o Mini"},
-                    {"id": "openai/o3-mini", "name": "o3-mini (Reasoning)"},
-                    {"id": "openai/o1", "name": "o1 (Reasoning)"}
-                ]
-            },
-            {
-                "id": "deepseek",
-                "name": "DeepSeek",
-                "models": [
-                    {"id": "deepseek/deepseek-chat", "name": "DeepSeek V3"},
-                    {"id": "deepseek/deepseek-reasoner", "name": "DeepSeek R1"}
-                ]
-            },
-            {
-                "id": "qwen",
-                "name": "Qwen",
-                "models": [
-                    {"id": "qwen/qwen-2.5-coder-32b-instruct", "name": "Qwen 2.5 Coder 32B"}
-                ]
-            }
-        ]
+        # Check ~/.omp/agent/config.yml and ~/.omp/agent/models.db directly
+        omp_active_model = "google-antigravity/gemini-3.7-flash"
+        omp_active_provider = "google-antigravity"
+
+        if OMP_CONFIG_FILE.exists():
+            try:
+                text = OMP_CONFIG_FILE.read_text(encoding="utf-8")
+                m = re.search(r"default:\s*([^\n]+)", text)
+                if m:
+                    omp_active_model = m.group(1).strip().strip("'\"")
+                    if "/" in omp_active_model:
+                        omp_active_provider = omp_active_model.split("/")[0]
+            except Exception:
+                pass
+
+        omp_providers = []
+        if OMP_MODELS_DB.exists():
+            try:
+                conn = sqlite3.connect(str(OMP_MODELS_DB))
+                c = conn.cursor()
+                c.execute("SELECT * FROM model_cache;")
+                for r in c.fetchall():
+                    p_id = r[0]
+                    clean_pid = p_id.split(":")[0]
+                    m_json = r[-1]
+                    try:
+                        m_data = json.loads(m_json)
+                        models = []
+                        for item in m_data:
+                            m_id = item.get("id")
+                            m_name = item.get("name", m_id)
+                            if m_id:
+                                full_id = f"{clean_pid}/{m_id}" if ("/" not in m_id and clean_pid not in ["ollama", "google-antigravity"]) else m_id
+                                models.append({"id": full_id, "name": m_name})
+                        if models:
+                            p_name = clean_pid.replace("-", " ").title()
+                            omp_providers.append({"id": clean_pid, "name": p_name, "models": models})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if not omp_providers:
+            omp_providers = [
+                {
+                    "id": "google-antigravity",
+                    "name": "Google Antigravity",
+                    "models": [
+                        {"id": "google-antigravity/gemini-3.7-flash", "name": "Gemini 3.7 Flash"},
+                        {"id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5"}
+                    ]
+                }
+            ]
+
         return {
             "ok": True,
             "engine": "omp",
             "active_engine": "omp",
-            "active_model": active_m.get("model", "google/gemini-3.7-flash"),
-            "active_provider": active_m.get("provider", "google"),
+            "active_model": omp_active_model,
+            "active_provider": omp_active_provider,
             "providers": omp_providers
         }
 
@@ -947,6 +971,14 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
                 HERMES_CONFIG_FILE.write_text(new_content, encoding="utf-8")
             except Exception as e:
                 return {"ok": False, "error": f"Failed to set Hermes model: {str(e)}"}
+    elif engine == "omp":
+        if OMP_CONFIG_FILE.exists():
+            try:
+                content = OMP_CONFIG_FILE.read_text(encoding="utf-8")
+                new_content = re.sub(r"(default:\s*)[^\n]+", rf"\g<1>{model_id}", content)
+                OMP_CONFIG_FILE.write_text(new_content, encoding="utf-8")
+            except Exception as e:
+                return {"ok": False, "error": f"Failed to set OMP model: {str(e)}"}
 
     set_status(get_status().get("state", "idle"), headline=f"{engine.upper()}: {model_id}")
     return {"ok": True, "engine": engine, "model": model_id, "provider": provider_id}

@@ -1699,7 +1699,11 @@ Panel {
                   fontSize: Style.space(11)
                   selected: modelData.id === (root.rawStatus.active_engine || "hermes")
                   implicitHeight: Style.space(28)
-                  onClicked: root.selectEngine(modelData.id)
+                  onClicked: {
+                    root.selectEngine(modelData.id)
+                    modelsProc.command = ["python3", root.scriptPath(), "models", "--engine", modelData.id]
+                    modelsProc.running = true
+                  }
                 }
               }
             }
@@ -1707,13 +1711,13 @@ Panel {
 
           PanelSeparator { Layout.fillWidth: true }
 
-          // ----------------------------------------------------- Section 2: Active Hermes Providers
+          // ----------------------------------------------------- Section 2: Active Inference Providers
           ColumnLayout {
             Layout.fillWidth: true
             spacing: Style.space(4)
 
             Text {
-              text: "2. Active Inference Providers in Hermes (" + settingsViewItem.allProviders.length + " configured with keys):"
+              text: "2. Active Inference Providers in " + (root.rawStatus.active_engine ? root.rawStatus.active_engine.toUpperCase() : "HERMES") + " (" + settingsViewItem.allProviders.length + " configured):"
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
@@ -1729,7 +1733,7 @@ Panel {
                 delegate: Button {
                   text: modelData.name || modelData.id
                   fontSize: Style.space(11)
-                  selected: modelData.id === root.selectedProviderId
+                  selected: modelData.id === (settingsViewItem.currentProviderObj ? settingsViewItem.currentProviderObj.id : "")
                   implicitHeight: Style.space(28)
                   onClicked: {
                     root.selectedProviderId = modelData.id

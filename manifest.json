@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "id": "meviusisback.botty",
+  "name": "Botty",
+  "version": "1.0.0",
+  "author": "meviusisback",
+  "license": "MIT",
+  "description": "Desktop AI Agent assistant widget powered by Hermes profile Botty with screen awareness, multimodal media context, persistent memory, and native Omarchy desktop actions.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Botty",
+    "description": "Interactive AI desktop assistant in your Omarchy top bar. Read screen context, attach media, execute actions, switch models, and learn continuously.",
+    "category": "AI",
+    "aliases": [
+      "botty",
+      "botty-agent",
+      "hermes-botty"
+    ],
+    "defaults": {
+      "refreshIntervalSec": 2,
+      "barDisplay": "Icon",
+      "showStatusInBar": true
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 1,
+        "max": 30,
+        "defaultValue": 2,
+        "description": "How frequently the widget polls for status updates."
+      },
+      {
+        "key": "barDisplay",
+        "type": "enum",
+        "label": "Bar display mode",
+        "options": [
+          "Icon",
+          "Status",
+          "Compact"
+        ],
+        "defaultValue": "Icon",
+        "description": "Visual representation in the status bar (Icon glyph vs Status text ticker)."
+      },
+      {
+        "key": "showStatusInBar",
+        "type": "boolean",
+        "label": "Show status indicators in bar",
+        "defaultValue": true,
+        "description": "Display status badges and activity dots on the bar icon."
+      }
+    ]
+  }
+}

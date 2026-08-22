@@ -124,6 +124,7 @@ Panel {
     root.attachedImagePath = ""
     root.attachedImageFilename = ""
     root.screenContextEnabled = false
+    root.lastCaptureInfo = null
     root.fetchHistory()
   }
 
@@ -415,7 +416,7 @@ Panel {
     anchors.fill: parent
     visible: !root.barShowsText
     bar: root.bar
-    text: Model.statusIcon(root.rawStatus.state)
+    text: Model.statusIcon(root.rawStatus.state) // Panda icon 󰎲
     tooltipText: Model.getTooltipText(root.rawStatus)
     active: root.rawStatus.state === "working" || root.rawStatus.state === "waiting"
     activeColor: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -470,7 +471,7 @@ Panel {
       spacing: Style.space(6)
 
       Text {
-        text: Model.statusIcon(root.rawStatus.state)
+        text: Model.statusIcon(root.rawStatus.state) // Panda icon 󰎲
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
         color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -515,8 +516,8 @@ Panel {
     bar: root.bar
     owner: root
     open: root.opened
-    contentWidth: Style.space(540)
-    contentHeight: Style.space(700)
+    contentWidth: Style.space(520)
+    contentHeight: Style.space(680)
 
     onOpenChanged: {
       if (open) {
@@ -537,7 +538,7 @@ Panel {
         Layout.fillWidth: true
         spacing: Style.space(12)
 
-        // Botty Avatar / Status Icon
+        // Botty Panda Avatar / Status Icon
         BorderSurface {
           implicitWidth: Style.space(38)
           implicitHeight: Style.space(38)
@@ -547,7 +548,7 @@ Panel {
 
           Text {
             anchors.centerIn: parent
-            text: Model.statusIcon(root.rawStatus.state)
+            text: Model.statusIcon(root.rawStatus.state) // Panda icon 󰎲
             color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
             font.family: root.fontFamily
             font.pixelSize: Style.space(22)
@@ -594,7 +595,7 @@ Panel {
           }
 
           Text {
-            text: "Model: " + (root.rawStatus.active_model || "ox-alpha-free") + " (" + (root.rawStatus.active_provider || "opencode-go") + ")"
+            text: (root.rawStatus.active_model || "ox-alpha-free") + " (" + (root.rawStatus.active_provider || "opencode-go") + ")"
             textFormat: Text.PlainText
             color: root.dim
             font.family: root.fontFamily
@@ -688,7 +689,7 @@ Panel {
             ListView {
               id: chatListView
               model: (root.historyData && root.historyData.messages) ? root.historyData.messages : []
-              spacing: Style.space(12)
+              spacing: Style.space(10)
               boundsBehavior: Flickable.StopAtBounds
 
               delegate: Item {
@@ -705,10 +706,10 @@ Panel {
                   id: msgCard
                   anchors.left: isUser ? undefined : parent.left
                   anchors.right: isUser ? parent.right : undefined
-                  width: Math.min(parent.width * 0.94, Math.max(contentCol.implicitWidth + Style.space(24), Style.space(200)))
+                  width: Math.min(parent.width * 0.94, Math.max(contentCol.implicitWidth + Style.space(20), Style.space(180)))
                   radius: Style.space(10)
-                  color: isUser ? root.alpha(root.accent, 0.14) : Color.layer(Color.surface, 1)
-                  borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.35) : root.alpha(root.foreground, 0.1), root.accent)
+                  color: isUser ? root.alpha(root.accent, 0.12) : Color.layer(Color.surface, 1)
+                  borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.1), root.accent)
 
                   ColumnLayout {
                     id: contentCol
@@ -739,49 +740,43 @@ Panel {
                       }
                     }
 
-                    // Attachments Preview (Screenshots / Media)
+                    // Context / Attachment Badge (Clean text pill, no screen image)
                     Repeater {
                       model: attachments
                       delegate: BorderSurface {
                         Layout.fillWidth: true
-                        radius: Style.space(6)
-                        color: root.alpha(root.foreground, 0.04)
-                        borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.15), root.accent)
+                        radius: Style.space(4)
+                        color: root.alpha(root.accent, 0.1)
+                        borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
 
                         RowLayout {
                           anchors.fill: parent
-                          anchors.margins: Style.space(6)
-                          spacing: Style.space(8)
+                          anchors.margins: Style.space(4)
+                          spacing: Style.space(6)
 
-                          Image {
-                            source: modelData.path ? ("file://" + modelData.path) : ""
-                            Layout.preferredWidth: Style.space(64)
-                            Layout.preferredHeight: Style.space(48)
-                            fillMode: Image.PreserveAspectCrop
-                            mipmap: true
+                          Text {
+                            text: modelData.is_screen_capture ? "󰹑" : "󰋩"
+                            color: root.accent
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
                           }
 
-                          ColumnLayout {
+                          Text {
+                            text: {
+                              if (modelData.is_screen_capture) {
+                                var app = modelData.app_name || "Active Window"
+                                var title = modelData.window_title ? (" — " + modelData.window_title) : ""
+                                return "Screen Context: " + app + title
+                              }
+                              return "Media Attachment: " + (modelData.filename || "file")
+                            }
+                            textFormat: Text.PlainText
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(10)
+                            font.bold: true
+                            color: root.accent
+                            elide: Text.ElideRight
                             Layout.fillWidth: true
-                            spacing: Style.space(2)
-
-                            Text {
-                              text: modelData.is_screen_capture ? "󰹑 Screen Capture" : "󰋩 Image Attachment"
-                              font.family: root.fontFamily
-                              font.pixelSize: Style.font.caption
-                              font.bold: true
-                              color: root.accent
-                            }
-
-                            Text {
-                              text: modelData.filename || "Attached media"
-                              textFormat: Text.PlainText
-                              font.family: root.fontFamily
-                              font.pixelSize: Style.space(10)
-                              color: root.dim
-                              elide: Text.ElideMiddle
-                              Layout.fillWidth: true
-                            }
                           }
                         }
                       }
@@ -903,7 +898,7 @@ Panel {
                       visible: !isUser
                       Layout.fillWidth: true
                       spacing: Style.space(4)
-                      Layout.topMargin: Style.space(4)
+                      Layout.topMargin: Style.space(2)
 
                       Item { Layout.fillWidth: true }
 
@@ -951,7 +946,7 @@ Panel {
               }
 
               Text {
-                text: "Botty is reading context and executing response…"
+                text: "Botty is reading context and thinking…"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
                 color: root.foreground
@@ -960,7 +955,7 @@ Panel {
             }
           }
 
-          // Attachment Strip (Screenshots or images pending send)
+          // Active Context Strip (Compact text badge, no screen image preview)
           BorderSurface {
             visible: root.attachedImagePath.length > 0 || root.screenContextEnabled
             Layout.fillWidth: true
@@ -973,21 +968,26 @@ Panel {
               anchors.margins: Style.space(6)
               spacing: Style.space(8)
 
-              Image {
-                visible: root.attachedImagePath.length > 0
-                source: root.attachedImagePath ? ("file://" + root.attachedImagePath) : ""
-                Layout.preferredWidth: Style.space(48)
-                Layout.preferredHeight: Style.space(36)
-                fillMode: Image.PreserveAspectCrop
-                mipmap: true
+              Text {
+                text: root.screenContextEnabled ? "󰹑" : "󰋩"
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(14)
+                color: root.accent
               }
 
               ColumnLayout {
                 Layout.fillWidth: true
-                spacing: Style.space(2)
+                spacing: Style.space(1)
 
                 Text {
-                  text: root.screenContextEnabled ? "󰹑 Active Screen Context Attached" : "󰋩 Image Attached"
+                  text: {
+                    if (root.screenContextEnabled) {
+                      var win = root.lastCaptureInfo && root.lastCaptureInfo.active_window ? root.lastCaptureInfo.active_window : null
+                      var app = win ? (win.class || win.title || "Active Window") : "Active Window"
+                      return "Screen Context Active (" + app + ")"
+                    }
+                    return "Media Attachment Attached"
+                  }
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -995,7 +995,12 @@ Panel {
                 }
 
                 Text {
-                  text: root.attachedImageFilename || "Ready to send"
+                  text: {
+                    if (root.screenContextEnabled && root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
+                      return root.lastCaptureInfo.active_window.title || "Window context will be analyzed"
+                    }
+                    return root.attachedImageFilename || "Attached file ready to send"
+                  }
                   textFormat: Text.PlainText
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
@@ -1014,6 +1019,7 @@ Panel {
                   root.attachedImagePath = ""
                   root.attachedImageFilename = ""
                   root.screenContextEnabled = false
+                  root.lastCaptureInfo = null
                 }
               }
             }
@@ -1042,6 +1048,7 @@ Panel {
                   } else {
                     root.screenContextEnabled = false
                     root.attachedImagePath = ""
+                    root.lastCaptureInfo = null
                   }
                 }
               }
@@ -1190,7 +1197,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
-                    text: modelData.type === "user" ? "󰋚 User" : "󰚩 Botty"
+                    text: modelData.type === "user" ? "󰋚 User" : "󰎲 Botty"
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
                     font.bold: true
@@ -1334,7 +1341,7 @@ Panel {
                   spacing: Style.space(10)
 
                   Text {
-                    text: isCurrent ? "󰄬" : "󰚩"
+                    text: isCurrent ? "󰄬" : "󰎲" // Panda icon
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.icon
                     color: isCurrent ? "#10B981" : root.muted

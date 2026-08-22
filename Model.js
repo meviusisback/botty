@@ -21,12 +21,12 @@ function statusColor(state, fg, accent, urgent) {
 }
 
 /**
- * Returns Nerd Font icon glyph for the bar and headers.
+ * Returns Panda Nerd Font icon glyph for the bar and headers.
  */
 function statusIcon(state) {
   var s = String(state || "").toLowerCase()
   if (s === "working" || s === "busy" || s === "running" || s === "thinking") {
-    return "󰑐" // Spinner / sync
+    return "󰑐" // Spinner / thinking
   }
   if (s === "waiting" || s === "prompt" || s === "input") {
     return "󰌵" // Lightbulb / prompt
@@ -34,7 +34,7 @@ function statusIcon(state) {
   if (s === "error" || s === "failed") {
     return "󰅚" // Alert / error
   }
-  return "󰚩" // Botty robot glyph
+  return "󰎲" // Panda glyph (nf-md-panda)
 }
 
 /**
@@ -146,21 +146,21 @@ function getBarHeadline(status, maxLen) {
   if (status.state === "working") return "Botty thinking…"
   if (status.state === "error") return "Botty: Error"
   if (status.last_query && status.last_query.length > 0) {
-    return truncateText(status.last_query, maxLen || 30)
+    return truncateText(status.last_query, maxLen || 26)
   }
-  return "Botty Ready"
+  return "Botty"
 }
 
 /**
  * Generates bar tooltip text.
  */
 function getTooltipText(status) {
-  if (!status) return "Botty Agent Assistant"
-  var lines = ["Botty - Desktop Agent Assistant (Hermes)"]
+  if (!status) return "Botty (Panda) - Desktop Agent Assistant"
+  var lines = ["Botty 󰎲 - Desktop Agent Assistant (Hermes)"]
   lines.push("Status: " + statusBadgeText(status.state))
   if (status.active_model) lines.push("Model: " + status.active_model)
   if (status.memory_count !== undefined) lines.push("Memories: " + status.memory_count + " | Skills: " + (status.skills_count || 0))
-  if (status.last_query) lines.push("Last: " + truncateText(status.last_query, 50))
+  if (status.last_query) lines.push("Last: " + truncateText(status.last_query, 45))
   lines.push("Left-click to open | Right-click to capture screen")
   return lines.join("\n")
 }

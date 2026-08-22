@@ -299,13 +299,20 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
     # Build attachments metadata
     attachments: List[Dict[str, Any]] = []
     if target_image and os.path.exists(target_image):
+        win_title = ""
+        win_class = ""
+        if captured_context:
+            win = captured_context.get("active_window", {})
+            win_title = win.get("title", "")
+            win_class = win.get("class", "")
         attachments.append({
             "type": "image",
             "path": target_image,
             "filename": os.path.basename(target_image),
-            "is_screen_capture": bool(screen_context)
+            "is_screen_capture": bool(screen_context),
+            "app_name": win_class or "Active Window",
+            "window_title": win_title
         })
-
     # Prepare prompt text
     prompt_parts = []
     if captured_context:

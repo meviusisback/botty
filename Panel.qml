@@ -249,6 +249,24 @@ Panel {
       }
     }
   }
+  Timer {
+    id: focusTimer
+    interval: 50
+    running: false
+    repeat: false
+    onTriggered: {
+      if (root.opened && promptInput) {
+        promptInput.forceActiveFocus()
+      }
+    }
+  }
+
+  onOpenedChanged: {
+    if (opened) {
+      focusTimer.start()
+      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+    }
+  }
 
   // Periodic status poll
   Timer {
@@ -599,12 +617,12 @@ Panel {
   IpcHandler {
     enabled: true
     target: root.ipcTarget
-    function open(): void { root.open() }
+    function open(): void { root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
     function close(): void { root.close() }
-    function toggle(): void { root.toggle() }
+    function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { root.open(); root.sendQuery(query, "", false) }
-    function captureAndAsk(query: string): void { root.open(); root.sendQuery(query, "", true) }
+    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
+    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
@@ -612,16 +630,15 @@ Panel {
   IpcHandler {
     enabled: true
     target: "botty"
-    function open(): void { root.open() }
+    function open(): void { root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
     function close(): void { root.close() }
-    function toggle(): void { root.toggle() }
+    function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { root.open(); root.sendQuery(query, "", false) }
-    function captureAndAsk(query: string): void { root.open(); root.sendQuery(query, "", true) }
+    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
+    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
-
   // ------------------------------------------------------------- Bar Button (Icon Mode)
   BarIconButton {
     id: button
@@ -735,7 +752,8 @@ Panel {
         root.fetchStatus()
         root.fetchHistory()
         root.fetchModels()
-        promptInput.forceActiveFocus()
+        focusTimer.start()
+        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
       }
     }
 

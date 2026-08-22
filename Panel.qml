@@ -518,7 +518,7 @@ Panel {
     contentWidth: Style.space(540)
     contentHeight: Style.space(700)
 
-    onOpenedChanged: {
+    onOpenChanged: {
       if (open) {
         root.fetchStatus()
         root.fetchHistory()
@@ -706,7 +706,7 @@ Panel {
                   anchors.left: isUser ? undefined : parent.left
                   anchors.right: isUser ? parent.right : undefined
                   width: Math.min(parent.width * 0.94, Math.max(contentCol.implicitWidth + Style.space(24), Style.space(200)))
-                  radius: Style.radius(10)
+                  radius: Style.space(10)
                   color: isUser ? root.alpha(root.accent, 0.14) : Color.layer(Color.surface, 1)
                   borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.35) : root.alpha(root.foreground, 0.1), root.accent)
 
@@ -744,7 +744,7 @@ Panel {
                       model: attachments
                       delegate: BorderSurface {
                         Layout.fillWidth: true
-                        radius: Style.radius(6)
+                        radius: Style.space(6)
                         color: root.alpha(root.foreground, 0.04)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.15), root.accent)
 
@@ -755,8 +755,8 @@ Panel {
 
                           Image {
                             source: modelData.path ? ("file://" + modelData.path) : ""
-                            implicitWidth: Style.space(64)
-                            implicitHeight: Style.space(48)
+                            Layout.preferredWidth: Style.space(64)
+                            Layout.preferredHeight: Style.space(48)
                             fillMode: Image.PreserveAspectCrop
                             mipmap: true
                           }
@@ -819,7 +819,7 @@ Panel {
                         Component {
                           id: codeComponent
                           BorderSurface {
-                            radius: Style.radius(6)
+                            radius: Style.space(6)
                             color: Color.layer(Color.surface, 2)
                             borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
 
@@ -869,7 +869,7 @@ Panel {
                       model: actions
                       delegate: BorderSurface {
                         Layout.fillWidth: true
-                        radius: Style.radius(4)
+                        radius: Style.space(4)
                         color: root.alpha(root.accent, 0.08)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.2), root.accent)
 
@@ -933,7 +933,7 @@ Panel {
           BorderSurface {
             visible: root.rawStatus.state === "working"
             Layout.fillWidth: true
-            radius: Style.radius(8)
+            radius: Style.space(8)
             color: root.alpha(root.accent, 0.1)
             borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.3), root.accent)
 
@@ -964,7 +964,7 @@ Panel {
           BorderSurface {
             visible: root.attachedImagePath.length > 0 || root.screenContextEnabled
             Layout.fillWidth: true
-            radius: Style.radius(6)
+            radius: Style.space(6)
             color: root.alpha(root.accent, 0.08)
             borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.3), root.accent)
 
@@ -976,8 +976,8 @@ Panel {
               Image {
                 visible: root.attachedImagePath.length > 0
                 source: root.attachedImagePath ? ("file://" + root.attachedImagePath) : ""
-                implicitWidth: Style.space(48)
-                implicitHeight: Style.space(36)
+                Layout.preferredWidth: Style.space(48)
+                Layout.preferredHeight: Style.space(36)
                 fillMode: Image.PreserveAspectCrop
                 mipmap: true
               }
@@ -1180,7 +1180,7 @@ Panel {
 
               delegate: BorderSurface {
                 width: memoriesList.width
-                radius: Style.radius(6)
+                radius: Style.space(6)
                 color: Color.layer(Color.surface, 1)
                 borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.1), root.accent)
 
@@ -1239,7 +1239,7 @@ Panel {
 
               delegate: BorderSurface {
                 width: skillsList.width
-                radius: Style.radius(6)
+                radius: Style.space(6)
                 color: Color.layer(Color.surface, 1)
                 borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.1), root.accent)
 
@@ -1324,7 +1324,7 @@ Panel {
               delegate: BorderSurface {
                 width: modelsList.width
                 readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
-                radius: Style.radius(8)
+                radius: Style.space(8)
                 color: isCurrent ? root.alpha(root.accent, 0.15) : Color.layer(Color.surface, 1)
                 borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
 

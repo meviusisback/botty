@@ -1270,19 +1270,47 @@ Panel {
             Layout.fillWidth: true
             spacing: Style.space(6)
 
-            // Context Quick Action Bar
+            // Unified Input Row: [+] [Text Field] [Screen 󰹑] [Mic 󰍬] [Send 󰒭]
             RowLayout {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
-              // Screen Capture Toggle Button
+              // Consolidated [+] Attachment Button (File, Image, Document, Code)
               Button {
+                id: attachBtn
+                enabled: !root.isProcessing
+                iconText: "󰐕"
+                tooltipText: "Attach file, document, code, or image (Right-click: paste clipboard image)"
+                implicitHeight: promptInput.implicitHeight
+                implicitWidth: promptInput.implicitHeight
+                fontSize: Style.space(14)
+                onClicked: fileDialog.open()
+                onRightClicked: root.attachClipboardImage()
+              }
+
+              // Text Input
+              TextField {
+                id: promptInput
+                enabled: !root.isProcessing
+                Layout.fillWidth: true
+                placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic to transcribe)" : "Ask Botty or command a desktop action… (Enter to send)"
+                font.pixelSize: Style.font.body
+                onAccepted: {
+                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
+                    root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled)
+                  }
+                }
+              }
+
+              // Screen Context Toggle Button
+              Button {
+                id: screenBtn
+                enabled: !root.isProcessing
                 iconText: "󰹑"
-                text: "Screen Context"
-                fontSize: Style.font.caption
+                tooltipText: root.screenContextEnabled ? "Screen Context Active (Click to remove)" : "Attach Active Screen Context"
                 selected: root.screenContextEnabled
-                implicitHeight: Style.space(28)
-                tooltipText: "Capture active window as ambient visual context"
+                implicitHeight: promptInput.implicitHeight
+                implicitWidth: promptInput.implicitHeight
                 onClicked: {
                   if (!root.screenContextEnabled) {
                     root.captureScreenNow()
@@ -1290,54 +1318,6 @@ Panel {
                     root.screenContextEnabled = false
                     root.attachedFilePath = ""
                     root.lastCaptureInfo = null
-                  }
-                }
-              }
-
-              // Attach Any File / Document / Code Button
-              Button {
-                iconText: "󰈔"
-                text: "Attach File"
-                fontSize: Style.font.caption
-                implicitHeight: Style.space(28)
-                tooltipText: "Attach any code file, document, PDF, or media"
-                onClicked: fileDialog.open()
-              }
-
-              // Paste Image from Clipboard Button
-              Button {
-                iconText: "󰋩"
-                text: "Paste Image"
-                fontSize: Style.font.caption
-                implicitHeight: Style.space(28)
-                tooltipText: "Paste image from clipboard"
-                onClicked: root.attachClipboardImage()
-              }
-
-              Item { Layout.fillWidth: true }
-
-              Text {
-                text: (root.rawStatus.active_engine || "hermes").toUpperCase() + " • " + (root.rawStatus.active_model || "ox-alpha-free")
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(10)
-                color: root.muted
-              }
-            }
-
-            // Input Row with Voice Dictation & Send
-            RowLayout {
-              Layout.fillWidth: true
-              spacing: Style.space(6)
-
-              TextField {
-                id: promptInput
-                enabled: !root.isProcessing
-                Layout.fillWidth: true
-                placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic again to transcribe)" : "Ask Botty or command a desktop action… (Enter to send)"
-                font.pixelSize: Style.font.body
-                onAccepted: {
-                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
-                    root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled)
                   }
                 }
               }

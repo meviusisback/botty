@@ -250,15 +250,25 @@ def clear_history() -> Dict[str, Any]:
 
 def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
+    msgs = history.get("messages", [])
+    
+    # De-duplicate consecutive identical messages within 10 seconds
+    if msgs:
+        last = msgs[-1]
+        if last.get("role") == role and last.get("content") == content:
+            if abs(int(time.time()) - last.get("timestamp", 0)) < 10:
+                return
+
     msg = {
-        "id": f"msg_{int(time.time()*1000)}_{len(history.get('messages', []))}",
+        "id": f"msg_{int(time.time()*1000)}_{len(msgs)}",
         "role": role,
         "content": content,
         "timestamp": int(time.time()),
         "attachments": attachments or [],
         "actions": actions or []
     }
-    history["messages"].append(msg)
+    msgs.append(msg)
+    history["messages"] = msgs
     save_json_file(HISTORY_FILE, history)
 
 def ask(query: str, image_path: Optional[str] = None, screen_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
@@ -268,9 +278,17 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
     if not query.strip() and not image_path and not screen_context:
         return {"ok": False, "error": "Empty query and no attachment provided."}
 
+    # Prevent concurrent duplicate requests
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            os.kill(pid, 0)
+            return {"ok": False, "error": "Botty is already processing a request."}
+        except (ValueError, OSError):
+            LOCK_FILE.unlink(missing_ok=True)
+
     set_status("working", headline="Botty is thinking…", last_query=query)
     LOCK_FILE.write_text(str(os.getpid()))
-
     captured_context: Optional[Dict[str, Any]] = None
     target_image = image_path
 

@@ -107,12 +107,12 @@ Panel {
   }
 
   function sendQuery(text, imagePath, useScreen) {
+    if (askProc.running || root.rawStatus.state === "working") return
     var q = text || promptInput.text || ""
     var img = imagePath || root.attachedImagePath || ""
     var scr = (useScreen !== undefined) ? useScreen : root.screenContextEnabled
 
     if (!q.trim() && !img && !scr) return
-
     var cmd = ["python3", root.scriptPath(), "ask", q]
     if (img) {
       cmd.push("--image")
@@ -1173,11 +1173,12 @@ Panel {
 
               TextField {
                 id: promptInput
+                enabled: !root.isProcessing
                 Layout.fillWidth: true
                 placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic again to transcribe)" : "Ask Botty or command a desktop action… (Enter to send)"
                 font.pixelSize: Style.font.body
                 onAccepted: {
-                  if (text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled) {
+                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled)) {
                     root.sendQuery(text, root.attachedImagePath, root.screenContextEnabled)
                   }
                 }
@@ -1186,6 +1187,7 @@ Panel {
               // Voice Dictation Button
               Button {
                 id: micBtn
+                enabled: !root.isProcessing
                 iconText: root.isRecordingVoice ? "󰍬" : "󰍭"
                 tooltipText: root.isRecordingVoice ? "Stop recording & transcribe" : "Voice Dictation (Click to speak)"
                 selected: root.isRecordingVoice
@@ -1199,10 +1201,11 @@ Panel {
               Button {
                 iconText: "󰒭"
                 text: "Send"
+                enabled: !root.isProcessing
                 selected: true
                 implicitHeight: promptInput.implicitHeight
                 onClicked: {
-                  if (promptInput.text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled) {
+                  if (!root.isProcessing && (promptInput.text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled)) {
                     root.sendQuery(promptInput.text, root.attachedImagePath, root.screenContextEnabled)
                   }
                 }

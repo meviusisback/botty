@@ -21,7 +21,7 @@ function statusColor(state, fg, accent, urgent) {
 }
 
 /**
- * Returns Panda Nerd Font icon glyph for the bar and headers.
+ * Returns Panda icon for the bar and headers.
  */
 function statusIcon(state) {
   var s = String(state || "").toLowerCase()
@@ -34,7 +34,7 @@ function statusIcon(state) {
   if (s === "error" || s === "failed") {
     return "󰅚" // Alert / error
   }
-  return "󰎲" // Panda glyph (nf-md-panda)
+  return "🐼" // Panda Emoji (guaranteed Panda face on all fonts)
 }
 
 /**
@@ -63,20 +63,18 @@ function stripReasoning(text) {
 }
 
 /**
- * Parses message text into structured visual blocks (markdown text, code blocks, actions).
+ * Parses message text into structured visual blocks (markdown text, code blocks).
  */
 function parseBlocks(content) {
   if (!content) return []
   var clean = stripReasoning(content)
   var blocks = []
   
-  // Split on code fences ```lang ... ```
   var codeBlockRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g
   var lastIndex = 0
   var match
 
   while ((match = codeBlockRegex.exec(clean)) !== null) {
-    // Text before the code block
     var preText = clean.substring(lastIndex, match.index).trim()
     if (preText.length > 0) {
       blocks.push({
@@ -85,7 +83,7 @@ function parseBlocks(content) {
       })
     }
 
-    var lang = (match[1] || "").trim() || "text"
+    var lang = (match[1] || "").trim() || "bash"
     var code = match[2] || ""
     blocks.push({
       type: "code",
@@ -96,7 +94,6 @@ function parseBlocks(content) {
     lastIndex = match.index + match[0].length
   }
 
-  // Trailing text
   var remaining = clean.substring(lastIndex).trim()
   if (remaining.length > 0) {
     blocks.push({
@@ -105,7 +102,6 @@ function parseBlocks(content) {
     })
   }
 
-  // If no code blocks matched, return single text block
   if (blocks.length === 0 && clean.length > 0) {
     blocks.push({
       type: "text",
@@ -146,7 +142,7 @@ function getBarHeadline(status, maxLen) {
   if (status.state === "working") return "Botty thinking…"
   if (status.state === "error") return "Botty: Error"
   if (status.last_query && status.last_query.length > 0) {
-    return truncateText(status.last_query, maxLen || 26)
+    return truncateText(status.last_query, maxLen || 24)
   }
   return "Botty"
 }
@@ -155,8 +151,8 @@ function getBarHeadline(status, maxLen) {
  * Generates bar tooltip text.
  */
 function getTooltipText(status) {
-  if (!status) return "Botty (Panda) - Desktop Agent Assistant"
-  var lines = ["Botty 󰎲 - Desktop Agent Assistant (Hermes)"]
+  if (!status) return "Botty 🐼 - Desktop Agent Assistant"
+  var lines = ["Botty 🐼 - Desktop Agent Assistant (Hermes)"]
   lines.push("Status: " + statusBadgeText(status.state))
   if (status.active_model) lines.push("Model: " + status.active_model)
   if (status.memory_count !== undefined) lines.push("Memories: " + status.memory_count + " | Skills: " + (status.skills_count || 0))

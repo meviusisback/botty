@@ -35,7 +35,7 @@ Panel {
   // Live state
   property var rawStatus: ({
     ok: true,
-    state: "idle", // idle, working, waiting, error
+    state: "idle",
     headline: "Ready",
     last_query: "",
     last_answer: "",
@@ -416,7 +416,7 @@ Panel {
     anchors.fill: parent
     visible: !root.barShowsText
     bar: root.bar
-    text: Model.statusIcon(root.rawStatus.state) // Panda icon 󰎲
+    text: Model.statusIcon(root.rawStatus.state) // Panda icon 🐼
     tooltipText: Model.getTooltipText(root.rawStatus)
     active: root.rawStatus.state === "working" || root.rawStatus.state === "waiting"
     activeColor: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -471,7 +471,7 @@ Panel {
       spacing: Style.space(6)
 
       Text {
-        text: Model.statusIcon(root.rawStatus.state) // Panda icon 󰎲
+        text: Model.statusIcon(root.rawStatus.state) // Panda icon 🐼
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
         color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -548,10 +548,10 @@ Panel {
 
           Text {
             anchors.centerIn: parent
-            text: Model.statusIcon(root.rawStatus.state) // Panda icon 󰎲
+            text: Model.statusIcon(root.rawStatus.state) // Panda icon 🐼
             color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
             font.family: root.fontFamily
-            font.pixelSize: Style.space(22)
+            font.pixelSize: Style.space(20)
             opacity: root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
           }
         }
@@ -565,7 +565,7 @@ Panel {
             spacing: Style.space(6)
 
             Text {
-              text: "Botty"
+              text: "Botty 🐼"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -695,7 +695,7 @@ Panel {
               delegate: Item {
                 id: msgDelegate
                 width: chatListView.width
-                implicitHeight: msgCard.implicitHeight
+                implicitHeight: msgCard.implicitHeight + Style.space(4)
 
                 readonly property bool isUser: modelData.role === "user"
                 readonly property var blocks: Model.parseBlocks(modelData.content || "")
@@ -711,8 +711,8 @@ Panel {
                   width: isUser ? Math.min(parent.width * 0.88, Math.max(contentCol.implicitWidth + Style.space(24), Style.space(140))) : (parent.width - Style.space(8))
                   implicitHeight: contentCol.implicitHeight + Style.space(20)
                   radius: Style.space(10)
-                  color: isUser ? root.alpha(root.accent, 0.12) : Color.layer(Color.surface, 1)
-                  borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.1), root.accent)
+                  color: isUser ? root.alpha(root.accent, 0.12) : root.alpha(root.foreground, 0.04)
+                  borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.12), root.accent)
 
                   ColumnLayout {
                     id: contentCol
@@ -728,7 +728,7 @@ Panel {
                       spacing: Style.space(6)
 
                       Text {
-                        text: isUser ? "You" : "Botty 󰎲"
+                        text: isUser ? "You" : "Botty 🐼"
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         font.bold: true
@@ -750,12 +750,16 @@ Panel {
                       model: attachments
                       delegate: BorderSurface {
                         Layout.fillWidth: true
+                        implicitHeight: attRow.implicitHeight + Style.space(8)
                         radius: Style.space(4)
                         color: root.alpha(root.accent, 0.1)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
 
                         RowLayout {
-                          anchors.fill: parent
+                          id: attRow
+                          anchors.left: parent.left
+                          anchors.right: parent.right
+                          anchors.top: parent.top
                           anchors.margins: Style.space(4)
                           spacing: Style.space(6)
 
@@ -814,12 +818,16 @@ Panel {
                           id: codeCard
                           visible: modelData.type === "code"
                           width: parent.width
+                          implicitHeight: codeCol.implicitHeight + Style.space(16)
                           radius: Style.space(6)
-                          color: Color.layer(Color.surface, 2)
+                          color: root.alpha(root.foreground, 0.08)
                           borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
 
                           ColumnLayout {
-                            anchors.fill: parent
+                            id: codeCol
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
                             anchors.margins: Style.space(8)
                             spacing: Style.space(4)
 
@@ -858,17 +866,21 @@ Panel {
                       }
                     }
 
-                    // Action Receipts (Computer actions / memories / skills created)
+                    // Action Receipts
                     Repeater {
                       model: actions
                       delegate: BorderSurface {
                         Layout.fillWidth: true
+                        implicitHeight: actRow.implicitHeight + Style.space(8)
                         radius: Style.space(4)
                         color: root.alpha(root.accent, 0.08)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.2), root.accent)
 
                         RowLayout {
-                          anchors.fill: parent
+                          id: actRow
+                          anchors.left: parent.left
+                          anchors.right: parent.right
+                          anchors.top: parent.top
                           anchors.margins: Style.space(4)
                           spacing: Style.space(6)
 
@@ -925,14 +937,19 @@ Panel {
 
           // Active Thinking Indicator Card
           BorderSurface {
+            id: thinkingCard
             visible: root.rawStatus.state === "working"
             Layout.fillWidth: true
+            implicitHeight: thinkRow.implicitHeight + Style.space(16)
             radius: Style.space(8)
             color: root.alpha(root.accent, 0.1)
             borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.3), root.accent)
 
             RowLayout {
-              anchors.fill: parent
+              id: thinkRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
               anchors.margins: Style.space(8)
               spacing: Style.space(10)
 
@@ -956,14 +973,19 @@ Panel {
 
           // Active Context Strip (Compact text badge, no screen image preview)
           BorderSurface {
+            id: contextStrip
             visible: root.attachedImagePath.length > 0 || root.screenContextEnabled
             Layout.fillWidth: true
+            implicitHeight: ctxRow.implicitHeight + Style.space(12)
             radius: Style.space(6)
             color: root.alpha(root.accent, 0.08)
             borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.3), root.accent)
 
             RowLayout {
-              anchors.fill: parent
+              id: ctxRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
               anchors.margins: Style.space(6)
               spacing: Style.space(8)
 
@@ -985,7 +1007,7 @@ Panel {
                       var app = win ? (win.class || win.title || "Active Window") : "Active Window"
                       return "Screen Context Active (" + app + ")"
                     }
-                    return "Media Attachment Attached"
+                    return "Media Attachment Ready"
                   }
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -996,7 +1018,7 @@ Panel {
                 Text {
                   text: {
                     if (root.screenContextEnabled && root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
-                      return root.lastCaptureInfo.active_window.title || "Window context will be analyzed"
+                      return root.lastCaptureInfo.active_window.title || "Active window context attached"
                     }
                     return root.attachedImageFilename || "Attached file ready to send"
                   }
@@ -1184,41 +1206,52 @@ Panel {
               model: root.memoriesData
               spacing: Style.space(6)
 
-              delegate: BorderSurface {
+              delegate: Item {
                 width: memoriesList.width
-                radius: Style.space(6)
-                color: Color.layer(Color.surface, 1)
-                borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.1), root.accent)
+                implicitHeight: memCard.implicitHeight + Style.space(4)
 
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.margins: Style.space(8)
-                  spacing: Style.space(8)
+                BorderSurface {
+                  id: memCard
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  implicitHeight: memRow.implicitHeight + Style.space(16)
+                  radius: Style.space(6)
+                  color: root.alpha(root.foreground, 0.04)
+                  borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.1), root.accent)
 
-                  Text {
-                    text: modelData.type === "user" ? "󰋚 User" : "󰎲 Botty"
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.space(10)
-                    font.bold: true
-                    color: root.accent
-                  }
+                  RowLayout {
+                    id: memRow
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(8)
+                    spacing: Style.space(8)
 
-                  Text {
-                    text: modelData.text || ""
-                    textFormat: Text.PlainText
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    color: root.foreground
-                    wrapMode: Text.Wrap
-                    Layout.fillWidth: true
-                  }
+                    Text {
+                      text: modelData.type === "user" ? "󰋚 User" : "🐼 Botty"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.space(10)
+                      font.bold: true
+                      color: root.accent
+                    }
 
-                  Button {
-                    iconText: "󰆏"
-                    tooltipText: "Copy memory"
-                    implicitWidth: Style.space(24)
-                    implicitHeight: Style.space(24)
-                    onClicked: root.copyText(modelData.text)
+                    Text {
+                      text: modelData.text || ""
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      color: root.foreground
+                      wrapMode: Text.Wrap
+                      Layout.fillWidth: true
+                    }
+
+                    Button {
+                      iconText: "󰆏"
+                      tooltipText: "Copy memory"
+                      implicitWidth: Style.space(24)
+                      implicitHeight: Style.space(24)
+                      onClicked: root.copyText(modelData.text)
+                    }
                   }
                 }
               }
@@ -1235,7 +1268,7 @@ Panel {
 
           ScrollView {
             Layout.fillWidth: true
-            implicitHeight: Style.space(120)
+            implicitHeight: Style.space(130)
             clip: true
 
             ListView {
@@ -1243,45 +1276,56 @@ Panel {
               model: root.skillsData
               spacing: Style.space(4)
 
-              delegate: BorderSurface {
+              delegate: Item {
                 width: skillsList.width
-                radius: Style.space(6)
-                color: Color.layer(Color.surface, 1)
-                borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.1), root.accent)
+                implicitHeight: skillCard.implicitHeight + Style.space(2)
 
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.margins: Style.space(6)
-                  spacing: Style.space(8)
+                BorderSurface {
+                  id: skillCard
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  implicitHeight: skillRow.implicitHeight + Style.space(12)
+                  radius: Style.space(6)
+                  color: root.alpha(root.foreground, 0.04)
+                  borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.1), root.accent)
 
-                  Text {
-                    text: "󰘦"
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.icon
-                    color: root.accent
-                  }
-
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(2)
+                  RowLayout {
+                    id: skillRow
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(6)
+                    spacing: Style.space(8)
 
                     Text {
-                      text: modelData.name || ""
-                      textFormat: Text.PlainText
+                      text: "󰘦"
                       font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: true
-                      color: root.foreground
+                      font.pixelSize: Style.font.icon
+                      color: root.accent
                     }
 
-                    Text {
-                      text: modelData.description || ""
-                      textFormat: Text.PlainText
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.space(10)
-                      color: root.dim
-                      elide: Text.ElideRight
+                    ColumnLayout {
                       Layout.fillWidth: true
+                      spacing: Style.space(2)
+
+                      Text {
+                        text: modelData.name || ""
+                        textFormat: Text.PlainText
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        color: root.foreground
+                      }
+
+                      Text {
+                        text: modelData.description || ""
+                        textFormat: Text.PlainText
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.space(10)
+                        color: root.dim
+                        elide: Text.ElideRight
+                        Layout.fillWidth: true
+                      }
                     }
                   }
                 }
@@ -1327,70 +1371,81 @@ Panel {
               model: root.modelsData
               spacing: Style.space(6)
 
-              delegate: BorderSurface {
+              delegate: Item {
                 width: modelsList.width
+                implicitHeight: modelCard.implicitHeight + Style.space(4)
                 readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
-                radius: Style.space(8)
-                color: isCurrent ? root.alpha(root.accent, 0.15) : Color.layer(Color.surface, 1)
-                borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
 
-                RowLayout {
-                  anchors.fill: parent
-                  anchors.margins: Style.space(8)
-                  spacing: Style.space(10)
+                BorderSurface {
+                  id: modelCard
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  implicitHeight: modelRow.implicitHeight + Style.space(16)
+                  radius: Style.space(8)
+                  color: isCurrent ? root.alpha(root.accent, 0.15) : root.alpha(root.foreground, 0.04)
+                  borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
 
-                  Text {
-                    text: isCurrent ? "󰄬" : "󰎲" // Panda icon
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.icon
-                    color: isCurrent ? "#10B981" : root.muted
-                  }
-
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: Style.space(2)
-
-                    RowLayout {
-                      spacing: Style.space(6)
-
-                      Text {
-                        text: modelData.name || modelData.id
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        font.bold: isCurrent
-                        color: isCurrent ? root.accent : root.foreground
-                      }
-
-                      Rectangle {
-                        radius: Style.space(3)
-                        color: root.alpha(root.foreground, 0.08)
-                        implicitWidth: catText.implicitWidth + Style.space(6)
-                        implicitHeight: catText.implicitHeight + Style.space(2)
-
-                        Text {
-                          id: catText
-                          anchors.centerIn: parent
-                          text: modelData.category || modelData.provider
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.space(8)
-                          color: root.muted
-                        }
-                      }
-                    }
+                  RowLayout {
+                    id: modelRow
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(8)
+                    spacing: Style.space(10)
 
                     Text {
-                      text: modelData.id
-                      textFormat: Text.PlainText
-                      font.family: "JetBrainsMono Nerd Font"
-                      font.pixelSize: Style.space(10)
-                      color: root.dim
+                      text: isCurrent ? "󰄬" : "🐼"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.icon
+                      color: isCurrent ? "#10B981" : root.muted
                     }
-                  }
 
-                  Button {
-                    text: isCurrent ? "Active" : "Select"
-                    selected: isCurrent
-                    onClicked: root.selectModel(modelData.id, modelData.provider)
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: Style.space(2)
+
+                      RowLayout {
+                        spacing: Style.space(6)
+
+                        Text {
+                          text: modelData.name || modelData.id
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                          font.bold: isCurrent
+                          color: isCurrent ? root.accent : root.foreground
+                        }
+
+                        Rectangle {
+                          radius: Style.space(3)
+                          color: root.alpha(root.foreground, 0.08)
+                          implicitWidth: catText.implicitWidth + Style.space(6)
+                          implicitHeight: catText.implicitHeight + Style.space(2)
+
+                          Text {
+                            id: catText
+                            anchors.centerIn: parent
+                            text: modelData.category || modelData.provider
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(8)
+                            color: root.muted
+                          }
+                        }
+                      }
+
+                      Text {
+                        text: modelData.id
+                        textFormat: Text.PlainText
+                        font.family: "JetBrainsMono Nerd Font"
+                        font.pixelSize: Style.space(10)
+                        color: root.dim
+                      }
+                    }
+
+                    Button {
+                      text: isCurrent ? "Active" : "Select"
+                      selected: isCurrent
+                      onClicked: root.selectModel(modelData.id, modelData.provider)
+                    }
                   }
                 }
               }

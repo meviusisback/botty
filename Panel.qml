@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Dialogs
 import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
@@ -235,16 +234,19 @@ Panel {
     delMemProc.running = true
   }
 
-  // ------------------------------------------------------------- Native File Dialog
-  FileDialog {
-    id: fileDialog
-    title: "Attach File, Document, or Media to Botty"
-    currentFolder: "file://" + Quickshell.env("HOME")
-    onAccepted: {
-      var raw = selectedFile.toString()
-      var path = raw.replace(/^file:\/\//, "")
-      try { path = decodeURIComponent(path) } catch (e) {}
-      root.attachFileNow(path)
+  Process {
+    id: pickFileProc
+    command: ["python3", root.scriptPath(), "pick-file"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok && data.path) {
+            root.attachFileNow(data.path)
+          }
+        } catch (e) {}
+      }
     }
   }
 
@@ -1284,7 +1286,7 @@ Panel {
                 implicitHeight: promptInput.implicitHeight
                 implicitWidth: promptInput.implicitHeight
                 fontSize: Style.space(14)
-                onClicked: fileDialog.open()
+                onClicked: if (!pickFileProc.running) pickFileProc.running = true
                 onRightClicked: root.attachClipboardImage()
               }
 

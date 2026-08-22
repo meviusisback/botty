@@ -4,7 +4,7 @@ botty_backend.py - Native backend for Botty Omarchy bar widget and desktop assis
 Standard-library only. Interfaces with Hermes Agent profile "botty", OMP, Claude, and other agents,
 captures screen context, attaches any file/document/media, manages conversation history,
 handles model & provider selection, continuous learning, memory deletion, voice dictation,
-and local AES-256 encrypted memory vault management.
+out-of-process floating file picker, and local AES-256 encrypted memory vault management.
 """
 
 import sys
@@ -25,7 +25,7 @@ from typing import Dict, Any, List, Optional, Tuple
 # Base paths
 BOTTY_DATA_DIR = Path.home() / ".local" / "share" / "botty"
 BOTTY_DATA_DIR.mkdir(parents=True, exist_ok=True)
-os.chmod(BOTTY_DATA_DIR, 0o700) # Enforce strict owner-only permissions
+os.chmod(BOTTY_DATA_DIR, 0o700)
 
 CONFIG_FILE = BOTTY_DATA_DIR / "config.json"
 STATUS_FILE = BOTTY_DATA_DIR / "status.json"
@@ -93,10 +93,52 @@ def save_json_file(path: Path, data: Any) -> None:
             tmp_path.unlink()
         raise e
 
+# ── Out-of-Process File Picker ─────────────────────────────────────────────────
+
+def pick_file_dialog() -> Dict[str, Any]:
+    """
+    Opens a native floating GTK3 file chooser dialog out-of-process.
+    Completely isolates Quickshell from in-process glib/GIO DBus assertions.
+    """
+    try:
+        import gi
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+        
+        dialog = Gtk.FileChooserDialog(
+            title="Attach File to Botty",
+            parent=None,
+            action=Gtk.FileChooserAction.OPEN
+        )
+        dialog.add_buttons(
+            Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL,
+            Gtk.STOCK_OPEN, Gtk.ResponseType.OK
+        )
+        dialog.set_default_size(740, 500)
+        dialog.set_current_folder(str(Path.home()))
+        
+        all_filter = Gtk.FileFilter()
+        all_filter.set_name("All Files & Documents")
+        all_filter.add_pattern("*")
+        dialog.add_filter(all_filter)
+        
+        res = dialog.run()
+        selected_path = ""
+        if res == Gtk.ResponseType.OK:
+            selected_path = dialog.get_filename() or ""
+        dialog.destroy()
+        while Gtk.events_pending():
+            Gtk.main_iteration()
+            
+        if selected_path:
+            return {"ok": True, "path": selected_path}
+        return {"ok": False, "cancelled": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 # ── Local Encryption & Vault Security ──────────────────────────────────────────
 
 def get_machine_vault_key() -> str:
-    """Generates a hardware-bound local encryption key using machine-id and user UID."""
     machine_id = ""
     for mid_path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
         if os.path.exists(mid_path):
@@ -109,7 +151,6 @@ def get_machine_vault_key() -> str:
     return hashlib.sha256(user_seed.encode("utf-8")).hexdigest()
 
 def secure_file_permissions(filepath: Path) -> None:
-    """Enforces owner-only (0600) permissions on sensitive files."""
     if filepath.exists():
         try:
             os.chmod(filepath, 0o600)
@@ -117,7 +158,6 @@ def secure_file_permissions(filepath: Path) -> None:
             pass
 
 def update_encrypted_vault() -> bool:
-    """Encrypts local memories and history into AES-256 PBKDF2 vault backup."""
     payload = {
         "timestamp": int(time.time()),
         "memories": get_memories().get("memories", []),
@@ -138,7 +178,6 @@ def update_encrypted_vault() -> bool:
     return False
 
 def get_vault_security_info() -> Dict[str, Any]:
-    """Returns local encryption and security hardening status."""
     has_vault = VAULT_FILE.exists()
     vault_size = VAULT_FILE.stat().st_size if has_vault else 0
     return {
@@ -155,7 +194,6 @@ def get_vault_security_info() -> Dict[str, Any]:
 # ── File Attachment & Context Inspection ───────────────────────────────────────
 
 def inspect_file(filepath: str) -> Dict[str, Any]:
-    """Inspects any attached file (code, documents, PDF, images, etc.) and prepares context."""
     p = Path(filepath).expanduser().resolve()
     if not p.exists():
         return {"ok": False, "error": f"File not found: {filepath}"}
@@ -171,7 +209,6 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
     mime, _ = mimetypes.guess_type(str(p))
     mime = mime or "application/octet-stream"
 
-    # Category detection
     image_exts = {"png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "ico"}
     code_exts = {
         "py", "js", "ts", "jsx", "tsx", "rs", "c", "cpp", "h", "hpp", "go",
@@ -193,11 +230,9 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
         category = "file"
         icon = "󰈔"
 
-    # Read preview text content for code/text files
     text_content = ""
     if category == "code" or mime.startswith("text/"):
         try:
-            # Read up to 120 KB
             text_content = p.read_text(encoding="utf-8", errors="replace")[:120000]
         except Exception:
             pass
@@ -459,9 +494,6 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     save_json_file(HISTORY_FILE, history)
 
 def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Executes a query through the active agent engine, attaching screenshot, files, or media.
-    """
     if not query.strip() and not image_path and not file_path and not screen_context:
         return {"ok": False, "error": "Empty query and no attachment provided."}
 
@@ -494,7 +526,6 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             if finfo.get("is_image") and not target_image:
                 target_image = finfo["path"]
 
-    # Build attachments metadata
     attachments: List[Dict[str, Any]] = []
     if target_image and os.path.exists(target_image):
         win_title = ""
@@ -522,7 +553,6 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "is_screen_capture": False
         })
 
-    # Prepare prompt text
     prompt_parts = []
     if captured_context:
         win = captured_context.get("active_window", {})
@@ -610,7 +640,6 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         add_history_message("assistant", cleaned_response, actions=actions)
         set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
 
-        # Background update of encrypted vault backup
         try:
             update_encrypted_vault()
         except Exception:
@@ -1032,6 +1061,8 @@ def main():
     inspect_p = subparsers.add_parser("inspect-file", help="Inspect file metadata")
     inspect_p.add_argument("path", help="Path to file")
 
+    subparsers.add_parser("pick-file", help="Open native floating GTK3 file chooser dialog")
+
     cap_p = subparsers.add_parser("capture", help="Capture screen/window")
     cap_p.add_argument("--mode", dest="mode", default="activewindow", choices=["activewindow", "fullscreen", "region"])
 
@@ -1086,6 +1117,8 @@ def main():
         print(json.dumps(res, ensure_ascii=False))
     elif args.command == "inspect-file":
         print(json.dumps(inspect_file(args.path), ensure_ascii=False))
+    elif args.command == "pick-file":
+        print(json.dumps(pick_file_dialog(), ensure_ascii=False))
     elif args.command == "capture":
         print(json.dumps(capture_screen(args.mode), ensure_ascii=False))
     elif args.command == "history":

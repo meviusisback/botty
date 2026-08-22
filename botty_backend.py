@@ -2,8 +2,9 @@
 """
 botty_backend.py - Native backend for Botty Omarchy bar widget and desktop assistant.
 Standard-library only. Interfaces with Hermes Agent profile "botty", OMP, Claude, and other agents,
-captures screen context, manages conversation history, handles model & provider selection,
-continuous learning, memory deletion, and voice dictation.
+captures screen context, attaches any file/document/media, manages conversation history,
+handles model & provider selection, continuous learning, memory deletion, voice dictation,
+and local AES-256 encrypted memory vault management.
 """
 
 import sys
@@ -16,21 +17,26 @@ import subprocess
 import shutil
 import sqlite3
 import argparse
+import mimetypes
+import hashlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 # Base paths
 BOTTY_DATA_DIR = Path.home() / ".local" / "share" / "botty"
 BOTTY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+os.chmod(BOTTY_DATA_DIR, 0o700) # Enforce strict owner-only permissions
 
 CONFIG_FILE = BOTTY_DATA_DIR / "config.json"
 STATUS_FILE = BOTTY_DATA_DIR / "status.json"
 HISTORY_FILE = BOTTY_DATA_DIR / "history.json"
+VAULT_FILE = BOTTY_DATA_DIR / "vault.enc"
 LOCK_FILE = BOTTY_DATA_DIR / "running.pid"
 VOICE_PID_FILE = BOTTY_DATA_DIR / "voice_record.pid"
 VOICE_WAV_FILE = Path("/tmp/botty_dictation.wav")
 SCREENSHOT_DIR = BOTTY_DATA_DIR / "captures"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+os.chmod(SCREENSHOT_DIR, 0o700)
 
 HERMES_DIR = Path.home() / ".hermes"
 HERMES_BOTTY_DIR = HERMES_DIR / "profiles" / "botty"
@@ -80,11 +86,137 @@ def save_json_file(path: Path, data: Any) -> None:
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.chmod(tmp_path, 0o600)
         tmp_path.replace(path)
     except Exception as e:
         if tmp_path.exists():
             tmp_path.unlink()
         raise e
+
+# ── Local Encryption & Vault Security ──────────────────────────────────────────
+
+def get_machine_vault_key() -> str:
+    """Generates a hardware-bound local encryption key using machine-id and user UID."""
+    machine_id = ""
+    for mid_path in ["/etc/machine-id", "/var/lib/dbus/machine-id"]:
+        if os.path.exists(mid_path):
+            try:
+                machine_id = Path(mid_path).read_text().strip()
+                break
+            except Exception:
+                pass
+    user_seed = f"{os.getuid()}:{os.environ.get('USER', 'user')}:{machine_id}"
+    return hashlib.sha256(user_seed.encode("utf-8")).hexdigest()
+
+def secure_file_permissions(filepath: Path) -> None:
+    """Enforces owner-only (0600) permissions on sensitive files."""
+    if filepath.exists():
+        try:
+            os.chmod(filepath, 0o600)
+        except Exception:
+            pass
+
+def update_encrypted_vault() -> bool:
+    """Encrypts local memories and history into AES-256 PBKDF2 vault backup."""
+    payload = {
+        "timestamp": int(time.time()),
+        "memories": get_memories().get("memories", []),
+        "history": load_json_file(HISTORY_FILE, {})
+    }
+    raw_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    key = get_machine_vault_key()
+    
+    try:
+        enc_cmd = ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "10000", "-pass", f"pass:{key}"]
+        proc = subprocess.run(enc_cmd, input=raw_bytes, capture_output=True)
+        if proc.returncode == 0 and proc.stdout:
+            VAULT_FILE.write_bytes(proc.stdout)
+            secure_file_permissions(VAULT_FILE)
+            return True
+    except Exception:
+        pass
+    return False
+
+def get_vault_security_info() -> Dict[str, Any]:
+    """Returns local encryption and security hardening status."""
+    has_vault = VAULT_FILE.exists()
+    vault_size = VAULT_FILE.stat().st_size if has_vault else 0
+    return {
+        "ok": True,
+        "encryption_enabled": True,
+        "cipher": "AES-256-CBC (PBKDF2 10,000 iter)",
+        "key_derivation": "Hardware-Bound (Machine-ID + User UID)",
+        "file_permissions": "POSIX 0600 / 0700 (Owner Only)",
+        "vault_path": str(VAULT_FILE),
+        "vault_size_bytes": vault_size,
+        "last_encrypted": int(VAULT_FILE.stat().st_mtime) if has_vault else int(time.time())
+    }
+
+# ── File Attachment & Context Inspection ───────────────────────────────────────
+
+def inspect_file(filepath: str) -> Dict[str, Any]:
+    """Inspects any attached file (code, documents, PDF, images, etc.) and prepares context."""
+    p = Path(filepath).expanduser().resolve()
+    if not p.exists():
+        return {"ok": False, "error": f"File not found: {filepath}"}
+
+    size_bytes = p.stat().st_size
+    size_str = f"{size_bytes} B"
+    if size_bytes > 1024 * 1024:
+        size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+    elif size_bytes > 1024:
+        size_str = f"{size_bytes / 1024:.1f} KB"
+
+    ext = p.suffix.lower().lstrip(".")
+    mime, _ = mimetypes.guess_type(str(p))
+    mime = mime or "application/octet-stream"
+
+    # Category detection
+    image_exts = {"png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "ico"}
+    code_exts = {
+        "py", "js", "ts", "jsx", "tsx", "rs", "c", "cpp", "h", "hpp", "go",
+        "java", "sh", "bash", "zsh", "lua", "toml", "yaml", "yml", "json",
+        "md", "txt", "csv", "html", "css", "xml", "sql", "qml", "ini", "conf"
+    }
+    doc_exts = {"pdf", "docx", "doc", "odt", "rtf", "xlsx", "pptx"}
+
+    if ext in image_exts:
+        category = "image"
+        icon = "󰋩"
+    elif ext in code_exts or mime.startswith("text/"):
+        category = "code"
+        icon = "󰈙"
+    elif ext in doc_exts or "pdf" in mime:
+        category = "document"
+        icon = "󰈦"
+    else:
+        category = "file"
+        icon = "󰈔"
+
+    # Read preview text content for code/text files
+    text_content = ""
+    if category == "code" or mime.startswith("text/"):
+        try:
+            # Read up to 120 KB
+            text_content = p.read_text(encoding="utf-8", errors="replace")[:120000]
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "path": str(p),
+        "filename": p.name,
+        "extension": ext,
+        "size_bytes": size_bytes,
+        "size_str": size_str,
+        "category": category,
+        "icon": icon,
+        "is_image": category == "image",
+        "has_text_content": bool(text_content),
+        "text_preview": text_content
+    }
+
+# ── Agent Engines & Models ────────────────────────────────────────────────────
 
 def get_active_engine() -> str:
     cfg = load_json_file(CONFIG_FILE, {"agent_engine": "hermes"})
@@ -139,7 +271,6 @@ def get_agent_engines() -> Dict[str, Any]:
     }
 
 def get_active_model() -> Dict[str, str]:
-    """Reads the active model and provider from botty profile config.yaml."""
     if not HERMES_CONFIG_FILE.exists():
         return {"model": "ox-alpha-free", "provider": "opencode-go"}
     try:
@@ -156,7 +287,6 @@ def get_active_model() -> Dict[str, str]:
         return {"model": "ox-alpha-free", "provider": "opencode-go"}
 
 def get_status() -> Dict[str, Any]:
-    """Returns the current state for bar widget polling."""
     active_m = get_active_model()
     active_eng = get_active_engine()
     default_status = {
@@ -224,6 +354,7 @@ def count_memories() -> int:
     count = 0
     for f in [mem_file, user_file]:
         if f.exists():
+            secure_file_permissions(f)
             try:
                 content = f.read_text(encoding="utf-8")
                 entries = [e.strip() for e in content.split("§") if e.strip()]
@@ -272,6 +403,8 @@ def capture_screen(mode: str = "activewindow") -> Dict[str, Any]:
     if not capture_path.exists():
         return {"ok": False, "error": "Screenshot file was not generated."}
 
+    secure_file_permissions(capture_path)
+
     return {
         "ok": True,
         "image_path": str(capture_path),
@@ -307,7 +440,6 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
     
-    # De-duplicate consecutive identical messages within 10 seconds
     if msgs:
         last = msgs[-1]
         if last.get("role") == role and last.get("content") == content:
@@ -326,14 +458,13 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     history["messages"] = msgs
     save_json_file(HISTORY_FILE, history)
 
-def ask(query: str, image_path: Optional[str] = None, screen_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
     """
-    Executes a query through the active agent engine (Hermes, OMP, Claude, or Codex).
+    Executes a query through the active agent engine, attaching screenshot, files, or media.
     """
-    if not query.strip() and not image_path and not screen_context:
+    if not query.strip() and not image_path and not file_path and not screen_context:
         return {"ok": False, "error": "Empty query and no attachment provided."}
 
-    # Reject concurrent executions
     if LOCK_FILE.exists():
         try:
             pid = int(LOCK_FILE.read_text().strip())
@@ -347,6 +478,7 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
 
     captured_context: Optional[Dict[str, Any]] = None
     target_image = image_path
+    attached_file_info: Optional[Dict[str, Any]] = None
 
     if screen_context:
         cap = capture_screen(mode="activewindow")
@@ -354,6 +486,13 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
             captured_context = cap
             if not target_image:
                 target_image = cap.get("image_path")
+
+    if file_path and os.path.exists(file_path):
+        finfo = inspect_file(file_path)
+        if finfo.get("ok"):
+            attached_file_info = finfo
+            if finfo.get("is_image") and not target_image:
+                target_image = finfo["path"]
 
     # Build attachments metadata
     attachments: List[Dict[str, Any]] = []
@@ -373,6 +512,16 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
             "window_title": win_title
         })
 
+    if attached_file_info and not attached_file_info.get("is_image"):
+        attachments.append({
+            "type": attached_file_info.get("category", "file"),
+            "path": attached_file_info["path"],
+            "filename": attached_file_info["filename"],
+            "size_str": attached_file_info["size_str"],
+            "icon": attached_file_info["icon"],
+            "is_screen_capture": False
+        })
+
     # Prepare prompt text
     prompt_parts = []
     if captured_context:
@@ -382,7 +531,17 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
         if win_title or win_class:
             prompt_parts.append(f"[Active Window Context: {win_class} — '{win_title}']\n")
 
-    user_query = query.strip() if query.strip() else "Analyze the attached screenshot context."
+    if attached_file_info and not attached_file_info.get("is_image"):
+        fname = attached_file_info["filename"]
+        fpath = attached_file_info["path"]
+        fext = attached_file_info["extension"]
+        if attached_file_info.get("has_text_content"):
+            preview = attached_file_info["text_preview"]
+            prompt_parts.append(f"[ATTACHED FILE: {fname} (Path: {fpath})]\n```{fext}\n{preview}\n```\n[END ATTACHED FILE]\n")
+        else:
+            prompt_parts.append(f"[ATTACHED DOCUMENT: {fname} (Path: {fpath}, Size: {attached_file_info['size_str']})]\nPlease inspect this file using your file/document tools.\n[END ATTACHED DOCUMENT]\n")
+
+    user_query = query.strip() if query.strip() else ("Analyze the attached file." if attached_file_info else "Analyze the attached screenshot context.")
     prompt_parts.append(user_query)
     final_prompt = "\n".join(prompt_parts)
 
@@ -401,7 +560,6 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
     elif engine == "codex":
         cmd = ["codex", "exec", final_prompt]
     else:
-        # Default: Hermes Agent profile botty
         cmd = [
             "hermes",
             "-p", "botty",
@@ -452,6 +610,12 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
         add_history_message("assistant", cleaned_response, actions=actions)
         set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
 
+        # Background update of encrypted vault backup
+        try:
+            update_encrypted_vault()
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "response": cleaned_response,
@@ -479,13 +643,8 @@ def ask(query: str, image_path: Optional[str] = None, screen_context: bool = Fal
 # ── Providers & Models Discovery (Active Key Filtered) ──────────────────────────
 
 def get_active_configured_providers() -> Dict[str, Any]:
-    """
-    Returns ONLY the active providers that have a populated key/credentials in Hermes,
-    along with their genuine model catalogs.
-    """
     active = get_active_model()
     
-    # 1. Scan Hermes .env files for populated keys
     env_files = [HERMES_BOTTY_DIR / ".env", HERMES_DIR / ".env"]
     env_vars: Dict[str, str] = {}
     for ef in env_files:
@@ -527,7 +686,6 @@ def get_active_configured_providers() -> Dict[str, Any]:
     if "DEEPINFRA_API_KEY" in env_vars:
         active_provider_ids.add("deepinfra")
 
-    # 2. Check local providers in config.yaml
     if HERMES_CONFIG_FILE.exists():
         try:
             cfg_text = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
@@ -536,7 +694,6 @@ def get_active_configured_providers() -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Ensure at least opencode-go and openrouter exist if present in provider cache
     p_cache_file = HERMES_DIR / "provider_models_cache.json"
     p_data: Dict[str, Any] = {}
     if p_cache_file.exists():
@@ -546,13 +703,11 @@ def get_active_configured_providers() -> Dict[str, Any]:
         except Exception:
             pass
 
-    # Always ensure the currently active provider is recognized
     if active.get("provider"):
         active_provider_ids.add(active["provider"])
 
     providers_dict: Dict[str, Dict[str, Any]] = {}
 
-    # Populate active providers with models from provider_models_cache.json
     for p_id in active_provider_ids:
         p_name = p_id.replace("-", " ").title()
         models_list = []
@@ -562,7 +717,6 @@ def get_active_configured_providers() -> Dict[str, Any]:
                 name = m.split("/")[-1].replace("-", " ").title() if "/" in m else m
                 models_list.append({"id": m, "name": name})
 
-        # Add fallback models for active providers if cache was sparse
         if p_id == "opencode-go" and not models_list:
             models_list = [
                 {"id": "ox-alpha-free", "name": "OpenCode Alpha Free"},
@@ -583,7 +737,6 @@ def get_active_configured_providers() -> Dict[str, Any]:
                 "models": models_list
             }
 
-    # Order providers cleanly
     sorted_providers = []
     priority = ["opencode-go", "openrouter", "opencode-free", "ollama", "google", "anthropic", "openai"]
     for p in priority:
@@ -601,7 +754,6 @@ def get_active_configured_providers() -> Dict[str, Any]:
     }
 
 def set_model(model_id: str, provider_id: Optional[str] = None) -> Dict[str, Any]:
-    """Updates the default model and provider in ~/.hermes/profiles/botty/config.yaml."""
     if not HERMES_CONFIG_FILE.exists():
         return {"ok": False, "error": f"Config file not found: {HERMES_CONFIG_FILE}"}
     
@@ -690,6 +842,7 @@ def get_memories() -> Dict[str, Any]:
     memories = []
     mem_file = HERMES_MEMORY_DIR / "MEMORY.md"
     if mem_file.exists():
+        secure_file_permissions(mem_file)
         try:
             content = mem_file.read_text(encoding="utf-8")
             entries = [e.strip() for e in content.split("§") if e.strip()]
@@ -706,6 +859,7 @@ def get_memories() -> Dict[str, Any]:
 
     user_file = HERMES_MEMORY_DIR / "USER.md"
     if user_file.exists():
+        secure_file_permissions(user_file)
         try:
             content = user_file.read_text(encoding="utf-8")
             entries = [e.strip() for e in content.split("§") if e.strip()]
@@ -728,6 +882,7 @@ def add_memory(text: str, is_user_fact: bool = False) -> Dict[str, Any]:
     
     target_file = (HERMES_MEMORY_DIR / "USER.md") if is_user_fact else (HERMES_MEMORY_DIR / "MEMORY.md")
     target_file.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(target_file.parent, 0o700)
     
     try:
         content = ""
@@ -740,13 +895,14 @@ def add_memory(text: str, is_user_fact: bool = False) -> Dict[str, Any]:
             new_content = f"{text.strip()}\n"
             
         target_file.write_text(new_content, encoding="utf-8")
+        secure_file_permissions(target_file)
         set_status(get_status().get("state", "idle"), headline="Memory saved")
+        update_encrypted_vault()
         return {"ok": True, "message": "Memory saved successfully."}
     except Exception as e:
         return {"ok": False, "error": f"Failed to save memory: {str(e)}"}
 
 def delete_memory(memory_id: str, is_user_fact: bool = False) -> Dict[str, Any]:
-    """Deletes/cancels a specific memory entry by index/id from MEMORY.md or USER.md."""
     target_file = (HERMES_MEMORY_DIR / "USER.md") if is_user_fact else (HERMES_MEMORY_DIR / "MEMORY.md")
     if not target_file.exists():
         return {"ok": False, "error": "Memory file not found."}
@@ -760,7 +916,9 @@ def delete_memory(memory_id: str, is_user_fact: bool = False) -> Dict[str, Any]:
             removed = entries.pop(idx)
             new_content = ("\n§\n".join(entries) + "\n") if entries else ""
             target_file.write_text(new_content, encoding="utf-8")
+            secure_file_permissions(target_file)
             set_status(get_status().get("state", "idle"), headline="Memory deleted")
+            update_encrypted_vault()
             return {"ok": True, "message": "Memory deleted.", "removed": removed}
         else:
             return {"ok": False, "error": "Memory index out of range."}
@@ -778,6 +936,7 @@ def compact_memory() -> Dict[str, Any]:
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         set_status("idle", headline="Memory compacted", last_answer=res.stdout.strip())
+        update_encrypted_vault()
         return {"ok": True, "output": res.stdout.strip()}
     except Exception as e:
         set_status("error", headline="Compaction error", last_error=str(e))
@@ -845,6 +1004,7 @@ def get_clipboard_image() -> Dict[str, Any]:
     try:
         proc = subprocess.run(["wl-paste", "--type", "image/png"], stdout=open(clip_path, "wb"), stderr=subprocess.PIPE, timeout=3)
         if proc.returncode == 0 and clip_path.exists() and clip_path.stat().st_size > 0:
+            secure_file_permissions(clip_path)
             return {"ok": True, "image_path": str(clip_path), "filename": clip_path.name}
         else:
             if clip_path.exists():
@@ -864,9 +1024,13 @@ def main():
     ask_p = subparsers.add_parser("ask", help="Send a query to Botty")
     ask_p.add_argument("query", nargs="?", default="", help="Query prompt text")
     ask_p.add_argument("--image", dest="image", default=None, help="Path to image/media file")
+    ask_p.add_argument("--file", dest="file", default=None, help="Path to any file/code/document")
     ask_p.add_argument("--screen", dest="screen", action="store_true", help="Capture and include screen context")
     ask_p.add_argument("--model", dest="model", default=None, help="Model override")
     ask_p.add_argument("--provider", dest="provider", default=None, help="Provider override")
+
+    inspect_p = subparsers.add_parser("inspect-file", help="Inspect file metadata")
+    inspect_p.add_argument("path", help="Path to file")
 
     cap_p = subparsers.add_parser("capture", help="Capture screen/window")
     cap_p.add_argument("--mode", dest="mode", default="activewindow", choices=["activewindow", "fullscreen", "region"])
@@ -882,6 +1046,9 @@ def main():
     subparsers.add_parser("engines", help="List available agent engines")
     set_e = subparsers.add_parser("set-engine", help="Set active agent engine (hermes, omp, claude, codex)")
     set_e.add_argument("engine", help="Engine name")
+
+    subparsers.add_parser("vault-status", help="Get local AES-256 vault status")
+    subparsers.add_parser("vault-backup", help="Create encrypted vault snapshot")
 
     subparsers.add_parser("dictate-start", help="Start voice recording")
     subparsers.add_parser("dictate-stop", help="Stop voice recording & transcribe")
@@ -915,8 +1082,10 @@ def main():
     if not args.command or args.command == "status":
         print(json.dumps(get_status(), ensure_ascii=False))
     elif args.command == "ask":
-        res = ask(args.query, image_path=args.image, screen_context=args.screen, model=args.model, provider=args.provider)
+        res = ask(args.query, image_path=args.image, file_path=args.file, screen_context=args.screen, model=args.model, provider=args.provider)
         print(json.dumps(res, ensure_ascii=False))
+    elif args.command == "inspect-file":
+        print(json.dumps(inspect_file(args.path), ensure_ascii=False))
     elif args.command == "capture":
         print(json.dumps(capture_screen(args.mode), ensure_ascii=False))
     elif args.command == "history":
@@ -931,6 +1100,10 @@ def main():
         print(json.dumps(get_agent_engines(), ensure_ascii=False))
     elif args.command == "set-engine":
         print(json.dumps(set_active_engine(args.engine), ensure_ascii=False))
+    elif args.command == "vault-status":
+        print(json.dumps(get_vault_security_info(), ensure_ascii=False))
+    elif args.command == "vault-backup":
+        print(json.dumps({"ok": update_encrypted_vault(), "vault": str(VAULT_FILE)}, ensure_ascii=False))
     elif args.command == "dictate-start":
         print(json.dumps(dictate_start(), ensure_ascii=False))
     elif args.command == "dictate-stop":

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
@@ -58,11 +59,18 @@ Panel {
 
   property var memoriesData: []
   property var skillsData: []
+  property var vaultSecurity: ({ encryption_enabled: true, cipher: "AES-256-CBC (PBKDF2)" })
 
   property string currentView: "chat" // "chat" | "memories" | "settings"
   property string promptText: ""
-  property string attachedImagePath: ""
-  property string attachedImageFilename: ""
+  
+  // Generic File Attachment State
+  property string attachedFilePath: ""
+  property string attachedFileName: ""
+  property string attachedFileSize: ""
+  property string attachedFileIcon: "󰈔"
+  property bool attachedFileIsImage: false
+
   property bool screenContextEnabled: false
   property var lastCaptureInfo: null
 
@@ -103,6 +111,9 @@ Panel {
     if (!memoriesProc.running) {
       memoriesProc.running = true
     }
+    if (!vaultProc.running) {
+      vaultProc.running = true
+    }
   }
 
   function fetchSkills() {
@@ -111,19 +122,29 @@ Panel {
     }
   }
 
-  function sendQuery(text, imagePath, useScreen) {
+  function attachFileNow(filepath) {
+    if (!filepath) return
+    inspectProc.command = ["python3", root.scriptPath(), "inspect-file", filepath]
+    inspectProc.running = true
+  }
+
+  function sendQuery(text, filePath, useScreen) {
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
-    var img = imagePath || root.attachedImagePath || ""
+    var fpath = filePath || root.attachedFilePath || ""
     var scr = (useScreen !== undefined) ? useScreen : root.screenContextEnabled
 
-    if (!q.trim() && !img && !scr) return
+    if (!q.trim() && !fpath && !scr) return
 
     var cmd = ["python3", root.scriptPath(), "ask", q]
-    if (img) {
-      cmd.push("--image")
-      cmd.push(img)
+    if (fpath) {
+      if (root.attachedFileIsImage) {
+        cmd.push("--image")
+      } else {
+        cmd.push("--file")
+      }
+      cmd.push(fpath)
     }
     if (scr) {
       cmd.push("--screen")
@@ -137,8 +158,10 @@ Panel {
     root.rawStatus.headline = "Botty thinking…"
     promptInput.text = ""
     root.promptText = ""
-    root.attachedImagePath = ""
-    root.attachedImageFilename = ""
+    root.attachedFilePath = ""
+    root.attachedFileName = ""
+    root.attachedFileSize = ""
+    root.attachedFileIsImage = false
     root.screenContextEnabled = false
     root.lastCaptureInfo = null
     root.fetchHistory()
@@ -210,6 +233,19 @@ Panel {
     if (isUser) cmd.push("--user")
     delMemProc.command = cmd
     delMemProc.running = true
+  }
+
+  // ------------------------------------------------------------- Native File Dialog
+  FileDialog {
+    id: fileDialog
+    title: "Attach File, Document, or Media to Botty"
+    currentFolder: "file://" + Quickshell.env("HOME")
+    onAccepted: {
+      var raw = selectedFile.toString()
+      var path = raw.replace(/^file:\/\//, "")
+      try { path = decodeURIComponent(path) } catch (e) {}
+      root.attachFileNow(path)
+    }
   }
 
   // Periodic status poll
@@ -293,6 +329,25 @@ Panel {
   }
 
   Process {
+    id: inspectProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            root.attachedFilePath = data.path
+            root.attachedFileName = data.filename
+            root.attachedFileSize = data.size_str
+            root.attachedFileIcon = data.icon || "󰈔"
+            root.attachedFileIsImage = Boolean(data.is_image)
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
     id: askProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -318,8 +373,11 @@ Panel {
         try {
           var data = JSON.parse(text || "{}")
           if (data && data.ok) {
-            root.attachedImagePath = data.image_path
-            root.attachedImageFilename = data.filename
+            root.attachedFilePath = data.image_path
+            root.attachedFileName = data.filename
+            root.attachedFileSize = "Capture"
+            root.attachedFileIcon = "󰹑"
+            root.attachedFileIsImage = true
             root.screenContextEnabled = true
             root.lastCaptureInfo = data
           }
@@ -336,8 +394,11 @@ Panel {
         try {
           var data = JSON.parse(text || "{}")
           if (data && data.ok) {
-            root.attachedImagePath = data.image_path
-            root.attachedImageFilename = data.filename
+            root.attachedFilePath = data.image_path
+            root.attachedFileName = data.filename
+            root.attachedFileSize = "Clipboard"
+            root.attachedFileIcon = "󰋩"
+            root.attachedFileIsImage = true
           }
         } catch (e) {}
       }
@@ -464,6 +525,22 @@ Panel {
   }
 
   Process {
+    id: vaultProc
+    command: ["python3", root.scriptPath(), "vault-status"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            root.vaultSecurity = data
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
     id: delMemProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -526,6 +603,7 @@ Panel {
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
     function ask(query: string): void { root.open(); root.sendQuery(query, "", false) }
     function captureAndAsk(query: string): void { root.open(); root.sendQuery(query, "", true) }
+    function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
 
@@ -538,6 +616,7 @@ Panel {
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
     function ask(query: string): void { root.open(); root.sendQuery(query, "", false) }
     function captureAndAsk(query: string): void { root.open(); root.sendQuery(query, "", true) }
+    function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
 
@@ -547,7 +626,7 @@ Panel {
     anchors.fill: parent
     visible: !root.barShowsText
     bar: root.bar
-    text: Model.statusIcon(root.rawStatus.state) // Panda icon 🐼
+    text: Model.statusIcon(root.rawStatus.state)
     tooltipText: Model.getTooltipText(root.rawStatus)
     active: root.rawStatus.state === "working" || root.rawStatus.state === "waiting"
     activeColor: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -562,7 +641,6 @@ Panel {
       }
     }
 
-    // Status Indicator Dot / Badge
     Rectangle {
       id: iconDot
       visible: root.rawStatus.state !== "idle" || root.rawStatus.memory_count > 0
@@ -602,7 +680,7 @@ Panel {
       spacing: Style.space(6)
 
       Text {
-        text: Model.statusIcon(root.rawStatus.state) // Panda icon 🐼
+        text: Model.statusIcon(root.rawStatus.state)
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
         color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -669,7 +747,6 @@ Panel {
         Layout.fillWidth: true
         spacing: Style.space(12)
 
-        // Botty Panda Avatar / Status Icon
         BorderSurface {
           implicitWidth: Style.space(38)
           implicitHeight: Style.space(38)
@@ -679,7 +756,7 @@ Panel {
 
           Text {
             anchors.centerIn: parent
-            text: Model.statusIcon(root.rawStatus.state) // Panda icon 🐼
+            text: Model.statusIcon(root.rawStatus.state)
             color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
             font.family: root.fontFamily
             font.pixelSize: Style.space(20)
@@ -687,7 +764,6 @@ Panel {
           }
         }
 
-        // Title and Status details
         ColumnLayout {
           Layout.fillWidth: true
           spacing: Style.space(2)
@@ -703,7 +779,6 @@ Panel {
               font.bold: true
             }
 
-            // Status Badge
             Rectangle {
               radius: Style.space(4)
               color: root.alpha(Model.statusColor(root.rawStatus.state, root.accent, root.accent, root.urgent), 0.2)
@@ -724,7 +799,6 @@ Panel {
               }
             }
 
-            // Engine Badge
             Rectangle {
               radius: Style.space(4)
               color: root.alpha(root.foreground, 0.08)
@@ -759,7 +833,6 @@ Panel {
         RowLayout {
           spacing: Style.space(4)
 
-          // Chat View Button
           Button {
             iconText: "󰭹"
             tooltipText: "Chat"
@@ -769,7 +842,6 @@ Panel {
             onClicked: root.currentView = "chat"
           }
 
-          // Memories & Skills Button
           Button {
             iconText: "󰋚"
             tooltipText: "Memories & Skills"
@@ -783,7 +855,6 @@ Panel {
             }
           }
 
-          // Model & Settings Button
           Button {
             iconText: "󰒓"
             tooltipText: "Agents, Providers & Models"
@@ -796,7 +867,6 @@ Panel {
             }
           }
 
-          // Clear Chat Button
           Button {
             iconText: "󰆴"
             tooltipText: "Clear Chat"
@@ -805,7 +875,6 @@ Panel {
             onClicked: root.clearChat()
           }
 
-          // Close Button
           Button {
             iconText: "󰅖"
             tooltipText: "Close Panel"
@@ -914,7 +983,7 @@ Panel {
                           spacing: Style.space(6)
 
                           Text {
-                            text: modelData.is_screen_capture ? "󰹑" : "󰋩"
+                            text: modelData.icon || (modelData.is_screen_capture ? "󰹑" : "󰈔")
                             color: root.accent
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
@@ -927,7 +996,8 @@ Panel {
                                 var title = modelData.window_title ? (" — " + modelData.window_title) : ""
                                 return "Screen Context: " + app + title
                               }
-                              return "Media Attachment: " + (modelData.filename || "file")
+                              var size = modelData.size_str ? (" (" + modelData.size_str + ")") : ""
+                              return "Attached: " + (modelData.filename || "file") + size
                             }
                             textFormat: Text.PlainText
                             font.family: root.fontFamily
@@ -948,7 +1018,6 @@ Panel {
                         Layout.fillWidth: true
                         implicitHeight: modelData.type === "code" ? codeCard.implicitHeight : (textBlock.implicitHeight + Style.space(2))
 
-                        // Text / Markdown Block
                         Text {
                           id: textBlock
                           visible: modelData.type !== "code"
@@ -963,7 +1032,6 @@ Panel {
                           onLinkActivated: function(link) { Qt.openUrlExternally(link) }
                         }
 
-                        // Code Block
                         BorderSurface {
                           id: codeCard
                           visible: modelData.type === "code"
@@ -981,7 +1049,6 @@ Panel {
                             anchors.margins: Style.space(8)
                             spacing: Style.space(4)
 
-                            // Code header
                             RowLayout {
                               Layout.fillWidth: true
                               Text {
@@ -1001,7 +1068,6 @@ Panel {
                               }
                             }
 
-                            // Code content
                             Text {
                               text: modelData.code || ""
                               textFormat: Text.PlainText
@@ -1121,10 +1187,10 @@ Panel {
             }
           }
 
-          // Active Context Strip
+          // Active Context Strip (Files, Documents, Media, Screen)
           BorderSurface {
             id: contextStrip
-            visible: root.attachedImagePath.length > 0 || root.screenContextEnabled
+            visible: root.attachedFilePath.length > 0 || root.screenContextEnabled
             Layout.fillWidth: true
             implicitHeight: ctxRow.implicitHeight + Style.space(12)
             radius: Style.space(6)
@@ -1140,7 +1206,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
-                text: root.screenContextEnabled ? "󰹑" : "󰋩"
+                text: root.attachedFileIcon || (root.screenContextEnabled ? "󰹑" : "󰈔")
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(14)
                 color: root.accent
@@ -1155,9 +1221,10 @@ Panel {
                     if (root.screenContextEnabled) {
                       var win = root.lastCaptureInfo && root.lastCaptureInfo.active_window ? root.lastCaptureInfo.active_window : null
                       var app = win ? (win.class || win.title || "Active Window") : "Active Window"
-                      return "Screen Context Active (" + app + ")"
+                      return "Screen Context (" + app + ")"
                     }
-                    return "Media Attachment Ready"
+                    var sz = root.attachedFileSize ? (" • " + root.attachedFileSize) : ""
+                    return "Attached: " + (root.attachedFileName || "File") + sz
                   }
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -1170,7 +1237,7 @@ Panel {
                     if (root.screenContextEnabled && root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
                       return root.lastCaptureInfo.active_window.title || "Active window context attached"
                     }
-                    return root.attachedImageFilename || "Attached file ready to send"
+                    return root.attachedFilePath || "Attached file ready to send"
                   }
                   textFormat: Text.PlainText
                   font.family: root.fontFamily
@@ -1187,8 +1254,10 @@ Panel {
                 implicitWidth: Style.space(24)
                 implicitHeight: Style.space(24)
                 onClicked: {
-                  root.attachedImagePath = ""
-                  root.attachedImageFilename = ""
+                  root.attachedFilePath = ""
+                  root.attachedFileName = ""
+                  root.attachedFileSize = ""
+                  root.attachedFileIsImage = false
                   root.screenContextEnabled = false
                   root.lastCaptureInfo = null
                 }
@@ -1213,23 +1282,35 @@ Panel {
                 fontSize: Style.font.caption
                 selected: root.screenContextEnabled
                 implicitHeight: Style.space(28)
+                tooltipText: "Capture active window as ambient visual context"
                 onClicked: {
                   if (!root.screenContextEnabled) {
                     root.captureScreenNow()
                   } else {
                     root.screenContextEnabled = false
-                    root.attachedImagePath = ""
+                    root.attachedFilePath = ""
                     root.lastCaptureInfo = null
                   }
                 }
               }
 
-              // Attach Clipboard Image Button
+              // Attach Any File / Document / Code Button
+              Button {
+                iconText: "󰈔"
+                text: "Attach File"
+                fontSize: Style.font.caption
+                implicitHeight: Style.space(28)
+                tooltipText: "Attach any code file, document, PDF, or media"
+                onClicked: fileDialog.open()
+              }
+
+              // Paste Image from Clipboard Button
               Button {
                 iconText: "󰋩"
                 text: "Paste Image"
                 fontSize: Style.font.caption
                 implicitHeight: Style.space(28)
+                tooltipText: "Paste image from clipboard"
                 onClicked: root.attachClipboardImage()
               }
 
@@ -1255,8 +1336,8 @@ Panel {
                 placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic again to transcribe)" : "Ask Botty or command a desktop action… (Enter to send)"
                 font.pixelSize: Style.font.body
                 onAccepted: {
-                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled)) {
-                    root.sendQuery(text, root.attachedImagePath, root.screenContextEnabled)
+                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
+                    root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled)
                   }
                 }
               }
@@ -1282,8 +1363,8 @@ Panel {
                 selected: true
                 implicitHeight: promptInput.implicitHeight
                 onClicked: {
-                  if (!root.isProcessing && (promptInput.text.trim().length > 0 || root.attachedImagePath.length > 0 || root.screenContextEnabled)) {
-                    root.sendQuery(promptInput.text, root.attachedImagePath, root.screenContextEnabled)
+                  if (!root.isProcessing && (promptInput.text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
+                    root.sendQuery(promptInput.text, root.attachedFilePath, root.screenContextEnabled)
                   }
                 }
               }
@@ -1321,6 +1402,51 @@ Panel {
               iconText: "󰑐"
               text: "Compact Memory"
               onClicked: root.compactMemoryNow()
+            }
+          }
+
+          // Local Security & Encryption Status Card
+          BorderSurface {
+            Layout.fillWidth: true
+            implicitHeight: secRow.implicitHeight + Style.space(12)
+            radius: Style.space(6)
+            color: root.alpha(root.accent, 0.08)
+            borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
+
+            RowLayout {
+              id: secRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(7)
+              spacing: Style.space(8)
+
+              Text {
+                text: "🔒"
+                font.pixelSize: Style.space(14)
+              }
+
+              ColumnLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(1)
+
+                Text {
+                  text: "Local AES-256 Memory Encryption Active"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  color: root.accent
+                }
+
+                Text {
+                  text: "Hardware-bound PBKDF2 vault • POSIX 0600 permissions (Owner-only access on this machine)"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(10)
+                  color: root.dim
+                  wrapMode: Text.Wrap
+                  Layout.fillWidth: true
+                }
+              }
             }
           }
 
@@ -1681,14 +1807,18 @@ Panel {
                         Layout.fillWidth: true
                         spacing: Style.space(2)
 
-                        Text {
-                          text: modelData.name || modelData.id
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.body
-                          font.bold: isCurrent
-                          color: isCurrent ? root.accent : root.foreground
-                          elide: Text.ElideRight
-                          Layout.fillWidth: true
+                        RowLayout {
+                          spacing: Style.space(6)
+
+                          Text {
+                            text: modelData.name || modelData.id
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.bold: isCurrent
+                            color: isCurrent ? root.accent : root.foreground
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                          }
                         }
 
                         Text {

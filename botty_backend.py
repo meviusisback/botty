@@ -71,9 +71,14 @@ def strip_reasoning(text: str) -> str:
     if not text:
         return ""
     t = str(text)
-    t = re.sub(r"<thought>.*?</thought>", "", t, flags=re.DOTALL | re.IGNORECASE)
-    t = re.sub(r"<think>.*?</think>", "", t, flags=re.DOTALL | re.IGNORECASE)
-    t = re.sub(r"<reasoning>.*?</reasoning>", "", t, flags=re.DOTALL | re.IGNORECASE)
+    # Strip ANSI escape sequences
+    t = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", t)
+    t = re.sub(r"<thought>.*?(?:</thought>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<think>.*?(?:</think>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<reasoning>.*?(?:</reasoning>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<antThinking>.*?(?:</antThinking>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<scratchpad>.*?(?:</scratchpad>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r"<reflection>.*?(?:</reflection>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"^(?:Thinking Process|Thought|Reasoning):\s*.*?(?=\n\n|\n[A-Z]|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     return t.strip()
 
@@ -504,17 +509,23 @@ def clear_history() -> Dict[str, Any]:
 def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
-    
+
+    safe_content = (content or "").strip()
+    if not safe_content and not attachments and not actions:
+        safe_content = "✓ Done." if role == "assistant" else "(empty)"
+    elif not safe_content and (attachments or actions):
+        safe_content = ""
+
     if msgs:
         last = msgs[-1]
-        if last.get("role") == role and last.get("content") == content:
+        if last.get("role") == role and last.get("content") == safe_content:
             if abs(int(time.time()) - last.get("timestamp", 0)) < 10:
                 return
 
     msg = {
         "id": f"msg_{int(time.time()*1000)}_{len(msgs)}",
         "role": role,
-        "content": content,
+        "content": safe_content,
         "timestamp": int(time.time()),
         "attachments": attachments or [],
         "actions": actions or []
@@ -582,14 +593,31 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "icon": attached_file_info["icon"],
             "is_screen_capture": False
         })
+    BOTTY_AGENT_DIRECTIVE = (
+        "You are acting as Botty, the AI desktop agent on this Omarchy Linux workstation. "
+        "You have full local access to the machine environment: terminal execution, local files, system CLI tools, native IPC APIs, and installed skills. "
+        "When (optional) screen context or window information is provided, use it to understand the user's workspace state and what needs to be done. "
+        "You are fully capable of executing tasks directly on this machine to assist the user. "
+        "Do NOT attempt X11 GUI clicks, xdotool, or synthetic mouse automation. "
+        "Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as herdr for driving agent TUIs, hyprctl for window/workspace management, or system utilities), and installed skills to execute tasks directly on the machine. "
+        "Answer concisely and execute actions cleanly."
+    )
 
     prompt_parts = []
-    if captured_context:
-        win = captured_context.get("active_window", {})
+    if captured_context or screen_context or (target_image and screen_context):
+        win = captured_context.get("active_window", {}) if captured_context else {}
         win_title = win.get("title", "")
         win_class = win.get("class", "")
-        if win_title or win_class:
-            prompt_parts.append(f"[Active Window Context: {win_class} — '{win_title}']\n")
+        win_info = f"{win_class} — '{win_title}'" if (win_class or win_title) else "Active Workspace / Screen"
+        img_info = f" (Screenshot image: {target_image})" if target_image else ""
+        prompt_parts.append(
+            f"[SCREEN CONTEXT ATTACHED: {win_info}{img_info}]\n"
+            f"Note for Agent: You have access to this screen context and full local capabilities to perform tasks on this machine. "
+            f"Use the visual/screen state to understand what is on screen and what needs to be done. "
+            f"Do NOT attempt X11 GUI clicks, `xdotool`, or synthetic mouse automation. "
+            f"Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as `herdr` for driving agent TUIs, `hyprctl` for desktop/window management, system utilities), and installed skills to execute tasks directly on this machine.\n"
+            f"[END SCREEN CONTEXT]\n"
+        )
 
     if attached_file_info and not attached_file_info.get("is_image"):
         fname = attached_file_info["filename"]
@@ -599,7 +627,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             preview = attached_file_info["text_preview"]
             prompt_parts.append(f"[ATTACHED FILE: {fname} (Path: {fpath})]\n```{fext}\n{preview}\n```\n[END ATTACHED FILE]\n")
         else:
-            prompt_parts.append(f"[ATTACHED DOCUMENT: {fname} (Path: {fpath}, Size: {attached_file_info['size_str']})]\nPlease inspect this file using your file/document tools.\n[END ATTACHED DOCUMENT]\n")
+            prompt_parts.append(f"[ATTACHED DOCUMENT: {fname} (Path: {fpath}, Size: {attached_file_info['size_str']})]\nPlease inspect and work with this file using your terminal and file tools.\n[END ATTACHED DOCUMENT]\n")
 
     user_query = query.strip() if query.strip() else ("Analyze the attached file." if attached_file_info else "Analyze the attached screenshot context.")
     prompt_parts.append(user_query)
@@ -616,12 +644,12 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     cmd = []
 
     if engine == "omp":
-        cmd = ["omp", "-p", "--allow-home"]
+        cmd = ["omp", "-p", "--allow-home", f"--append-system-prompt={BOTTY_AGENT_DIRECTIVE}"]
         if selected_model:
             cmd.extend(["--model", selected_model])
         cmd.append(final_prompt)
     elif engine == "claude":
-        cmd = ["claude", "-p"]
+        cmd = ["claude", "-p", "--append-system-prompt", BOTTY_AGENT_DIRECTIVE]
         if selected_model:
             cmd.extend(["--model", selected_model])
         cmd.append(final_prompt)
@@ -629,7 +657,8 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         cmd = ["codex", "exec"]
         if selected_model:
             cmd.extend(["--model", selected_model])
-        cmd.append(final_prompt)
+        codex_prompt = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
+        cmd.append(codex_prompt)
     else:
         cmd = [
             "hermes",
@@ -659,7 +688,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         
         stdout_data, stderr_data = proc.communicate(timeout=240)
         cleaned_response = strip_reasoning(stdout_data)
-        
+
         if proc.returncode != 0 and not cleaned_response:
             err_msg = stderr_data.strip() or f"Agent process exited with code {proc.returncode}"
             set_status("error", headline="Error", last_error=err_msg)
@@ -667,8 +696,8 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             return {"ok": False, "error": err_msg}
 
         if not cleaned_response:
-            cleaned_response = "Done."
-
+            raw_stripped = stdout_data.strip()
+            cleaned_response = raw_stripped if raw_stripped else "✓ Done."
         actions = []
         for line in stdout_data.splitlines():
             if line.startswith("session_id:"):

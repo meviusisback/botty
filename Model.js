@@ -50,16 +50,55 @@ function statusBadgeText(state) {
 }
 
 /**
- * Strips reasoning / internal monologue tags.
+ * Strips reasoning / internal monologue tags (handles both closed and unclosed tags).
  */
 function stripReasoning(text) {
   if (!text) return ""
   var t = String(text)
-  t = t.replace(/<thought>[\s\S]*?<\/thought>/gi, "")
-  t = t.replace(/<think>[\s\S]*?<\/think>/gi, "")
-  t = t.replace(/<reasoning>[\s\S]*?<\/reasoning>/gi, "")
+  t = t.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
+  t = t.replace(/<thought>[\s\S]*?(?:<\/thought>|$)/gi, "")
+  t = t.replace(/<reasoning>[\s\S]*?(?:<\/reasoning>|$)/gi, "")
+  t = t.replace(/<antThinking>[\s\S]*?(?:<\/antThinking>|$)/gi, "")
+  t = t.replace(/<scratchpad>[\s\S]*?(?:<\/scratchpad>|$)/gi, "")
+  t = t.replace(/<reflection>[\s\S]*?(?:<\/reflection>|$)/gi, "")
   t = t.replace(/^(?:Thinking Process|Thought|Reasoning):\s*[\s\S]*?(?=\n\n|\n[A-Z]|$)/gi, "")
   return t.trim()
+}
+
+/**
+ * Sanitizes unescaped XML/HTML tags in text so Qt Quick Markdown parser doesn't drop/swallow text.
+ */
+function sanitizeTextForMarkdown(text) {
+  if (!text) return ""
+  var t = String(text)
+
+  // Protect inline code backticks `...`
+  var inlineCodes = []
+  t = t.replace(/`[^`\n]+`/g, function(m) {
+    inlineCodes.push(m)
+    return "__INLINE_CODE_" + (inlineCodes.length - 1) + "__"
+  })
+
+  // Escape XML/HTML-like tags that are NOT standard markdown/HTML tags or URLs
+  var allowedTags = /^(?:a|b|i|em|strong|code|pre|p|br|hr|ul|ol|li|blockquote|h[1-6]|img)(?:\s+[^>]*)?$/i
+  t = t.replace(/<([^>\n]+)>/g, function(match, tagContent) {
+    var trimmed = tagContent.trim()
+    if (/^https?:\/\/|^mailto:/i.test(trimmed)) {
+      return match
+    }
+    var tagName = trimmed.replace(/^\//, "").split(/\s+/)[0]
+    if (allowedTags.test(tagName)) {
+      return match
+    }
+    return "&lt;" + tagContent + "&gt;"
+  })
+
+  // Restore inline codes
+  t = t.replace(/__INLINE_CODE_(\d+)__/g, function(_, idx) {
+    return inlineCodes[Number(idx)]
+  })
+
+  return t
 }
 
 /**
@@ -67,9 +106,15 @@ function stripReasoning(text) {
  */
 function parseBlocks(content) {
   if (!content) return []
-  var clean = stripReasoning(content)
+  var raw = String(content)
+  var clean = stripReasoning(raw)
+
+  // If stripping reasoning left nothing, fallback to raw content or "✓ Done."
+  if (!clean.length) {
+    clean = raw.trim().length > 0 ? raw.trim() : "✓ Done."
+  }
+
   var blocks = []
-  
   var codeBlockRegex = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g
   var lastIndex = 0
   var match
@@ -79,7 +124,7 @@ function parseBlocks(content) {
     if (preText.length > 0) {
       blocks.push({
         type: "text",
-        text: preText
+        text: sanitizeTextForMarkdown(preText)
       })
     }
 
@@ -88,7 +133,7 @@ function parseBlocks(content) {
     blocks.push({
       type: "code",
       language: lang,
-      code: code.trimEnd()
+      code: String(code || "").replace(/\s+$/, "")
     })
 
     lastIndex = match.index + match[0].length
@@ -98,14 +143,14 @@ function parseBlocks(content) {
   if (remaining.length > 0) {
     blocks.push({
       type: "text",
-      text: remaining
+      text: sanitizeTextForMarkdown(remaining)
     })
   }
 
   if (blocks.length === 0 && clean.length > 0) {
     blocks.push({
       type: "text",
-      text: clean
+      text: sanitizeTextForMarkdown(clean)
     })
   }
 

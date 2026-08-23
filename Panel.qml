@@ -85,6 +85,16 @@ Panel {
     return Qt.resolvedUrl("botty_backend.py").toString().replace(/^file:\/\//, "")
   }
 
+  function scrollChat(delta) {
+    if (!chatListView) return
+    var step = Style.space(70)
+    var currentY = chatListView.contentY
+    var minY = chatListView.originY
+    var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
+    var targetY = Math.max(minY, Math.min(maxY, currentY + delta * step))
+    chatListView.contentY = targetY
+    chatListView.returnToBounds()
+  }
   function fetchStatus() {
     if (!statusProc.running) {
       statusProc.running = true
@@ -166,8 +176,8 @@ Panel {
     root.screenContextEnabled = false
     root.lastCaptureInfo = null
     root.fetchHistory()
+    Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
   }
-
   function captureScreenNow() {
     captureProc.command = ["python3", root.scriptPath(), "capture", "--mode", "activewindow"]
     captureProc.running = true
@@ -182,8 +192,8 @@ Panel {
     clearProc.command = ["python3", root.scriptPath(), "clear"]
     clearProc.running = true
     root.lastMessageCount = 0
+    Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
   }
-
   function selectEngine(engineId) {
     root.rawStatus.active_engine = engineId
     setEngineProc.command = ["python3", root.scriptPath(), "set-engine", engineId]
@@ -216,6 +226,9 @@ Panel {
     if (!text) return
     copyProc.command = ["python3", root.scriptPath(), "copy", text]
     copyProc.running = true
+    if (root.currentView === "chat") {
+      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+    }
   }
 
   function compactMemoryNow() {
@@ -255,11 +268,11 @@ Panel {
   }
   Timer {
     id: focusTimer
-    interval: 50
+    interval: 30
     running: false
     repeat: false
     onTriggered: {
-      if (root.opened && promptInput) {
+      if (root.opened && root.currentView === "chat" && promptInput) {
         promptInput.forceActiveFocus()
       }
     }
@@ -268,10 +281,29 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       focusTimer.start()
-      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      Qt.callLater(function() {
+        if (root.currentView === "chat" && promptInput) {
+          promptInput.forceActiveFocus()
+        }
+      })
     }
   }
 
+  onIsProcessingChanged: {
+    if (!isProcessing && root.opened && root.currentView === "chat" && promptInput) {
+      focusTimer.start()
+      Qt.callLater(function() { promptInput.forceActiveFocus() })
+    }
+  }
+
+  onCurrentViewChanged: {
+    if (currentView === "chat") {
+      focusTimer.start()
+      Qt.callLater(function() {
+        if (promptInput) promptInput.forceActiveFocus()
+      })
+    }
+  }
   // Periodic status poll
   Timer {
     interval: {
@@ -746,12 +778,13 @@ Panel {
   }
 
   // ------------------------------------------------------------- Main Popup Card
-  PopupCard {
+  KeyboardPanel {
     id: popup
     anchorItem: root.barShowsText ? dataButton : button
     bar: root.bar
     owner: root
     open: root.opened
+    focusTarget: keyCatcher
     contentWidth: Style.space(560)
     contentHeight: Style.space(680)
 
@@ -761,15 +794,41 @@ Panel {
         root.fetchHistory()
         root.fetchModels()
         focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+        Qt.callLater(function() {
+          if (root.currentView === "chat" && promptInput) {
+            promptInput.forceActiveFocus()
+          }
+        })
       }
     }
 
-    ColumnLayout {
+    PanelKeyCatcher {
+      id: keyCatcher
       anchors.fill: parent
-      anchors.margins: Style.space(6)
-      spacing: Style.space(10)
+      blocked: (promptInput && promptInput.activeFocus) || (newMemInput && newMemInput.activeFocus) || (modelSearchInput && modelSearchInput.activeFocus)
 
+      onMoveRequested: function(dx, dy) {
+        if (root.currentView === "chat" && dy !== 0) {
+          root.scrollChat(dy > 0 ? 1 : -1)
+        }
+      }
+
+      onCloseRequested: root.close()
+
+      onTextKey: function(t) {
+        if (root.currentView === "chat" && promptInput) {
+          promptInput.forceActiveFocus()
+          promptInput.text = promptInput.text + t
+        } else if (root.currentView === "settings" && modelSearchInput) {
+          modelSearchInput.forceActiveFocus()
+          modelSearchInput.text = modelSearchInput.text + t
+        }
+      }
+
+      ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: Style.space(6)
+        spacing: Style.space(10)
       // ========================================================= Header Row
       RowLayout {
         Layout.fillWidth: true
@@ -922,6 +981,11 @@ Panel {
         Layout.fillWidth: true
         Layout.fillHeight: true
 
+        MouseArea {
+          anchors.fill: parent
+          z: -1
+          onClicked: if (promptInput) promptInput.forceActiveFocus()
+        }
         ColumnLayout {
           anchors.fill: parent
           spacing: Style.space(8)
@@ -937,8 +1001,43 @@ Panel {
               id: chatListView
               model: (root.historyData && root.historyData.messages) ? root.historyData.messages : []
               spacing: Style.space(10)
-              boundsBehavior: Flickable.StopAtBounds
-
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Up) {
+                  root.scrollChat(-1)
+                  event.accepted = true
+                  if (promptInput) promptInput.forceActiveFocus()
+                  return
+                }
+                if (event.key === Qt.Key_Down) {
+                  root.scrollChat(1)
+                  event.accepted = true
+                  if (promptInput) promptInput.forceActiveFocus()
+                  return
+                }
+                if (event.key === Qt.Key_PageUp) {
+                  root.scrollChat(-4)
+                  event.accepted = true
+                  if (promptInput) promptInput.forceActiveFocus()
+                  return
+                }
+                if (event.key === Qt.Key_PageDown) {
+                  root.scrollChat(4)
+                  event.accepted = true
+                  if (promptInput) promptInput.forceActiveFocus()
+                  return
+                }
+                if (event.key === Qt.Key_Escape) {
+                  root.close()
+                  event.accepted = true
+                  return
+                }
+                if (event.text && event.text.length > 0 && promptInput && !promptInput.activeFocus) {
+                  promptInput.forceActiveFocus()
+                  promptInput.text = promptInput.text + event.text
+                  event.accepted = true
+                  return
+                }
+              }
               delegate: Item {
                 id: msgDelegate
                 width: chatListView.width
@@ -1108,6 +1207,19 @@ Panel {
                           }
                         }
                       }
+                    }
+
+                    // Fallback Text if blocks is empty or failed to render
+                    Text {
+                      visible: blocks.length === 0
+                      text: (modelData.content && modelData.content.trim().length > 0) ? modelData.content : (isUser ? "(empty message)" : "✓ Done.")
+                      textFormat: Text.PlainText
+                      wrapMode: Text.Wrap
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      color: (modelData.content && modelData.content.trim().length > 0) ? root.foreground : root.muted
+                      font.italic: !modelData.content || modelData.content.trim().length === 0
+                      Layout.fillWidth: true
                     }
 
                     // Action Receipts
@@ -1319,13 +1431,32 @@ Panel {
               // Text Input
               TextField {
                 id: promptInput
-                enabled: !root.isProcessing
+                focus: true
                 Layout.fillWidth: true
-                placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic to transcribe)" : "Ask Botty or command a desktop action… (Enter to send)"
+                placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic to transcribe)" : (root.isProcessing ? "Botty is thinking… (you can type your next prompt)" : "Ask Botty or command a desktop action… (Enter to send)")
                 font.pixelSize: Style.font.body
                 onAccepted: {
                   if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
                     root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled)
+                  }
+                  promptInput.forceActiveFocus()
+                }
+
+                Keys.onUpPressed: function(event) {
+                  root.scrollChat(-1)
+                  event.accepted = true
+                }
+                Keys.onDownPressed: function(event) {
+                  root.scrollChat(1)
+                  event.accepted = true
+                }
+                Keys.onPressed: function(event) {
+                  if (event.key === Qt.Key_PageUp) {
+                    root.scrollChat(-4)
+                    event.accepted = true
+                  } else if (event.key === Qt.Key_PageDown) {
+                    root.scrollChat(4)
+                    event.accepted = true
                   }
                 }
               }
@@ -1861,4 +1992,5 @@ Panel {
       }
     }
   }
+}
 }

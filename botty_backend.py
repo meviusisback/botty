@@ -31,6 +31,7 @@ os.chmod(BOTTY_DATA_DIR, 0o700)
 CONFIG_FILE = BOTTY_DATA_DIR / "config.json"
 STATUS_FILE = BOTTY_DATA_DIR / "status.json"
 HISTORY_FILE = BOTTY_DATA_DIR / "history.json"
+HISTORY_ARCHIVE_FILE = BOTTY_DATA_DIR / "history_archive.jsonl"
 VAULT_FILE = BOTTY_DATA_DIR / "vault.enc"
 LOCK_FILE = BOTTY_DATA_DIR / "running.pid"
 BOTTY_LOG_FILE = BOTTY_DATA_DIR / "botty.log"
@@ -45,6 +46,18 @@ HERMES_BOTTY_DIR = HERMES_DIR / "profiles" / "botty"
 HERMES_CONFIG_FILE = HERMES_BOTTY_DIR / "config.yaml"
 HERMES_MEMORY_DIR = HERMES_BOTTY_DIR / "memories"
 HERMES_SKILLS_DIR = HERMES_BOTTY_DIR / "skills"
+HERMES_STATE_DB = HERMES_BOTTY_DIR / "state.db"
+
+DEFAULT_AUTO_COMPACT_THRESHOLD = 14
+DEFAULT_COMPACT_PRESERVE_TAIL = 4
+
+def get_auto_compact_threshold() -> int:
+    cfg = load_json_file(CONFIG_FILE, {})
+    return int(cfg.get("auto_compaction_threshold", DEFAULT_AUTO_COMPACT_THRESHOLD))
+
+def get_compact_preserve_tail() -> int:
+    cfg = load_json_file(CONFIG_FILE, {})
+    return int(cfg.get("compact_preserve_tail", DEFAULT_COMPACT_PRESERVE_TAIL))
 
 OMP_DIR = Path.home() / ".omp"
 OMP_AGENT_DIR = OMP_DIR / "agent"
@@ -756,6 +769,35 @@ def capture_screen(mode: str = "activewindow") -> Dict[str, Any]:
         }
     }
 
+def reset_hermes_session(session_name: str = "botty-widget") -> Dict[str, Any]:
+    """
+    Safely reset/archive the Hermes profile SQLite session for session_name.
+    Renames the session title to archived-botty-widget-<timestamp> so that
+    Hermes will create a fresh, clean session on the next --continue botty-widget --create-if-missing,
+    avoiding 100k+ token context bloat while keeping SQLite historical records intact.
+    """
+    if not HERMES_STATE_DB.exists():
+        return {"ok": True, "reset": False, "reason": "No state.db"}
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(HERMES_STATE_DB), timeout=5.0)
+        cur = con.cursor()
+        now_ts = int(time.time())
+        cur.execute("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='sessions'")
+        if cur.fetchone()[0] > 0:
+            cur.execute("SELECT id FROM sessions WHERE title = ? OR id = ?", (session_name, session_name))
+            rows = cur.fetchall()
+            if rows:
+                new_title = f"archived-{session_name}-{now_ts}"
+                cur.execute("UPDATE sessions SET title = ? WHERE title = ? OR id = ?", (new_title, session_name, session_name))
+                con.commit()
+                con.close()
+                return {"ok": True, "reset": True, "archived_sessions": [r[0] for r in rows], "new_title": new_title}
+        con.close()
+        return {"ok": True, "reset": False, "reason": "No active session matching title"}
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to reset Hermes session: {str(e)}"}
+
 def get_history() -> Dict[str, Any]:
     default_history = {
         "session_id": "botty-widget",
@@ -770,8 +812,9 @@ def clear_history() -> Dict[str, Any]:
         "messages": []
     }
     save_json_file(HISTORY_FILE, history)
+    reset_hermes_session("botty-widget")
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
-    return {"ok": True, "message": "History cleared"}
+    return {"ok": True, "message": "History cleared and session reset"}
 
 def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
@@ -971,6 +1014,8 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "--query-file", str(query_tmp),
             "--continue", "botty-widget",
             "--create-if-missing",
+            "--max-turns", "15",
+            "--run-budget", "200",
             "--yolo"
         ]
         if target_image and os.path.exists(target_image):
@@ -1021,6 +1066,14 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             update_encrypted_vault()
         except Exception:
             pass
+
+        # Trigger auto-compaction if context reaches threshold
+        try:
+            curr_h = load_json_file(HISTORY_FILE, {"messages": []})
+            if len(curr_h.get("messages", [])) >= get_auto_compact_threshold():
+                distill_and_compact_session()
+        except Exception as e:
+            append_botty_log(f"Auto-compaction trigger error: {str(e)}")
 
         return {
             "ok": True,
@@ -1458,22 +1511,6 @@ def delete_memory(memory_id: str, is_user_fact: bool = False) -> Dict[str, Any]:
     except Exception as e:
         return {"ok": False, "error": f"Failed to delete memory: {str(e)}"}
 
-def compact_memory() -> Dict[str, Any]:
-    set_status("working", headline="Compacting memory…")
-    cmd = [
-        "hermes", "-p", "botty", "chat", "-Q",
-        "-q", "Review our conversation and summarize any durable facts, user preferences, or system conventions into persistent memory using the memory tool. Be concise.",
-        "--continue", "botty-widget",
-        "--yolo"
-    ]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        set_status("idle", headline="Memory compacted", last_answer=res.stdout.strip())
-        update_encrypted_vault()
-        return {"ok": True, "output": res.stdout.strip()}
-    except Exception as e:
-        set_status("error", headline="Compaction error", last_error=str(e))
-        return {"ok": False, "error": str(e)}
 
 def get_skills() -> Dict[str, Any]:
     skills = []
@@ -1523,6 +1560,197 @@ description: "{description.strip()}"
         return {"ok": True, "name": clean_name, "path": str(skill_dir)}
     except Exception as e:
         return {"ok": False, "error": f"Failed to create skill: {str(e)}"}
+
+def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Distills durable user facts into USER.md, system facts into MEMORY.md, procedural
+    workflows into skills/, archives full conversation turns to history_archive.jsonl,
+    and replaces pruned history in history.json with a concise context summary + protected tail.
+    Also resets the Hermes SQLite session so the next turn starts with 0 stale context tokens.
+    """
+    history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
+    msgs = history.get("messages", [])
+    
+    threshold = get_auto_compact_threshold()
+    tail_count = preserve_tail if preserve_tail is not None else get_compact_preserve_tail()
+    
+    if len(msgs) < threshold and not force:
+        return {"ok": True, "compacted": False, "reason": f"Message count ({len(msgs)}) below threshold ({threshold})"}
+    
+    if len(msgs) <= tail_count:
+        return {"ok": True, "compacted": False, "reason": f"Message count ({len(msgs)}) <= preserve tail ({tail_count})"}
+    
+    to_compact = msgs[:-tail_count]
+    tail_messages = msgs[-tail_count:]
+    
+    # Format readable conversation text for distillation
+    conv_lines = []
+    for m in to_compact:
+        r = m.get("role", "user").capitalize()
+        c = m.get("content", "").strip()
+        if m.get("is_summary"):
+            conv_lines.append(f"[Previous Summary]: {c}")
+            continue
+        if c:
+            conv_lines.append(f"{r}: {c}")
+        if m.get("attachments"):
+            for att in m.get("attachments", []):
+                fn = att.get("filename") or att.get("path", "")
+                conv_lines.append(f"[{r} Attachment: {fn}]")
+        if m.get("actions"):
+            for act in m.get("actions", []):
+                conv_lines.append(f"[{r} Action: {act.get('text', '')}]")
+    
+    conv_text = "\n".join(conv_lines)
+    if not conv_text.strip():
+        return {"ok": True, "compacted": False, "reason": "No compactable text"}
+
+    set_status("working", headline="Distilling memory & compacting…")
+
+    distillation_prompt = (
+        "You are an expert knowledge distillation engine for Botty desktop assistant on Linux.\n"
+        "Analyze the following conversation history.\n"
+        "Extract:\n"
+        "1. 'user_memories': A JSON array of strings containing durable user facts, preferences, specific tool requests, project styles, or persistent instructions (for USER.md).\n"
+        "2. 'system_memories': A JSON array of strings containing durable workstation environment facts, tool installations, socket/service paths, display manager details, or system fixes (for MEMORY.md).\n"
+        "3. 'skills': A JSON array of objects representing reusable procedural recipes, workflows, or troubleshooting procedures discovered. Each object MUST have: 'name' (kebab-case), 'description' (one concise sentence), and 'instructions' (clean markdown steps for SKILL.md). Only produce a skill if a clear reusable procedure or multi-step workflow was discovered.\n"
+        "4. 'context_summary': A concise 2-3 sentence overview of the conversation topics, current machine status, and any active pending task.\n\n"
+        "CRITICAL: Respond ONLY with a valid JSON object matching this schema:\n"
+        "{\n"
+        '  "user_memories": ["..."],\n'
+        '  "system_memories": ["..."],\n'
+        '  "skills": [{"name": "...", "description": "...", "instructions": "..."}],\n'
+        '  "context_summary": "..."\n'
+        "}\n\n"
+        "CONVERSATION HISTORY TO DISTILL:\n"
+        f"{conv_text}"
+    )
+
+    engine = get_active_engine()
+    distilled_data = None
+    raw_llm_out = ""
+
+    # Attempt LLM distillation
+    try:
+        if engine == "omp":
+            cmd = ["omp", "-p", "--allow-home", distillation_prompt]
+        elif engine == "claude":
+            cmd = ["claude", "-p", distillation_prompt]
+        elif engine == "codex":
+            cmd = ["codex", "exec", distillation_prompt]
+        else:
+            # Hermes one-shot mode -z
+            cmd = ["hermes", "-p", "botty", "-z", distillation_prompt, "--run-budget", "60"]
+            active_m = get_active_model_for_engine("hermes")
+            m_name = active_m.get("model")
+            p_name = active_m.get("provider")
+            if m_name:
+                cmd.extend(["-m", m_name])
+            if p_name:
+                cmd.extend(["--provider", p_name])
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        raw_llm_out = res.stdout.strip()
+        if res.returncode == 0 and raw_llm_out:
+            json_match = re.search(r"\{[\s\S]*\}", raw_llm_out)
+            if json_match:
+                distilled_data = json.loads(json_match.group(0))
+    except Exception as e:
+        append_botty_log(f"Distillation LLM error: {str(e)}")
+
+    if not isinstance(distilled_data, dict):
+        distilled_data = {
+            "user_memories": [],
+            "system_memories": [],
+            "skills": [],
+            "context_summary": f"Conversation covering {len(to_compact)} previous messages. Core context archived."
+        }
+
+    user_mems = distilled_data.get("user_memories", [])
+    sys_mems = distilled_data.get("system_memories", [])
+    new_skills = distilled_data.get("skills", [])
+    summary_text = str(distilled_data.get("context_summary", "")).strip() or "Prior conversation compacted into persistent memory."
+
+    # 1. Save memories
+    saved_user_count = 0
+    existing_user_mems = {m.get("text", "").strip().lower() for m in get_memories().get("memories", []) if m.get("type") == "user"}
+    for um in user_mems:
+        um_str = str(um).strip()
+        if um_str and um_str.lower() not in existing_user_mems:
+            add_memory(um_str, is_user_fact=True)
+            existing_user_mems.add(um_str.lower())
+            saved_user_count += 1
+
+    saved_sys_count = 0
+    existing_sys_mems = {m.get("text", "").strip().lower() for m in get_memories().get("memories", []) if m.get("type") == "system"}
+    for sm in sys_mems:
+        sm_str = str(sm).strip()
+        if sm_str and sm_str.lower() not in existing_sys_mems:
+            add_memory(sm_str, is_user_fact=False)
+            existing_sys_mems.add(sm_str.lower())
+            saved_sys_count += 1
+
+    # 2. Save skills
+    saved_skill_count = 0
+    for sk in new_skills:
+        if isinstance(sk, dict) and sk.get("name") and sk.get("instructions"):
+            sk_res = create_skill(sk.get("name", ""), sk.get("description", ""), sk.get("instructions", ""))
+            if sk_res.get("ok"):
+                saved_skill_count += 1
+
+    # 3. Archive compacted messages to history_archive.jsonl
+    try:
+        with open(HISTORY_ARCHIVE_FILE, "a", encoding="utf-8") as f:
+            for m in to_compact:
+                archive_entry = {
+                    "archived_at": int(time.time()),
+                    "session_id": history.get("session_id", "botty-widget"),
+                    "message": m
+                }
+                f.write(json.dumps(archive_entry, ensure_ascii=False) + "\n")
+        secure_file_permissions(HISTORY_ARCHIVE_FILE)
+    except Exception as e:
+        append_botty_log(f"Archive write error: {str(e)}")
+
+    # 4. Construct synthetic summary message and prune history.json
+    summary_msg = {
+        "id": f"msg_summary_{int(time.time()*1000)}",
+        "role": "system",
+        "content": f"📌 [Context Compacted]: {summary_text}",
+        "timestamp": int(time.time()),
+        "attachments": [],
+        "actions": [],
+        "model": "",
+        "engine": "",
+        "is_summary": True
+    }
+    history["messages"] = [summary_msg] + tail_messages
+    save_json_file(HISTORY_FILE, history)
+
+    # 5. Reset Hermes session context in SQLite state.db
+    reset_hermes_session("botty-widget")
+
+    # 6. Synchronize encrypted memory vault
+    try:
+        update_encrypted_vault()
+    except Exception:
+        pass
+
+    set_status("idle", headline="Ready", last_query="", last_answer=f"Memory consolidated: {saved_user_count + saved_sys_count} memories, {saved_skill_count} skills saved. Context pruned.")
+    append_botty_log(f"COMPACTION COMPLETED: Compacted {len(to_compact)} msgs -> {len(history['messages'])} msgs left. Added {saved_user_count} user mems, {saved_sys_count} sys mems, {saved_skill_count} skills.")
+
+    return {
+        "ok": True,
+        "compacted": True,
+        "compacted_count": len(to_compact),
+        "remaining_count": len(history["messages"]),
+        "memories_added": saved_user_count + saved_sys_count,
+        "skills_added": saved_skill_count,
+        "summary": summary_text
+    }
+
+def compact_memory(force: bool = True, preserve_tail: Optional[int] = None) -> Dict[str, Any]:
+    return distill_and_compact_session(force=force, preserve_tail=preserve_tail)
 
 def copy_to_clipboard(text: str) -> Dict[str, Any]:
     try:
@@ -1607,7 +1835,10 @@ def main():
     del_m.add_argument("id", help="Memory ID or index")
     del_m.add_argument("--user", dest="user", action="store_true", help="Delete from USER.md")
 
-    subparsers.add_parser("compact", help="Compact session memory")
+    compact_p = subparsers.add_parser("compact", help="Compact session memory & prune old context")
+    compact_p.add_argument("--force", dest="force", action="store_true", default=True, help="Force compaction even if below threshold")
+    compact_p.add_argument("--tail", dest="tail", type=int, default=None, help="Number of recent messages to preserve as active tail")
+
     subparsers.add_parser("skills", help="List skills")
 
     create_s = subparsers.add_parser("create-skill", help="Create a new skill")
@@ -1668,7 +1899,7 @@ def main():
     elif args.command == "delete-memory":
         print(json.dumps(delete_memory(args.id, is_user_fact=args.user), ensure_ascii=False))
     elif args.command == "compact":
-        print(json.dumps(compact_memory(), ensure_ascii=False))
+        print(json.dumps(compact_memory(force=args.force, preserve_tail=args.tail), ensure_ascii=False))
     elif args.command == "skills":
         print(json.dumps(get_skills(), ensure_ascii=False))
     elif args.command == "create-skill":

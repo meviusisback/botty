@@ -1294,6 +1294,7 @@ Panel {
                 implicitHeight: msgCard.implicitHeight + Style.space(4)
 
                 readonly property bool isUser: modelData.role === "user"
+                readonly property bool isSummary: Boolean(modelData.is_summary || modelData.role === "system")
                 readonly property var blocks: Model.parseBlocks(modelData.content || "")
                 readonly property var attachments: modelData.attachments || []
                 readonly property var actions: modelData.actions || []
@@ -1319,8 +1320,8 @@ Panel {
                   width: isUser ? Math.min(parent.width * 0.88, Math.max(contentCol.implicitWidth + Style.space(24), Style.space(140))) : (parent.width - Style.space(8))
                   implicitHeight: contentCol.implicitHeight + Style.space(20)
                   radius: Style.space(10)
-                  color: isUser ? root.alpha(root.accent, 0.12) : root.alpha(root.foreground, 0.04)
-                  borderSpec: Border.controlSpec("normal", isUser ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.12), root.accent)
+                  color: isSummary ? root.alpha("#f59e0b", 0.08) : (isUser ? root.alpha(root.accent, 0.12) : root.alpha(root.foreground, 0.04))
+                  borderSpec: Border.controlSpec("normal", isSummary ? root.alpha("#f59e0b", 0.3) : (isUser ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.12)), isSummary ? "#f59e0b" : root.accent)
 
                   ColumnLayout {
                     id: contentCol
@@ -1336,17 +1337,17 @@ Panel {
                       spacing: Style.space(6)
 
                       Text {
-                        text: isUser ? "You" : "Botty 🐼"
+                        text: isSummary ? "📌 Context Compacted" : (isUser ? "You" : "Botty 🐼")
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         font.bold: true
-                        color: isUser ? root.accent : root.foreground
+                        color: isSummary ? "#f59e0b" : (isUser ? root.accent : root.foreground)
                       }
 
                       // Agent badge for assistant answers
                       BorderSurface {
                         id: agentBadge
-                        visible: !isUser && Boolean(assistantEngine.length > 0)
+                        visible: !isUser && !isSummary && Boolean(assistantEngine.length > 0)
                         readonly property var agInfo: Model.agentLogoInfo(assistantEngine)
                         implicitHeight: Style.space(19)
                         implicitWidth: agRow.implicitWidth + Style.space(10)

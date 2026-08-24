@@ -78,8 +78,15 @@ Panel {
   property bool screenContextEnabled: false
   property var lastCaptureInfo: null
 
-  // Logs state
-  property var logsData: ({ logs: "", log_count: 0, last_assistant_raw: "", last_assistant_model: "", last_assistant_engine: "" })
+  // Sandbox Mode & Write Isolation state
+  property bool sandboxMode: true
+  property bool bypassSandboxForNextQuery: false
+
+  // Desktop Notifications preferences
+  property var notificationConfig: ({ enabled: true, on_complete: true, on_blocked: true, on_error: true })
+
+  // Logs & Hermes Deep Traces state
+  property var logsData: ({ logs: "", log_count: 0, last_assistant_raw: "", last_assistant_model: "", last_assistant_engine: "", hermes_trace: null, hermes_agent_log: "", hermes_errors_log: "" })
   property var selectedMsgLog: null
 
   // Auto-scroll pinning state
@@ -209,7 +216,41 @@ Panel {
     inspectProc.running = true
   }
 
-  function sendQuery(text, filePath, useScreen, useSituation) {
+  function toggleSandboxMode() {
+    var newVal = !root.sandboxMode
+    root.sandboxMode = newVal
+    setSandboxProc.command = ["python3", root.scriptPath(), "set-sandbox", newVal ? "true" : "false"]
+    setSandboxProc.running = false
+    setSandboxProc.running = true
+  }
+
+  function approveSandboxBypass(originalQuery) {
+    var queryToSend = originalQuery || "I approve this operation. Please bypass the sandbox and execute the proposed file/system write actions."
+    root.bypassSandboxForNextQuery = true
+    root.sendQuery(queryToSend, "", false, false, true)
+  }
+
+  function setNotificationPref(key, value) {
+    var current = root.notificationConfig || { enabled: true, on_complete: true, on_blocked: true, on_error: true }
+    current[key] = value
+    root.notificationConfig = current
+    var cmd = ["python3", root.scriptPath(), "set-notifications"]
+    if (key === "enabled") cmd.push("--enabled", value ? "true" : "false")
+    if (key === "on_complete") cmd.push("--complete", value ? "true" : "false")
+    if (key === "on_blocked") cmd.push("--blocked", value ? "true" : "false")
+    if (key === "on_error") cmd.push("--error", value ? "true" : "false")
+    setNotifProc.command = cmd
+    setNotifProc.running = false
+    setNotifProc.running = true
+  }
+
+  function testSystemNotification(eventKey) {
+    testNotifProc.command = ["python3", root.scriptPath(), "test-notification", "--event", eventKey || "complete"]
+    testNotifProc.running = false
+    testNotifProc.running = true
+  }
+
+  function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox) {
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
@@ -233,6 +274,10 @@ Panel {
     }
     if (sit) {
       cmd.push("--situation")
+    }
+    if (bypassSandbox || root.bypassSandboxForNextQuery) {
+      cmd.push("--bypass-sandbox")
+      root.bypassSandboxForNextQuery = false
     }
 
     askProc.command = cmd
@@ -434,6 +479,12 @@ Panel {
           var data = JSON.parse(text || "{}")
           if (data && data.ok) {
             root.rawStatus = data
+            if (data.sandbox_mode !== undefined) {
+              root.sandboxMode = data.sandbox_mode
+            }
+            if (data.notifications) {
+              root.notificationConfig = data.notifications
+            }
           }
         } catch (e) {}
       }
@@ -572,6 +623,77 @@ Panel {
       onStreamFinished: {
         root.fetchLogs()
       }
+    }
+  }
+
+  Process {
+    id: setSandboxProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok && data.sandbox_mode !== undefined) {
+            root.sandboxMode = data.sandbox_mode
+          }
+        } catch (e) {}
+        root.fetchStatus()
+      }
+    }
+  }
+
+  Process {
+    id: getSandboxProc
+    command: ["python3", root.scriptPath(), "get-sandbox"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok && data.sandbox_mode !== undefined) {
+            root.sandboxMode = data.sandbox_mode
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: setNotifProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok && data.notifications) {
+            root.notificationConfig = data.notifications
+          }
+        } catch (e) {}
+        root.fetchStatus()
+      }
+    }
+  }
+
+  Process {
+    id: getNotifProc
+    command: ["python3", root.scriptPath(), "get-notifications"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok && data.notifications) {
+            root.notificationConfig = data.notifications
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: testNotifProc
+    stdout: StdioCollector {
+      waitForEnd: true
     }
   }
 
@@ -828,6 +950,7 @@ Panel {
     }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
+    function toggleSandbox(): void { root.toggleSandboxMode() }
   }
 
   IpcHandler {
@@ -873,6 +996,7 @@ Panel {
     }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
+    function toggleSandbox(): void { root.toggleSandboxMode() }
   }
   // ------------------------------------------------------------- Bar Button (Icon Mode)
   BarIconButton {
@@ -1669,6 +1793,81 @@ Panel {
                       }
                     }
 
+                    // Sandbox Permission Request Card
+                    BorderSurface {
+                      id: permCard
+                      visible: !isUser && Model.detectPermissionRequest(modelData.content).isPermission
+                      width: parent.width
+                      Layout.fillWidth: true
+                      implicitHeight: permCol.implicitHeight + Style.space(16)
+                      radius: Style.space(6)
+                      color: root.alpha("#F59E0B", 0.14)
+                      borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.55), "#F59E0B")
+
+                      ColumnLayout {
+                        id: permCol
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: Style.space(8)
+                        spacing: Style.space(6)
+
+                        RowLayout {
+                          Layout.fillWidth: true
+                          spacing: Style.space(8)
+                          Text {
+                            text: "🔒"
+                            font.pixelSize: Style.space(14)
+                          }
+                          Text {
+                            text: "Sandbox Write Permission Requested"
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.bold: true
+                            color: "#F59E0B"
+                            Layout.fillWidth: true
+                          }
+                        }
+
+                        Text {
+                          text: "The agent halted write operations because Sandbox Mode is active. Approve to bypass sandbox and execute the proposed changes."
+                          textFormat: Text.PlainText
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.space(10)
+                          color: root.foreground
+                          wrapMode: Text.Wrap
+                          Layout.fillWidth: true
+                        }
+
+                        RowLayout {
+                          Layout.fillWidth: true
+                          spacing: Style.space(8)
+                          Layout.topMargin: Style.space(2)
+
+                          Button {
+                            iconText: "󰄬"
+                            text: "Approve & Bypass Sandbox"
+                            selected: true
+                            implicitHeight: Style.space(26)
+                            fontSize: Style.space(10)
+                            onClicked: {
+                              root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
+                            }
+                          }
+
+                          Button {
+                            iconText: "󰅖"
+                            text: "Deny (Keep Sandboxed)"
+                            implicitHeight: Style.space(26)
+                            fontSize: Style.space(10)
+                            onClicked: {
+                              root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
+                            }
+                          }
+                        }
+                      }
+                    }
+
                     // Assistant Action Buttons
                     RowLayout {
                       visible: !isUser
@@ -1776,6 +1975,87 @@ Panel {
                 font.pixelSize: Style.font.body
                 color: root.foreground
                 Layout.fillWidth: true
+              }
+            }
+          }
+
+          // Pinned Pending Sandbox Permission Banner
+          BorderSurface {
+            id: pendingPermissionBanner
+            visible: {
+              if (root.isProcessing || !root.historyMessages || root.historyMessages.length === 0) return false
+              var lastMsg = root.historyMessages[root.historyMessages.length - 1]
+              return lastMsg && lastMsg.role === "assistant" && Model.detectPermissionRequest(lastMsg.content).isPermission
+            }
+            Layout.fillWidth: true
+            implicitHeight: permBannerCol.implicitHeight + Style.space(16)
+            radius: Style.space(8)
+            color: root.alpha("#F59E0B", 0.16)
+            borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.6), "#F59E0B")
+
+            ColumnLayout {
+              id: permBannerCol
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(8)
+
+                Text {
+                  text: "🔒"
+                  font.pixelSize: Style.space(16)
+                }
+
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(2)
+
+                  Text {
+                    text: "Permission Required for Sandbox Bypass"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    color: "#F59E0B"
+                  }
+
+                  Text {
+                    text: "Botty halted file/system writes. Choose an action below:"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(10)
+                    color: root.foreground
+                  }
+                }
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(8)
+                Layout.topMargin: Style.space(2)
+
+                Button {
+                  iconText: "󰄬"
+                  text: "Approve & Run (Bypass)"
+                  selected: true
+                  implicitHeight: Style.space(28)
+                  fontSize: Style.space(10)
+                  onClicked: {
+                    root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
+                  }
+                }
+
+                Button {
+                  iconText: "󰅖"
+                  text: "Deny (Keep Sandboxed)"
+                  implicitHeight: Style.space(28)
+                  fontSize: Style.space(10)
+                  onClicked: {
+                    root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
+                  }
+                }
               }
             }
           }
@@ -1945,6 +2225,19 @@ Panel {
                   }
                 }
                 onRightClicked: root.attachClipboardImage()
+              }
+
+              // 4. Sandbox Write Isolation Toggle Button
+              Button {
+                id: sandboxBtn
+                enabled: !root.isProcessing
+                iconText: root.sandboxMode ? "󰒃" : "󰒄"
+                tooltipText: root.sandboxMode ? "Sandboxed Write Protection: ON (Protected from direct writes — click to unlock)" : "Sandboxed Write Protection: OFF (Unrestricted workstation writes — click to lock)"
+                selected: root.sandboxMode
+                implicitHeight: promptInput.implicitHeight
+                implicitWidth: promptInput.implicitHeight
+                fontSize: Style.space(14)
+                onClicked: root.toggleSandboxMode()
               }
 
               // 4. Text Input
@@ -2273,12 +2566,14 @@ Panel {
         }
       }
 
-      // ========================================================= VIEW: AGENTS, PROVIDERS & MODELS
+      // ========================================================= VIEW: SETTINGS
       Item {
         id: settingsViewItem
         visible: root.currentView === "settings"
         Layout.fillWidth: true
         Layout.fillHeight: true
+
+        property string settingsTab: "models" // "models" | "sandbox" | "notifications"
 
         readonly property var allEngines: (root.enginesData && root.enginesData.engines) ? root.enginesData.engines : []
         readonly property var allProviders: (root.modelsCatalog && root.modelsCatalog.providers) ? root.modelsCatalog.providers : []
@@ -2304,182 +2599,225 @@ Panel {
           anchors.fill: parent
           spacing: Style.space(10)
 
-          // ----------------------------------------------------- Section 1: Agent Engine
-          ColumnLayout {
+          // Sub-Tab Switcher Row
+          RowLayout {
             Layout.fillWidth: true
-            spacing: Style.space(4)
-
-            Text {
-              text: "1. Agent Engine (Backend Runner):"
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              color: root.accent
-            }
-
-            Flow {
-              Layout.fillWidth: true
-              spacing: Style.space(6)
-
-              Repeater {
-                model: settingsViewItem.allEngines
-                delegate: Button {
-                  text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.id === "hermes" ? "Hermes (Botty)" : (modelData.id === "omp" ? "OMP" : (modelData.id === "claude" ? "Claude" : "Codex")))
-                  tooltipText: modelData.name + " (" + modelData.desc + ")"
-                  fontSize: Style.space(11)
-                  selected: modelData.id === (root.rawStatus.active_engine || "hermes")
-                  implicitHeight: Style.space(28)
-                  onClicked: {
-                    root.selectEngine(modelData.id)
-                    modelsProc.command = ["python3", root.scriptPath(), "models", "--engine", modelData.id]
-                    modelsProc.running = true
-                  }
-                }
-              }
-            }
-          }
-
-          PanelSeparator { Layout.fillWidth: true }
-
-          // ----------------------------------------------------- Section 2: Active Inference Providers
-          ColumnLayout {
-            Layout.fillWidth: true
-            spacing: Style.space(4)
-
-            Text {
-              text: "2. Active Inference Providers in " + (root.rawStatus.active_engine ? root.rawStatus.active_engine.toUpperCase() : "HERMES") + " (" + settingsViewItem.allProviders.length + " configured):"
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              color: root.accent
-            }
-
-            Flow {
-              Layout.fillWidth: true
-              spacing: Style.space(6)
-
-              Repeater {
-                model: settingsViewItem.allProviders
-                delegate: Button {
-                  text: modelData.name || modelData.id
-                  fontSize: Style.space(11)
-                  selected: modelData.id === (settingsViewItem.currentProviderObj ? settingsViewItem.currentProviderObj.id : "")
-                  implicitHeight: Style.space(28)
-                  onClicked: {
-                    root.selectedProviderId = modelData.id
-                    root.modelSearchFilter = ""
-                  }
-                }
-              }
-            }
-          }
-
-          // ----------------------------------------------------- Section 3: Model Search & Selector
-          ColumnLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
             spacing: Style.space(6)
 
-            RowLayout {
+            Button {
+              iconText: "󰘚"
+              text: "Engine & Models"
+              selected: settingsViewItem.settingsTab === "models"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: settingsViewItem.settingsTab = "models"
+            }
+
+            Button {
+              iconText: "󰒃"
+              text: "Security & Sandbox"
+              selected: settingsViewItem.settingsTab === "sandbox"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: settingsViewItem.settingsTab = "sandbox"
+            }
+
+            Button {
+              iconText: "󰂚"
+              text: "Notifications"
+              selected: settingsViewItem.settingsTab === "notifications"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: settingsViewItem.settingsTab = "notifications"
+            }
+
+            Item { Layout.fillWidth: true }
+          }
+
+          // ── TAB: MODELS & ENGINES ──
+          ColumnLayout {
+            visible: settingsViewItem.settingsTab === "models"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: Style.space(10)
+
+            // Section 1: Agent Engine
+            ColumnLayout {
               Layout.fillWidth: true
-              spacing: Style.space(6)
+              spacing: Style.space(4)
 
               Text {
-                text: "3. Select Model (" + settingsViewItem.filteredModels.length + " in " + settingsViewItem.currentProviderObj.name + "):"
+                text: "1. Agent Engine (Backend Runner):"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
                 color: root.accent
               }
 
-              Item { Layout.fillWidth: true }
-            }
-
-            TextField {
-              id: modelSearchInput
-              Layout.fillWidth: true
-              placeholderText: "🔍 Search models under " + settingsViewItem.currentProviderObj.name + "…"
-              font.pixelSize: Style.font.body
-              text: root.modelSearchFilter
-              onTextChanged: root.modelSearchFilter = text
-            }
-
-            ScrollView {
-              Layout.fillWidth: true
-              Layout.fillHeight: true
-              clip: true
-
-              ListView {
-                id: modelsList
-                model: settingsViewItem.filteredModels
+              Flow {
+                Layout.fillWidth: true
                 spacing: Style.space(6)
 
-                delegate: Item {
-                  width: modelsList.width
-                  implicitHeight: modelCard.implicitHeight + Style.space(4)
-                  readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
+                Repeater {
+                  model: settingsViewItem.allEngines
+                  delegate: Button {
+                    text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.id === "hermes" ? "Hermes (Botty)" : (modelData.id === "omp" ? "OMP" : (modelData.id === "claude" ? "Claude" : "Codex")))
+                    tooltipText: modelData.name + " (" + modelData.desc + ")"
+                    fontSize: Style.space(11)
+                    selected: modelData.id === (root.rawStatus.active_engine || "hermes")
+                    implicitHeight: Style.space(28)
+                    onClicked: {
+                      root.selectEngine(modelData.id)
+                      modelsProc.command = ["python3", root.scriptPath(), "models", "--engine", modelData.id]
+                      modelsProc.running = true
+                    }
+                  }
+                }
+              }
+            }
 
-                  BorderSurface {
-                    id: modelCard
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.leftMargin: Style.space(2)
-                    anchors.rightMargin: Style.space(2)
-                    implicitHeight: modelRow.implicitHeight + Style.space(14)
-                    radius: Style.space(8)
-                    color: isCurrent ? root.alpha(root.accent, 0.15) : root.alpha(root.foreground, 0.04)
-                    borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
+            PanelSeparator { Layout.fillWidth: true }
 
-                    RowLayout {
-                      id: modelRow
+            // Section 2: Active Inference Providers
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(4)
+
+              Text {
+                text: "2. Active Inference Providers in " + (root.rawStatus.active_engine ? root.rawStatus.active_engine.toUpperCase() : "HERMES") + " (" + settingsViewItem.allProviders.length + " configured):"
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                color: root.accent
+              }
+
+              Flow {
+                Layout.fillWidth: true
+                spacing: Style.space(6)
+
+                Repeater {
+                  model: settingsViewItem.allProviders
+                  delegate: Button {
+                    text: modelData.name || modelData.id
+                    fontSize: Style.space(11)
+                    selected: modelData.id === (settingsViewItem.currentProviderObj ? settingsViewItem.currentProviderObj.id : "")
+                    implicitHeight: Style.space(28)
+                    onClicked: {
+                      root.selectedProviderId = modelData.id
+                      root.modelSearchFilter = ""
+                    }
+                  }
+                }
+              }
+            }
+
+            // Section 3: Model Search & Selector
+            ColumnLayout {
+              Layout.fillWidth: true
+              Layout.fillHeight: true
+              spacing: Style.space(6)
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(6)
+
+                Text {
+                  text: "3. Select Model (" + settingsViewItem.filteredModels.length + " in " + settingsViewItem.currentProviderObj.name + "):"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  color: root.accent
+                }
+
+                Item { Layout.fillWidth: true }
+              }
+
+              TextField {
+                id: modelSearchInput
+                Layout.fillWidth: true
+                placeholderText: "🔍 Search models under " + settingsViewItem.currentProviderObj.name + "…"
+                font.pixelSize: Style.font.body
+                text: root.modelSearchFilter
+                onTextChanged: root.modelSearchFilter = text
+              }
+
+              ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+
+                ListView {
+                  id: modelsList
+                  model: settingsViewItem.filteredModels
+                  spacing: Style.space(6)
+
+                  delegate: Item {
+                    width: modelsList.width
+                    implicitHeight: modelCard.implicitHeight + Style.space(4)
+                    readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
+
+                    BorderSurface {
+                      id: modelCard
                       anchors.left: parent.left
                       anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.margins: Style.space(7)
-                      spacing: Style.space(8)
+                      anchors.leftMargin: Style.space(2)
+                      anchors.rightMargin: Style.space(2)
+                      implicitHeight: modelRow.implicitHeight + Style.space(14)
+                      radius: Style.space(8)
+                      color: isCurrent ? root.alpha(root.accent, 0.15) : root.alpha(root.foreground, 0.04)
+                      borderSpec: Border.controlSpec("normal", isCurrent ? root.accent : root.alpha(root.foreground, 0.1), root.accent)
 
-                      Text {
-                        text: isCurrent ? "󰄬" : "🐼"
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.icon
-                        color: isCurrent ? "#10B981" : root.muted
-                      }
+                      RowLayout {
+                        id: modelRow
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: Style.space(7)
+                        spacing: Style.space(8)
 
-                      ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: Style.space(2)
+                        Text {
+                          text: isCurrent ? "󰄬" : "🐼"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.icon
+                          color: isCurrent ? "#10B981" : root.muted
+                        }
 
-                        RowLayout {
-                          spacing: Style.space(6)
+                        ColumnLayout {
+                          Layout.fillWidth: true
+                          spacing: Style.space(2)
+
+                          RowLayout {
+                            spacing: Style.space(6)
+
+                            Text {
+                              text: modelData.name || modelData.id
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.font.body
+                              font.bold: isCurrent
+                              color: isCurrent ? root.accent : root.foreground
+                              elide: Text.ElideRight
+                              Layout.fillWidth: true
+                            }
+                          }
 
                           Text {
-                            text: modelData.name || modelData.id
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            font.bold: isCurrent
-                            color: isCurrent ? root.accent : root.foreground
+                            text: modelData.id
+                            textFormat: Text.PlainText
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: Style.space(10)
+                            color: root.dim
                             elide: Text.ElideRight
                             Layout.fillWidth: true
                           }
                         }
 
-                        Text {
-                          text: modelData.id
-                          textFormat: Text.PlainText
-                          font.family: "JetBrainsMono Nerd Font"
-                          font.pixelSize: Style.space(10)
-                          color: root.dim
-                          elide: Text.ElideRight
-                          Layout.fillWidth: true
+                        Button {
+                          text: isCurrent ? "Active" : "Select"
+                          selected: isCurrent
+                          implicitHeight: Style.space(26)
+                          fontSize: Style.space(10)
+                          onClicked: root.selectModel(modelData.id, root.selectedProviderId)
                         }
-                      }
-
-                      Button {
-                        text: isCurrent ? "Active" : "Select"
-                        selected: isCurrent
-                        implicitHeight: Style.space(26)
-                        fontSize: Style.space(10)
-                        onClicked: root.selectModel(modelData.id, root.selectedProviderId)
                       }
                     }
                   }
@@ -2487,17 +2825,268 @@ Panel {
               }
             }
           }
+
+          // ── TAB: SECURITY & SANDBOX ──
+          ColumnLayout {
+            visible: settingsViewItem.settingsTab === "sandbox"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: Style.space(12)
+
+            BorderSurface {
+              Layout.fillWidth: true
+              implicitHeight: sbBoxCol.implicitHeight + Style.space(20)
+              radius: Style.space(8)
+              color: root.sandboxMode ? root.alpha("#10B981", 0.08) : root.alpha("#F59E0B", 0.08)
+              borderSpec: Border.controlSpec("normal", root.sandboxMode ? root.alpha("#10B981", 0.3) : root.alpha("#F59E0B", 0.3), root.accent)
+
+              ColumnLayout {
+                id: sbBoxCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                spacing: Style.space(10)
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(10)
+
+                  Text {
+                    text: root.sandboxMode ? "󰒃" : "󰒄"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(24)
+                    color: root.sandboxMode ? "#10B981" : "#F59E0B"
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(2)
+
+                    Text {
+                      text: root.sandboxMode ? "Sandboxed Write Protection: ACTIVE" : "Sandboxed Write Protection: UNRESTRICTED"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                      color: root.foreground
+                    }
+
+                    Text {
+                      text: root.sandboxMode ? "Write actions require confirmation. Full read permissions active." : "Agent can directly modify files & execute workstation commands."
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.space(10)
+                      color: root.dim
+                    }
+                  }
+
+                  Button {
+                    text: root.sandboxMode ? "Disable (Unlock)" : "Enable (Lock)"
+                    iconText: root.sandboxMode ? "󰒄" : "󰒃"
+                    implicitHeight: Style.space(28)
+                    fontSize: Style.space(10)
+                    selected: root.sandboxMode
+                    onClicked: root.toggleSandboxMode()
+                  }
+                }
+
+                PanelSeparator { Layout.fillWidth: true }
+
+                Text {
+                  text: "How Sandboxing Works in Botty:"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(11)
+                  font.bold: true
+                  color: root.accent
+                }
+
+                Text {
+                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Write Isolation: Direct writes (file modifications, deletions, package installations, config changes) are blocked unless you approve them in chat or unlock Sandbox Mode.\n• Interactive In-Chat Approvals: When Botty wants to apply a write, it shows what files will change and prompts for 1-click bypass approval."
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(10)
+                  color: root.foreground
+                  wrapMode: Text.Wrap
+                  Layout.fillWidth: true
+                }
+              }
+            }
+
+            Item { Layout.fillHeight: true }
+          }
+
+          // ── TAB: DESKTOP NOTIFICATIONS ──
+          ColumnLayout {
+            visible: settingsViewItem.settingsTab === "notifications"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            spacing: Style.space(12)
+
+            BorderSurface {
+              Layout.fillWidth: true
+              implicitHeight: notifBoxCol.implicitHeight + Style.space(20)
+              radius: Style.space(8)
+              color: root.alpha(root.foreground, 0.04)
+              borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.12), root.accent)
+
+              ColumnLayout {
+                id: notifBoxCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                spacing: Style.space(10)
+
+                // Master Toggle
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(10)
+
+                  Text {
+                    text: "󰂚"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(20)
+                    color: root.notificationConfig.enabled ? root.accent : root.muted
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(2)
+
+                    Text {
+                      text: "System Desktop Notifications"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                      color: root.foreground
+                    }
+
+                    Text {
+                      text: "Send native desktop alerts via notify-send when widget is in the background."
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.space(10)
+                      color: root.dim
+                    }
+                  }
+
+                  Button {
+                    text: root.notificationConfig.enabled ? "Enabled" : "Disabled"
+                    selected: root.notificationConfig.enabled
+                    implicitHeight: Style.space(28)
+                    fontSize: Style.space(10)
+                    onClicked: root.setNotificationPref("enabled", !root.notificationConfig.enabled)
+                  }
+                }
+
+                PanelSeparator { Layout.fillWidth: true }
+
+                Text {
+                  text: "Event Notification Triggers:"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(11)
+                  font.bold: true
+                  color: root.accent
+                }
+
+                // Trigger 1: Task complete
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: "󰄬 Task Completed"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(11)
+                    color: root.foreground
+                    Layout.fillWidth: true
+                  }
+
+                  Button {
+                    text: root.notificationConfig.on_complete ? "ON" : "OFF"
+                    selected: root.notificationConfig.on_complete
+                    implicitHeight: Style.space(24)
+                    fontSize: Style.space(9)
+                    onClicked: root.setNotificationPref("on_complete", !root.notificationConfig.on_complete)
+                  }
+                }
+
+                // Trigger 2: Blocked / Permission
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: "🔒 Permission Required / Blocked"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(11)
+                    color: root.foreground
+                    Layout.fillWidth: true
+                  }
+
+                  Button {
+                    text: root.notificationConfig.on_blocked ? "ON" : "OFF"
+                    selected: root.notificationConfig.on_blocked
+                    implicitHeight: Style.space(24)
+                    fontSize: Style.space(9)
+                    onClicked: root.setNotificationPref("on_blocked", !root.notificationConfig.on_blocked)
+                  }
+                }
+
+                // Trigger 3: Errors / Timeouts
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: "󰅚 Execution Error & Timeout"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(11)
+                    color: root.foreground
+                    Layout.fillWidth: true
+                  }
+
+                  Button {
+                    text: root.notificationConfig.on_error ? "ON" : "OFF"
+                    selected: root.notificationConfig.on_error
+                    implicitHeight: Style.space(24)
+                    fontSize: Style.space(9)
+                    onClicked: root.setNotificationPref("on_error", !root.notificationConfig.on_error)
+                  }
+                }
+
+                PanelSeparator { Layout.fillWidth: true }
+
+                RowLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(8)
+
+                  Button {
+                    iconText: "󰂚"
+                    text: "Send Test Notification"
+                    implicitHeight: Style.space(26)
+                    fontSize: Style.space(10)
+                    onClicked: root.testSystemNotification("complete")
+                  }
+
+                  Item { Layout.fillWidth: true }
+                }
+              }
+            }
+
+            Item { Layout.fillHeight: true }
+          }
         }
       }
 
-      // ========================================================= VIEW: LOGS & FULL RESPONSES
+      // ========================================================= VIEW: LOGS & HERMES DEEP TRACE
       Item {
         id: logsViewItem
         visible: root.currentView === "logs"
         Layout.fillWidth: true
         Layout.fillHeight: true
 
-        property string logTab: root.selectedMsgLog ? "inspected" : "latest" // "inspected" | "latest" | "stream"
+        property string logTab: root.selectedMsgLog ? "inspected" : "hermes-trace" // "hermes-trace" | "hermes-agent" | "hermes-errors" | "botty-stream" | "inspected"
+
+        readonly property var hermesTraceObj: (root.logsData && root.logsData.hermes_trace) ? root.logsData.hermes_trace : null
+        readonly property var traceSteps: (hermesTraceObj && hermesTraceObj.steps) ? hermesTraceObj.steps : []
 
         ColumnLayout {
           anchors.fill: parent
@@ -2508,7 +3097,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
-              text: "Agent Execution Logs & Raw Output"
+              text: "Hermes Task Trace & Real Agent Logs"
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
@@ -2529,34 +3118,52 @@ Panel {
           // Tab switchers & actions
           RowLayout {
             Layout.fillWidth: true
-            spacing: Style.space(6)
+            spacing: Style.space(5)
 
             Button {
-              visible: Boolean(root.selectedMsgLog)
               iconText: "󰈙"
-              text: "Inspected Turn"
-              selected: logsViewItem.logTab === "inspected"
+              text: "Hermes Trace"
+              selected: logsViewItem.logTab === "hermes-trace"
               implicitHeight: Style.space(26)
               fontSize: Style.space(10)
-              onClicked: { logsViewItem.logTab = "inspected" }
+              onClicked: { logsViewItem.logTab = "hermes-trace" }
             }
 
             Button {
               iconText: "󰚩"
-              text: "Latest Raw Output"
-              selected: logsViewItem.logTab === "latest"
+              text: "Agent Log"
+              selected: logsViewItem.logTab === "hermes-agent"
               implicitHeight: Style.space(26)
               fontSize: Style.space(10)
-              onClicked: { logsViewItem.logTab = "latest" }
+              onClicked: { logsViewItem.logTab = "hermes-agent" }
             }
 
             Button {
-              iconText: "󰈙"
-              text: "Log Stream (" + (root.logsData.log_count || 0) + ")"
-              selected: logsViewItem.logTab === "stream"
+              iconText: "󰅚"
+              text: "Errors Log"
+              selected: logsViewItem.logTab === "hermes-errors"
               implicitHeight: Style.space(26)
               fontSize: Style.space(10)
-              onClicked: { logsViewItem.logTab = "stream" }
+              onClicked: { logsViewItem.logTab = "hermes-errors" }
+            }
+
+            Button {
+              iconText: "󰘦"
+              text: "Botty Log"
+              selected: logsViewItem.logTab === "botty-stream"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: { logsViewItem.logTab = "botty-stream" }
+            }
+
+            Button {
+              visible: Boolean(root.selectedMsgLog)
+              iconText: "󰈙"
+              text: "Inspected"
+              selected: logsViewItem.logTab === "inspected"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: { logsViewItem.logTab = "inspected" }
             }
 
             Item { Layout.fillWidth: true }
@@ -2572,16 +3179,20 @@ Panel {
 
             Button {
               iconText: "󰆏"
-              tooltipText: "Copy active log view to clipboard"
+              tooltipText: "Copy active view to clipboard"
               implicitWidth: Style.space(26)
               implicitHeight: Style.space(26)
               fontSize: Style.space(11)
               onClicked: {
                 var contentToCopy = ""
-                if (logsViewItem.logTab === "inspected" && root.selectedMsgLog) {
+                if (logsViewItem.logTab === "hermes-trace") {
+                  contentToCopy = JSON.stringify(root.logsData.hermes_trace || {}, null, 2)
+                } else if (logsViewItem.logTab === "hermes-agent") {
+                  contentToCopy = root.logsData.hermes_agent_log || ""
+                } else if (logsViewItem.logTab === "hermes-errors") {
+                  contentToCopy = root.logsData.hermes_errors_log || ""
+                } else if (logsViewItem.logTab === "inspected" && root.selectedMsgLog) {
                   contentToCopy = root.selectedMsgLog.raw_output || root.selectedMsgLog.content || ""
-                } else if (logsViewItem.logTab === "latest") {
-                  contentToCopy = root.logsData.last_assistant_raw || ""
                 } else {
                   contentToCopy = root.logsData.logs || ""
                 }
@@ -2591,7 +3202,7 @@ Panel {
 
             Button {
               iconText: "󰆴"
-              tooltipText: "Clear botty.log file"
+              tooltipText: "Clear botty.log"
               implicitWidth: Style.space(26)
               implicitHeight: Style.space(26)
               fontSize: Style.space(11)
@@ -2632,14 +3243,251 @@ Panel {
                 fontSize: Style.space(9)
                 onClicked: {
                   root.selectedMsgLog = null
-                  logsViewItem.logTab = "latest"
+                  logsViewItem.logTab = "hermes-trace"
                 }
               }
             }
           }
 
-          // Monospace Monitored Log Content Surface
+          // ── TAB: HERMES STRUCTURED TASK TRACE ──
+          Item {
+            visible: logsViewItem.logTab === "hermes-trace"
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+
+            ColumnLayout {
+              anchors.fill: parent
+              spacing: Style.space(8)
+
+              // Session Summary Header
+              BorderSurface {
+                visible: Boolean(logsViewItem.hermesTraceObj && logsViewItem.hermesTraceObj.session)
+                Layout.fillWidth: true
+                implicitHeight: sessHdrRow.implicitHeight + Style.space(12)
+                radius: Style.space(6)
+                color: root.alpha(root.accent, 0.08)
+                borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.25), root.accent)
+
+                RowLayout {
+                  id: sessHdrRow
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: Style.space(6)
+                  spacing: Style.space(10)
+
+                  Text {
+                    text: "🐼 " + (logsViewItem.hermesTraceObj && logsViewItem.hermesTraceObj.session ? logsViewItem.hermesTraceObj.session.id : "")
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: Style.space(11)
+                    font.bold: true
+                    color: root.foreground
+                  }
+
+                  Text {
+                    text: "• Model: " + (logsViewItem.hermesTraceObj && logsViewItem.hermesTraceObj.session ? logsViewItem.hermesTraceObj.session.model : "")
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(10)
+                    color: root.dim
+                  }
+
+                  Item { Layout.fillWidth: true }
+
+                  Text {
+                    text: {
+                      if (!logsViewItem.hermesTraceObj || !logsViewItem.hermesTraceObj.session || !logsViewItem.hermesTraceObj.session.tokens) return ""
+                      var tok = logsViewItem.hermesTraceObj.session.tokens
+                      return "Tokens: " + tok.input + " in / " + tok.output + " out" + (tok.reasoning ? (" (" + tok.reasoning + " thought)") : "")
+                    }
+                    font.family: "JetBrainsMono Nerd Font"
+                    font.pixelSize: Style.space(9)
+                    color: root.accent
+                  }
+                }
+              }
+
+              // Step-by-Step Trajectory List
+              BorderSurface {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                radius: Style.space(8)
+                color: root.alpha(root.foreground, 0.04)
+                borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.12), root.accent)
+
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
+                  clip: true
+
+                  ListView {
+                    id: traceList
+                    model: logsViewItem.traceSteps
+                    spacing: Style.space(10)
+
+                    delegate: Item {
+                      width: traceList.width
+                      implicitHeight: stepCard.implicitHeight + Style.space(4)
+
+                      BorderSurface {
+                        id: stepCard
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        implicitHeight: stepCol.implicitHeight + Style.space(14)
+                        radius: Style.space(6)
+                        color: modelData.role === "user" ? root.alpha(root.accent, 0.1) : (modelData.role === "tool" ? root.alpha(root.foreground, 0.03) : root.alpha(root.foreground, 0.06))
+                        borderSpec: Border.controlSpec("normal", modelData.role === "user" ? root.alpha(root.accent, 0.3) : root.alpha(root.foreground, 0.1), root.accent)
+
+                        ColumnLayout {
+                          id: stepCol
+                          anchors.left: parent.left
+                          anchors.right: parent.right
+                          anchors.top: parent.top
+                          anchors.margins: Style.space(7)
+                          spacing: Style.space(6)
+
+                          // Step Header
+                          RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Style.space(6)
+
+                            Text {
+                              text: modelData.role === "user" ? "󰀕 USER QUERY" : (modelData.role === "tool" ? ("󰘦 TOOL OUTPUT (" + (modelData.tool_name || "tool") + ")") : "🐼 HERMES ASSISTANT")
+                              font.family: "JetBrainsMono Nerd Font"
+                              font.pixelSize: Style.space(10)
+                              font.bold: true
+                              color: modelData.role === "user" ? root.accent : (modelData.role === "tool" ? "#34D399" : "#FBBF24")
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Text {
+                              text: Model.formatHermesTimestamp(modelData.timestamp)
+                              font.family: "JetBrainsMono Nerd Font"
+                              font.pixelSize: Style.space(9)
+                              color: root.dim
+                            }
+                          }
+
+                          // Reasoning / Thinking Box
+                          BorderSurface {
+                            visible: Boolean(modelData.reasoning)
+                            Layout.fillWidth: true
+                            implicitHeight: rCol.implicitHeight + Style.space(10)
+                            radius: Style.space(4)
+                            color: root.alpha(root.accent, 0.06)
+                            borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.2), root.accent)
+
+                            ColumnLayout {
+                              id: rCol
+                              anchors.left: parent.left
+                              anchors.right: parent.right
+                              anchors.top: parent.top
+                              anchors.margins: Style.space(5)
+                              spacing: Style.space(3)
+
+                              Text {
+                                text: "󰌵 MODEL REASONING & THOUGHT TRACE:"
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: Style.space(9)
+                                font.bold: true
+                                color: root.accent
+                              }
+
+                              TextEdit {
+                                text: modelData.reasoning || ""
+                                textFormat: TextEdit.PlainText
+                                font.family: "JetBrainsMono Nerd Font"
+                                font.pixelSize: Style.space(10)
+                                color: root.foreground
+                                wrapMode: TextEdit.Wrap
+                                Layout.fillWidth: true
+                                readOnly: true
+                                selectByMouse: true
+                                mouseSelectionMode: TextEdit.SelectCharacters
+                                cursorVisible: false
+                                activeFocusOnPress: false
+                              }
+                            }
+                          }
+
+                          // Tool Invocations List
+                          Repeater {
+                            model: modelData.tool_calls || []
+                            delegate: BorderSurface {
+                              Layout.fillWidth: true
+                              implicitHeight: tcCol.implicitHeight + Style.space(10)
+                              radius: Style.space(4)
+                              color: root.alpha("#38BDF8", 0.08)
+                              borderSpec: Border.controlSpec("normal", root.alpha("#38BDF8", 0.3), "#38BDF8")
+
+                              ColumnLayout {
+                                id: tcCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: Style.space(5)
+                                spacing: Style.space(3)
+
+                                RowLayout {
+                                  spacing: Style.space(6)
+
+                                  Text {
+                                    text: Model.formatToolBadge(modelData.name).icon + " TOOL CALL: " + modelData.name
+                                    font.family: "JetBrainsMono Nerd Font"
+                                    font.pixelSize: Style.space(9)
+                                    font.bold: true
+                                    color: "#38BDF8"
+                                  }
+                                }
+
+                                TextEdit {
+                                  text: typeof modelData.arguments === "object" ? JSON.stringify(modelData.arguments, null, 2) : String(modelData.arguments || "")
+                                  textFormat: TextEdit.PlainText
+                                  font.family: "JetBrainsMono Nerd Font"
+                                  font.pixelSize: Style.space(10)
+                                  color: root.foreground
+                                  wrapMode: TextEdit.Wrap
+                                  Layout.fillWidth: true
+                                  readOnly: true
+                                  selectByMouse: true
+                                  mouseSelectionMode: TextEdit.SelectCharacters
+                                  cursorVisible: false
+                                  activeFocusOnPress: false
+                                }
+                              }
+                            }
+                          }
+
+                          // Main Content Text
+                          TextEdit {
+                            visible: Boolean(modelData.content)
+                            text: modelData.content || ""
+                            textFormat: TextEdit.PlainText
+                            wrapMode: TextEdit.Wrap
+                            font.family: modelData.role === "tool" ? "JetBrainsMono Nerd Font" : root.fontFamily
+                            font.pixelSize: modelData.role === "tool" ? Style.space(10) : Style.font.body
+                            color: root.foreground
+                            Layout.fillWidth: true
+                            readOnly: true
+                            selectByMouse: true
+                            mouseSelectionMode: TextEdit.SelectCharacters
+                            cursorVisible: false
+                            activeFocusOnPress: false
+                            selectionColor: root.alpha(root.accent, 0.4)
+                            selectedTextColor: root.foreground
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // ── TAB: RAW LOG STREAM (Agent / Errors / Botty / Inspected) ──
           BorderSurface {
+            visible: logsViewItem.logTab !== "hermes-trace"
             Layout.fillWidth: true
             Layout.fillHeight: true
             radius: Style.space(8)
@@ -2655,13 +3503,16 @@ Panel {
                 id: logDisplayArea
                 width: parent.width
                 text: {
+                  if (logsViewItem.logTab === "hermes-agent") {
+                    return root.logsData.hermes_agent_log || "(Hermes agent.log is empty or not yet generated)"
+                  }
+                  if (logsViewItem.logTab === "hermes-errors") {
+                    return root.logsData.hermes_errors_log || "(No Hermes errors recorded in errors.log ✓)"
+                  }
                   if (logsViewItem.logTab === "inspected" && root.selectedMsgLog) {
                     return root.selectedMsgLog.raw_output || root.selectedMsgLog.content || "(No raw output saved for this message)"
                   }
-                  if (logsViewItem.logTab === "latest") {
-                    return root.logsData.last_assistant_raw || "(No raw assistant output recorded yet. Send a message to see unstripped output & reasoning traces.)"
-                  }
-                  return root.logsData.logs || "(Log file is empty: " + (root.logsData.log_path || "~/.local/share/botty/botty.log") + ")"
+                  return root.logsData.logs || "(Botty widget log file is empty: " + (root.logsData.log_path || "~/.local/share/botty/botty.log") + ")"
                 }
                 textFormat: TextEdit.PlainText
                 wrapMode: TextEdit.Wrap

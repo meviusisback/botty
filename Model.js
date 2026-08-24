@@ -419,4 +419,72 @@ function formatSituationSummary(sitData) {
   }
 }
 
+/**
+ * Detects if an assistant message contains a Sandbox Permission Request.
+ */
+function detectPermissionRequest(text) {
+  if (!text) return { isPermission: false, title: "", details: "" }
+  var t = String(text)
+  var hasHeader = t.includes("🔒 SANDBOX PERMISSION REQUIRED") || t.includes("SANDBOX PERMISSION REQUIRED")
+  if (!hasHeader) return { isPermission: false, title: "", details: "" }
+
+  var lines = t.split("\n")
+  var title = "Sandbox Permission Required"
+  var details = ""
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim()
+    if (line.includes("SANDBOX PERMISSION REQUIRED:")) {
+      title = line.replace(/^[🔒\s]*SANDBOX PERMISSION REQUIRED:\s*/i, "").trim()
+    }
+  }
+
+  return {
+    isPermission: true,
+    title: title || "Permission needed to perform file / system write",
+    raw: text
+  }
+}
+
+/**
+ * Returns icon and styling for Hermes tool executions.
+ */
+function formatToolBadge(toolName) {
+  var t = String(toolName || "").toLowerCase()
+  if (t.includes("terminal") || t.includes("exec") || t.includes("shell") || t.includes("bash")) {
+    return { icon: "", name: "Terminal", color: "#38BDF8" }
+  }
+  if (t.includes("file") || t.includes("read") || t.includes("write") || t.includes("edit")) {
+    return { icon: "󰈙", name: "File System", color: "#34D399" }
+  }
+  if (t.includes("memory")) {
+    return { icon: "󰒃", name: "Memory", color: "#A78BFA" }
+  }
+  if (t.includes("skill")) {
+    return { icon: "󰘦", name: "Skill", color: "#FBBF24" }
+  }
+  if (t.includes("web") || t.includes("search") || t.includes("browser") || t.includes("fetch")) {
+    return { icon: "󰖟", name: "Web", color: "#60A5FA" }
+  }
+  if (t.includes("vision") || t.includes("image") || t.includes("screen")) {
+    return { icon: "󰈟", name: "Vision", color: "#F472B6" }
+  }
+  return { icon: "󰚩", name: toolName || "Tool", color: "#94A3B8" }
+}
+
+/**
+ * Formats epoch timestamp into clean local time string HH:MM:SS.
+ */
+function formatHermesTimestamp(ts) {
+  if (!ts) return ""
+  try {
+    var d = new Date(typeof ts === "number" ? (ts > 1e11 ? ts : ts * 1000) : ts)
+    var hh = String(d.getHours()).padStart(2, "0")
+    var mm = String(d.getMinutes()).padStart(2, "0")
+    var ss = String(d.getSeconds()).padStart(2, "0")
+    return hh + ":" + mm + ":" + ss
+  } catch (e) {
+    return ""
+  }
+}
+
 

@@ -349,7 +349,42 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
         
         icon = str(botty_icon) if botty_icon.exists() else "dialog-information"
 
-        cmd = ["notify-send", "-a", "Botty", "-u", urgency, "-i", icon]
+        glyph = "🐼"
+        if event_type == "blocked":
+            glyph = "🔒"
+        elif event_type == "error":
+            glyph = "󰅚"
+        elif event_type == "complete":
+            glyph = "󰄬"
+
+        summon_cmd = "omarchy-shell shell summon meviusisback.botty"
+
+        # 1. Native Omarchy Shell notification integration
+        omarchy_notifier = shutil.which("omarchy-notification-send")
+        if omarchy_notifier:
+            cmd = [
+                omarchy_notifier,
+                "--exec", summon_cmd,
+                "-g", glyph,
+                "-u", urgency if urgency in ["low", "normal", "critical"] else "normal",
+                "--app-name", "Botty",
+                clean_title,
+                clean_msg
+            ]
+            if botty_icon.exists():
+                cmd.extend(["--image", str(botty_icon)])
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+
+        # 2. Fallback to standard notify-send with actions and hints
+        cmd = [
+            "notify-send",
+            "-a", "Botty",
+            "-u", urgency,
+            "-i", icon,
+            "-h", f"string:omarchy-glyph:{glyph}",
+            "-h", f"string:omarchy-exec:{summon_cmd}"
+        ]
 
         if event_type == "blocked":
             cmd.extend([

@@ -179,11 +179,13 @@ Panel {
 
   function fetchLogs() {
     logsProc.command = ["python3", root.scriptPath(), "logs"]
+    logsProc.running = false
     logsProc.running = true
   }
 
   function clearLogsNow() {
     clearLogsProc.command = ["python3", root.scriptPath(), "clear-logs"]
+    clearLogsProc.running = false
     clearLogsProc.running = true
   }
 
@@ -195,6 +197,7 @@ Panel {
 
   function fetchSituationContext() {
     situationProc.command = ["python3", root.scriptPath(), "situation-context"]
+    situationProc.running = false
     situationProc.running = true
   }
 
@@ -527,6 +530,7 @@ Panel {
 
   Process {
     id: situationProc
+    command: ["python3", root.scriptPath(), "situation-context"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -544,6 +548,7 @@ Panel {
 
   Process {
     id: logsProc
+    command: ["python3", root.scriptPath(), "logs"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -559,6 +564,7 @@ Panel {
 
   Process {
     id: clearLogsProc
+    command: ["python3", root.scriptPath(), "clear-logs"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

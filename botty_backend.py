@@ -357,6 +357,15 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
         elif event_type == "complete":
             glyph = "󰄬"
 
+        # Notification copy
+        if event_type == "blocked":
+            clean_title = "🔒 Sandbox Permission Required"
+            clean_msg = "Botty halted write operations. Click to open Botty and choose Approve or Deny."
+        elif event_type == "complete":
+            clean_title = "󰄬 Botty — Done"
+        elif event_type == "error":
+            clean_title = "󰅚 Botty — Error"
+
         summon_cmd = "omarchy-shell shell summon meviusisback.botty"
 
         # 1. Native Omarchy Shell notification integration
@@ -376,60 +385,31 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
 
-        # 2. Fallback to standard notify-send with actions and hints
+        # 2. Fallback to standard notify-send with hints and summon action
         cmd = [
             "notify-send",
             "-a", "Botty",
             "-u", urgency,
             "-i", icon,
             "-h", f"string:omarchy-glyph:{glyph}",
-            "-h", f"string:omarchy-exec:{summon_cmd}"
+            "-h", f"string:omarchy-exec:{summon_cmd}",
+            "-A", "default=Open Botty & Review",
+            "-A", "open=🔍 Open Botty",
+            clean_title,
+            clean_msg
         ]
 
-        if event_type == "blocked":
-            cmd.extend([
-                "-A", "default=Open Botty & Review",
-                "-A", "approve=✓ Approve & Run",
-                "-A", "open=🔍 Open Botty"
-            ])
-            if not clean_msg.endswith(".") and not clean_msg.endswith("!"):
-                clean_msg += " Click to open Botty or choose an action below."
-        elif event_type == "complete":
-            cmd.extend([
-                "-A", "default=Open Botty",
-                "-A", "open=🔍 View in Botty"
-            ])
-        elif event_type == "error":
-            cmd.extend([
-                "-A", "default=Open Botty",
-                "-A", "open=🔍 Inspect Error"
-            ])
-
-        cmd.extend([clean_title, clean_msg])
-
-        def _notification_action_listener(exec_cmd, ev_type):
+        def _notification_action_listener(exec_cmd):
             try:
                 res = subprocess.run(exec_cmd, capture_output=True, text=True, timeout=120)
                 action = (res.stdout or "").strip()
-                if not action:
-                    return
-                append_botty_log(f"NOTIFICATION_ACTION [{ev_type}]: {action}")
-                
-                # Summon Botty popup in Omarchy
-                subprocess.run(["omarchy-shell", "shell", "summon", "meviusisback.botty"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                
-                # If user directly pressed "Approve & Run" in notification
-                if action == "approve" and ev_type == "blocked":
-                    script_file = str(Path(__file__).resolve())
-                    subprocess.Popen([
-                        "python3", script_file, "ask",
-                        "I approve this operation. Please bypass the sandbox and execute the proposed file/system write actions.",
-                        "--bypass-sandbox"
-                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if action:
+                    # Clicking any action button or notification body strictly summons Botty
+                    subprocess.run(["omarchy-shell", "shell", "summon", "meviusisback.botty"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception as ex:
                 append_botty_log(f"NOTIFY_ACTION_ERR: {str(ex)}")
 
-        listener_thread = threading.Thread(target=_notification_action_listener, args=(cmd, event_type), daemon=True)
+        listener_thread = threading.Thread(target=_notification_action_listener, args=(cmd,), daemon=True)
         listener_thread.start()
         return True
     except Exception as e:

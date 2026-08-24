@@ -796,31 +796,24 @@ Panel {
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
     function situationContext(): void {
       root.currentView = "chat"
-      if (root.opened && root.situationContextEnabled) {
-        root.situationContextEnabled = false
-        root.situationData = null
-      } else {
-        root.fetchSituationContext()
-        root.open()
-        focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      root.fetchSituationContext()
+      if (!root.opened) {
+        root.toggle()
       }
+      focusTimer.start()
+      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
     }
     function captureWindowContext(): void {
       root.situationContext()
     }
     function captureScreenshot(): void {
       root.currentView = "chat"
-      if (root.opened && root.screenContextEnabled) {
-        root.screenContextEnabled = false
-        root.attachedFilePath = ""
-        root.lastCaptureInfo = null
-      } else {
-        root.captureScreenNow()
-        root.open()
-        focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      root.captureScreenNow()
+      if (!root.opened) {
+        root.toggle()
       }
+      focusTimer.start()
+      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
     }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
@@ -829,39 +822,32 @@ Panel {
   IpcHandler {
     enabled: true
     target: "botty"
-    function open(): void { root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
-    function close(): void { root.close() }
+    function open(): void { if (!root.opened) root.toggle(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
+    function close(): void { if (root.opened) root.toggle() }
     function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
-    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
+    function ask(query: string): void { if (!root.opened) root.toggle(); focusTimer.start(); root.sendQuery(query, "", false, false) }
+    function captureAndAsk(query: string): void { if (!root.opened) root.toggle(); focusTimer.start(); root.sendQuery(query, "", false, true) }
     function situationContext(): void {
       root.currentView = "chat"
-      if (root.opened && root.situationContextEnabled) {
-        root.situationContextEnabled = false
-        root.situationData = null
-      } else {
-        root.fetchSituationContext()
-        root.open()
-        focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      root.fetchSituationContext()
+      if (!root.opened) {
+        root.toggle()
       }
+      focusTimer.start()
+      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
     }
     function captureWindowContext(): void {
       root.situationContext()
     }
     function captureScreenshot(): void {
       root.currentView = "chat"
-      if (root.opened && root.screenContextEnabled) {
-        root.screenContextEnabled = false
-        root.attachedFilePath = ""
-        root.lastCaptureInfo = null
-      } else {
-        root.captureScreenNow()
-        root.open()
-        focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      root.captureScreenNow()
+      if (!root.opened) {
+        root.toggle()
       }
+      focusTimer.start()
+      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
     }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }

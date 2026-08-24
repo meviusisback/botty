@@ -386,3 +386,37 @@ function cleanModelName(modelId) {
   return m
 }
 
+/**
+ * Formats situation context data into concise UI labels for the Context Strip.
+ */
+function formatSituationSummary(sitData) {
+  if (!sitData) return { title: "Situation Context", subtitle: "Desktop environment aware" }
+  var app = sitData.active_app || "Active App"
+  var cwd = sitData.primary_cwd || ""
+  var git = sitData.primary_git || {}
+  var br = git.branch ? (" (" + git.branch + (git.changed_count ? ", " + git.changed_count + " modified" : "") + ")") : ""
+  
+  if (cwd) {
+    cwd = cwd.replace(/^\/home\/[^/]+/, "~")
+  }
+
+  var mainTitle = app
+  if (cwd) {
+    mainTitle = app + " • " + cwd + br
+  } else if (sitData.active_title) {
+    mainTitle = app + " — " + truncateText(sitData.active_title, 38)
+  }
+
+  var count = (sitData.visible_tools && sitData.visible_tools.length) ? sitData.visible_tools.length : 1
+  var subtitle = "Workspace " + (sitData.active_workspace !== undefined ? sitData.active_workspace : "1") + " • " + count + " tool" + (count > 1 ? "s" : "") + " visible on screen"
+  if (sitData.selection) {
+    subtitle += " • Text selection captured"
+  }
+
+  return {
+    title: mainTitle,
+    subtitle: subtitle
+  }
+}
+
+

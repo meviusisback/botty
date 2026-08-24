@@ -62,7 +62,7 @@ Panel {
   property var skillsData: []
   property var vaultSecurity: ({ encryption_enabled: true, cipher: "AES-256-CBC (PBKDF2)" })
 
-  property string currentView: "chat" // "chat" | "memories" | "settings"
+  property string currentView: "chat" // "chat" | "memories" | "settings" | "logs"
   property string promptText: ""
   
   // Generic File Attachment State
@@ -72,8 +72,18 @@ Panel {
   property string attachedFileIcon: "󰈔"
   property bool attachedFileIsImage: false
 
+  // Situation Context & Visual Screenshot state
+  property bool situationContextEnabled: false
+  property var situationData: null
   property bool screenContextEnabled: false
   property var lastCaptureInfo: null
+
+  // Logs state
+  property var logsData: ({ logs: "", log_count: 0, last_assistant_raw: "", last_assistant_model: "", last_assistant_engine: "" })
+  property var selectedMsgLog: null
+
+  // Auto-scroll pinning state
+  property bool autoScrollPinned: true
 
   // Voice dictation state
   property bool isRecordingVoice: false
@@ -96,13 +106,15 @@ Panel {
     var targetY = Math.max(minY, Math.min(maxY, currentY + delta * step))
     chatListView.contentY = targetY
     chatListView.returnToBounds()
+    root.autoScrollPinned = (targetY >= maxY - Style.space(10))
   }
 
   function scrollChatToEnd() {
     if (!chatListView) return
+    root.autoScrollPinned = true
     chatListView.positionViewAtEnd()
     Qt.callLater(function() {
-      if (chatListView) {
+      if (chatListView && root.autoScrollPinned) {
         chatListView.positionViewAtEnd()
         var minY = chatListView.originY
         var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
@@ -110,6 +122,21 @@ Panel {
         chatListView.returnToBounds()
       }
     })
+    scrollStabilizeTimer.restart()
+  }
+
+  Timer {
+    id: scrollStabilizeTimer
+    interval: 80
+    repeat: false
+    onTriggered: {
+      if (chatListView && root.autoScrollPinned) {
+        chatListView.positionViewAtEnd()
+        var minY = chatListView.originY
+        var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
+        chatListView.contentY = maxY
+      }
+    }
   }
 
   function fetchStatus() {
@@ -150,20 +177,42 @@ Panel {
     }
   }
 
+  function fetchLogs() {
+    logsProc.command = ["python3", root.scriptPath(), "logs"]
+    logsProc.running = true
+  }
+
+  function clearLogsNow() {
+    clearLogsProc.command = ["python3", root.scriptPath(), "clear-logs"]
+    clearLogsProc.running = true
+  }
+
+  function showSpecificLog(msgData) {
+    root.selectedMsgLog = msgData
+    root.currentView = "logs"
+    root.fetchLogs()
+  }
+
+  function fetchSituationContext() {
+    situationProc.command = ["python3", root.scriptPath(), "situation-context"]
+    situationProc.running = true
+  }
+
   function attachFileNow(filepath) {
     if (!filepath) return
     inspectProc.command = ["python3", root.scriptPath(), "inspect-file", filepath]
     inspectProc.running = true
   }
 
-  function sendQuery(text, filePath, useScreen) {
+  function sendQuery(text, filePath, useScreen, useSituation) {
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
     var fpath = filePath || root.attachedFilePath || ""
     var scr = (useScreen !== undefined) ? useScreen : root.screenContextEnabled
+    var sit = (useSituation !== undefined) ? useSituation : root.situationContextEnabled
 
-    if (!q.trim() && !fpath && !scr) return
+    if (!q.trim() && !fpath && !scr && !sit) return
 
     var cmd = ["python3", root.scriptPath(), "ask", q]
     if (fpath) {
@@ -176,6 +225,9 @@ Panel {
     }
     if (scr) {
       cmd.push("--screen")
+    }
+    if (sit) {
+      cmd.push("--situation")
     }
 
     askProc.command = cmd
@@ -191,7 +243,9 @@ Panel {
     root.attachedFileSize = ""
     root.attachedFileIsImage = false
     root.screenContextEnabled = false
+    root.situationContextEnabled = false
     root.lastCaptureInfo = null
+    root.situationData = null
     root.fetchHistory()
     root.scrollChatToEnd()
     Qt.callLater(function() { 
@@ -199,6 +253,7 @@ Panel {
       if (promptInput) promptInput.forceActiveFocus() 
     })
   }
+
   function captureScreenNow() {
     captureProc.command = ["python3", root.scriptPath(), "capture", "--mode", "activewindow"]
     captureProc.running = true
@@ -459,12 +514,55 @@ Panel {
             root.attachedFilePath = data.image_path
             root.attachedFileName = data.filename
             root.attachedFileSize = "Capture"
-            root.attachedFileIcon = "󰹑"
+            root.attachedFileIcon = "󰄀"
             root.attachedFileIsImage = true
             root.screenContextEnabled = true
+            root.situationContextEnabled = false
             root.lastCaptureInfo = data
           }
         } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: situationProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            root.situationData = data
+            root.situationContextEnabled = true
+            root.screenContextEnabled = false
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: logsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            root.logsData = data
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: clearLogsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.fetchLogs()
       }
     }
   }
@@ -686,15 +784,26 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
-    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
+    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
+    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
+    function situationContext(): void {
+      if (root.opened && root.situationContextEnabled) {
+        root.situationContextEnabled = false
+        root.situationData = null
+      } else {
+        root.fetchSituationContext()
+        root.open()
+        focusTimer.start()
+        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      }
+    }
     function captureWindowContext(): void {
+      root.situationContext()
+    }
+    function captureScreenshot(): void {
       if (root.opened && root.screenContextEnabled) {
         root.screenContextEnabled = false
         root.attachedFilePath = ""
-        root.attachedFileName = ""
-        root.attachedFileSize = ""
-        root.attachedFileIsImage = false
         root.lastCaptureInfo = null
       } else {
         root.captureScreenNow()
@@ -714,15 +823,26 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
-    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
+    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
+    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
+    function situationContext(): void {
+      if (root.opened && root.situationContextEnabled) {
+        root.situationContextEnabled = false
+        root.situationData = null
+      } else {
+        root.fetchSituationContext()
+        root.open()
+        focusTimer.start()
+        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      }
+    }
     function captureWindowContext(): void {
+      root.situationContext()
+    }
+    function captureScreenshot(): void {
       if (root.opened && root.screenContextEnabled) {
         root.screenContextEnabled = false
         root.attachedFilePath = ""
-        root.attachedFileName = ""
-        root.attachedFileSize = ""
-        root.attachedFileIsImage = false
         root.lastCaptureInfo = null
       } else {
         root.captureScreenNow()
@@ -748,12 +868,11 @@ Panel {
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) {
-        if (root.opened && root.screenContextEnabled) {
-          root.screenContextEnabled = false
-          root.attachedFilePath = ""
-          root.lastCaptureInfo = null
+        if (root.opened && root.situationContextEnabled) {
+          root.situationContextEnabled = false
+          root.situationData = null
         } else {
-          root.captureScreenNow()
+          root.fetchSituationContext()
           root.open()
         }
       } else {
@@ -784,12 +903,11 @@ Panel {
     function triggerPress(buttonCode) {
       if (root.bar) root.bar.hideTooltip(dataButton)
       if (buttonCode === Qt.RightButton) {
-        if (root.opened && root.screenContextEnabled) {
-          root.screenContextEnabled = false
-          root.attachedFilePath = ""
-          root.lastCaptureInfo = null
+        if (root.opened && root.situationContextEnabled) {
+          root.situationContextEnabled = false
+          root.situationData = null
         } else {
-          root.captureScreenNow()
+          root.fetchSituationContext()
           root.open()
         }
       } else {
@@ -998,6 +1116,19 @@ Panel {
           }
 
           Button {
+            iconText: "󰈙"
+            tooltipText: "Agent Logs & Full Responses"
+            selected: root.currentView === "logs"
+            implicitWidth: Style.space(32)
+            implicitHeight: Style.space(32)
+            onClicked: {
+              root.selectedMsgLog = null
+              root.currentView = "logs"
+              root.fetchLogs()
+            }
+          }
+
+          Button {
             iconText: "󰋚"
             tooltipText: "Memories & Skills"
             selected: root.currentView === "memories"
@@ -1081,6 +1212,23 @@ Panel {
 
               onCountChanged: {
                 root.scrollChatToEnd()
+              }
+
+              onContentHeightChanged: {
+                if (root.autoScrollPinned) {
+                  positionViewAtEnd()
+                  var minY = originY
+                  var maxY = Math.max(minY, minY + contentHeight - height)
+                  contentY = maxY
+                }
+              }
+
+              onMovementStarted: {
+                root.autoScrollPinned = atYEnd
+              }
+
+              onMovementEnded: {
+                root.autoScrollPinned = atYEnd
               }
 
               Keys.onPressed: function(event) {
@@ -1283,6 +1431,16 @@ Panel {
 
                       Item { Layout.fillWidth: true }
 
+                      Button {
+                        visible: isUser
+                        iconText: "󰆏"
+                        tooltipText: "Copy question"
+                        implicitHeight: Style.space(20)
+                        implicitWidth: Style.space(20)
+                        fontSize: Style.space(9)
+                        onClicked: root.copyText(modelData.content)
+                      }
+
                       Text {
                         text: Model.formatTimestamp(modelData.timestamp)
                         font.family: root.fontFamily
@@ -1310,7 +1468,11 @@ Panel {
                           spacing: Style.space(6)
 
                           Text {
-                            text: modelData.icon || (modelData.is_screen_capture ? "󰹑" : "󰈔")
+                            text: {
+                              if (modelData.type === "situation") return "󰘦"
+                              if (modelData.is_screen_capture) return "󰄀"
+                              return modelData.icon || "󰈔"
+                            }
                             color: root.accent
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
@@ -1318,10 +1480,16 @@ Panel {
 
                           Text {
                             text: {
+                              if (modelData.type === "situation") {
+                                var appName = modelData.app_name || "Desktop"
+                                var cwdStr = modelData.cwd ? (" • " + modelData.cwd.replace(/^\/home\/[^/]+/, "~")) : ""
+                                var gitStr = modelData.git_branch ? (" (" + modelData.git_branch + ")") : ""
+                                return "Situation Context: " + appName + cwdStr + gitStr
+                              }
                               if (modelData.is_screen_capture) {
                                 var app = modelData.app_name || "Active Window"
                                 var title = modelData.window_title ? (" — " + modelData.window_title) : ""
-                                return "Screen Context: " + app + title
+                                return "Screenshot Context: " + app + title
                               }
                               var size = modelData.size_str ? (" (" + modelData.size_str + ")") : ""
                               return "Attached: " + (modelData.filename || "file") + size
@@ -1338,24 +1506,30 @@ Panel {
                       }
                     }
 
-                    // Rendered Content Blocks
+                    // Rendered Content Blocks (Selectable with Mouse)
                     Repeater {
                       model: blocks
                       delegate: Item {
                         Layout.fillWidth: true
                         implicitHeight: modelData.type === "code" ? codeCard.implicitHeight : (textBlock.implicitHeight + Style.space(2))
 
-                        Text {
+                        TextEdit {
                           id: textBlock
                           visible: modelData.type !== "code"
                           width: parent.width
                           text: modelData.text || ""
-                          textFormat: Text.MarkdownText
-                          wrapMode: Text.Wrap
+                          textFormat: TextEdit.MarkdownText
+                          wrapMode: TextEdit.Wrap
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.body
                           color: root.foreground
-                          linkColor: root.accent
+                          readOnly: true
+                          selectByMouse: true
+                          mouseSelectionMode: TextEdit.SelectCharacters
+                          cursorVisible: false
+                          activeFocusOnPress: false
+                          selectionColor: root.alpha(root.accent, 0.4)
+                          selectedTextColor: root.foreground
                           onLinkActivated: function(link) { Qt.openUrlExternally(link) }
                         }
 
@@ -1395,31 +1569,45 @@ Panel {
                               }
                             }
 
-                            Text {
+                            TextEdit {
                               text: modelData.code || ""
-                              textFormat: Text.PlainText
+                              textFormat: TextEdit.PlainText
                               font.family: "JetBrainsMono Nerd Font"
                               font.pixelSize: Style.space(11)
                               color: root.foreground
-                              wrapMode: Text.Wrap
+                              wrapMode: TextEdit.Wrap
                               Layout.fillWidth: true
+                              readOnly: true
+                              selectByMouse: true
+                              mouseSelectionMode: TextEdit.SelectCharacters
+                              cursorVisible: false
+                              activeFocusOnPress: false
+                              selectionColor: root.alpha(root.accent, 0.4)
+                              selectedTextColor: root.foreground
                             }
                           }
                         }
                       }
                     }
 
-                    // Fallback Text if blocks is empty or failed to render
-                    Text {
+                    // Fallback Text if blocks is empty or failed to render (Selectable with Mouse)
+                    TextEdit {
                       visible: blocks.length === 0
                       text: (modelData.content && modelData.content.trim().length > 0) ? modelData.content : (isUser ? "(empty message)" : "✓ Done.")
-                      textFormat: Text.PlainText
-                      wrapMode: Text.Wrap
+                      textFormat: TextEdit.PlainText
+                      wrapMode: TextEdit.Wrap
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       color: (modelData.content && modelData.content.trim().length > 0) ? root.foreground : root.muted
                       font.italic: !modelData.content || modelData.content.trim().length === 0
                       Layout.fillWidth: true
+                      readOnly: true
+                      selectByMouse: true
+                      mouseSelectionMode: TextEdit.SelectCharacters
+                      cursorVisible: false
+                      activeFocusOnPress: false
+                      selectionColor: root.alpha(root.accent, 0.4)
+                      selectedTextColor: root.foreground
                     }
 
                     // Action Receipts
@@ -1468,6 +1656,15 @@ Panel {
                       Layout.topMargin: Style.space(2)
 
                       Item { Layout.fillWidth: true }
+
+                      Button {
+                        iconText: "󰈙"
+                        text: "Log"
+                        tooltipText: "Inspect raw response, thinking blocks & traces for this turn"
+                        fontSize: Style.space(10)
+                        implicitHeight: Style.space(22)
+                        onClicked: root.showSpecificLog(modelData)
+                      }
 
                       Button {
                         iconText: "󰆏"
@@ -1562,10 +1759,10 @@ Panel {
             }
           }
 
-          // Active Context Strip (Files, Documents, Media, Screen)
+          // Active Context Strip (Situation, Files, Documents, Media, Screen)
           BorderSurface {
             id: contextStrip
-            visible: root.attachedFilePath.length > 0 || root.screenContextEnabled
+            visible: root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled
             Layout.fillWidth: true
             implicitHeight: ctxRow.implicitHeight + Style.space(12)
             radius: Style.space(6)
@@ -1581,7 +1778,11 @@ Panel {
               spacing: Style.space(8)
 
               Text {
-                text: root.attachedFileIcon || (root.screenContextEnabled ? "󰹑" : "󰈔")
+                text: {
+                  if (root.situationContextEnabled) return "󰘦"
+                  if (root.screenContextEnabled) return "󰄀"
+                  return root.attachedFileIcon || "󰈔"
+                }
                 color: root.accent
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(16)
@@ -1593,6 +1794,10 @@ Panel {
 
                 Text {
                   text: {
+                    if (root.situationContextEnabled) {
+                      var sum = Model.formatSituationSummary(root.situationData)
+                      return sum.title
+                    }
                     if (root.screenContextEnabled) {
                       if (root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
                         var w = root.lastCaptureInfo.active_window
@@ -1615,8 +1820,12 @@ Panel {
 
                 Text {
                   text: {
+                    if (root.situationContextEnabled) {
+                      var sum2 = Model.formatSituationSummary(root.situationData)
+                      return sum2.subtitle
+                    }
                     if (root.screenContextEnabled && root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
-                      return "Window Context: " + (root.lastCaptureInfo.active_window.class || "App") + " (Desktop)"
+                      return "Visual Screenshot: " + (root.lastCaptureInfo.active_window.class || "App") + " (Multimodal image)"
                     }
                     var s = root.attachedFileSize ? ("Size: " + root.attachedFileSize + " • ") : ""
                     var p = root.attachedFilePath || ""
@@ -1634,7 +1843,7 @@ Panel {
 
               Button {
                 iconText: "󰅖"
-                tooltipText: "Remove attachment"
+                tooltipText: "Remove context / attachment"
                 implicitWidth: Style.space(24)
                 implicitHeight: Style.space(24)
                 fontSize: Style.space(11)
@@ -1644,7 +1853,9 @@ Panel {
                   root.attachedFileSize = ""
                   root.attachedFileIsImage = false
                   root.screenContextEnabled = false
+                  root.situationContextEnabled = false
                   root.lastCaptureInfo = null
+                  root.situationData = null
                 }
               }
             }
@@ -1655,12 +1866,12 @@ Panel {
             Layout.fillWidth: true
             spacing: Style.space(6)
 
-            // Unified Input Row: [+] [Text Field] [Screen 󰹑] [Mic 󰍬] [Send 󰒭]
+            // Reorganized Input Row: [+] [󰘦 Situation] [󰄀 Screen] [Text Field] [Mic 󰍬] [Send 󰒭]
             RowLayout {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
-              // Consolidated [+] Attachment Button (File, Image, Document, Code)
+              // 1. Consolidated [+] Attachment Button (File, Image, Document, Code)
               Button {
                 id: attachBtn
                 enabled: !root.isProcessing
@@ -1673,7 +1884,49 @@ Panel {
                 onRightClicked: root.attachClipboardImage()
               }
 
-              // Text Input
+              // 2. Desktop Situation Context Toggle Button
+              Button {
+                id: situationBtn
+                enabled: !root.isProcessing
+                iconText: "󰘦"
+                tooltipText: root.situationContextEnabled ? "Situation Context Active (Click to remove)" : "Desktop Situation Context (Active window, directory, git repo, open tools) [Super + Shift + A]"
+                selected: root.situationContextEnabled
+                implicitHeight: promptInput.implicitHeight
+                implicitWidth: promptInput.implicitHeight
+                fontSize: Style.space(14)
+                onClicked: {
+                  if (!root.situationContextEnabled) {
+                    root.fetchSituationContext()
+                  } else {
+                    root.situationContextEnabled = false
+                    root.situationData = null
+                  }
+                }
+              }
+
+              // 3. Visual Screenshot Button (multimodal analysis)
+              Button {
+                id: screenBtn
+                enabled: !root.isProcessing
+                iconText: "󰄀"
+                tooltipText: root.screenContextEnabled ? "Visual Screenshot Active (Click to remove)" : "Capture Visual Screenshot for Image Analysis (Right-click: paste clipboard image)"
+                selected: root.screenContextEnabled
+                implicitHeight: promptInput.implicitHeight
+                implicitWidth: promptInput.implicitHeight
+                fontSize: Style.space(14)
+                onClicked: {
+                  if (!root.screenContextEnabled) {
+                    root.captureScreenNow()
+                  } else {
+                    root.screenContextEnabled = false
+                    root.attachedFilePath = ""
+                    root.lastCaptureInfo = null
+                  }
+                }
+                onRightClicked: root.attachClipboardImage()
+              }
+
+              // 4. Text Input
               TextField {
                 id: promptInput
                 focus: true
@@ -1681,8 +1934,8 @@ Panel {
                 placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic to transcribe)" : (root.isProcessing ? "Botty is thinking… (you can type your next prompt)" : "Ask Botty or command a desktop action… (Enter to send)")
                 font.pixelSize: Style.font.body
                 onAccepted: {
-                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
-                    root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled)
+                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled)) {
+                    root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled, root.situationContextEnabled)
                   }
                   promptInput.forceActiveFocus()
                 }
@@ -1706,27 +1959,7 @@ Panel {
                 }
               }
 
-              // Screen Context Toggle Button
-              Button {
-                id: screenBtn
-                enabled: !root.isProcessing
-                iconText: "󰹑"
-                tooltipText: root.screenContextEnabled ? "Screen Context Active (Super + Shift + A to toggle off)" : "Attach Active Screen Context (Super + Shift + A)"
-                selected: root.screenContextEnabled
-                implicitHeight: promptInput.implicitHeight
-                implicitWidth: promptInput.implicitHeight
-                onClicked: {
-                  if (!root.screenContextEnabled) {
-                    root.captureScreenNow()
-                  } else {
-                    root.screenContextEnabled = false
-                    root.attachedFilePath = ""
-                    root.lastCaptureInfo = null
-                  }
-                }
-              }
-
-              // Voice Dictation Button
+              // 5. Voice Dictation Button
               Button {
                 id: micBtn
                 enabled: !root.isProcessing
@@ -1739,7 +1972,7 @@ Panel {
                 onClicked: root.toggleVoiceDictation()
               }
 
-              // Send Button
+              // 6. Send Button
               Button {
                 iconText: "󰒭"
                 text: "Send"
@@ -1747,8 +1980,8 @@ Panel {
                 selected: true
                 implicitHeight: promptInput.implicitHeight
                 onClicked: {
-                  if (!root.isProcessing && (promptInput.text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled)) {
-                    root.sendQuery(promptInput.text, root.attachedFilePath, root.screenContextEnabled)
+                  if (!root.isProcessing && (promptInput.text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled)) {
+                    root.sendQuery(promptInput.text, root.attachedFilePath, root.screenContextEnabled, root.situationContextEnabled)
                   }
                 }
               }
@@ -2230,6 +2463,197 @@ Panel {
                     }
                   }
                 }
+              }
+            }
+          }
+        }
+      }
+
+      // ========================================================= VIEW: LOGS & FULL RESPONSES
+      Item {
+        id: logsViewItem
+        visible: root.currentView === "logs"
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+
+        property string logTab: root.selectedMsgLog ? "inspected" : "latest" // "inspected" | "latest" | "stream"
+
+        ColumnLayout {
+          anchors.fill: parent
+          spacing: Style.space(10)
+
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(8)
+
+            Text {
+              text: "Agent Execution Logs & Raw Output"
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              color: root.foreground
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+              iconText: "󰌑"
+              text: "Back to Chat"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: { root.currentView = "chat" }
+            }
+          }
+
+          // Tab switchers & actions
+          RowLayout {
+            Layout.fillWidth: true
+            spacing: Style.space(6)
+
+            Button {
+              visible: Boolean(root.selectedMsgLog)
+              iconText: "󰈙"
+              text: "Inspected Turn"
+              selected: logsViewItem.logTab === "inspected"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: { logsViewItem.logTab = "inspected" }
+            }
+
+            Button {
+              iconText: "󰚩"
+              text: "Latest Raw Output"
+              selected: logsViewItem.logTab === "latest"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: { logsViewItem.logTab = "latest" }
+            }
+
+            Button {
+              iconText: "󰈙"
+              text: "Log Stream (" + (root.logsData.log_count || 0) + ")"
+              selected: logsViewItem.logTab === "stream"
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(10)
+              onClicked: { logsViewItem.logTab = "stream" }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+              iconText: "󰑐"
+              tooltipText: "Refresh logs"
+              implicitWidth: Style.space(26)
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(11)
+              onClicked: root.fetchLogs()
+            }
+
+            Button {
+              iconText: "󰆏"
+              tooltipText: "Copy active log view to clipboard"
+              implicitWidth: Style.space(26)
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(11)
+              onClicked: {
+                var contentToCopy = ""
+                if (logsViewItem.logTab === "inspected" && root.selectedMsgLog) {
+                  contentToCopy = root.selectedMsgLog.raw_output || root.selectedMsgLog.content || ""
+                } else if (logsViewItem.logTab === "latest") {
+                  contentToCopy = root.logsData.last_assistant_raw || ""
+                } else {
+                  contentToCopy = root.logsData.logs || ""
+                }
+                root.copyText(contentToCopy)
+              }
+            }
+
+            Button {
+              iconText: "󰆴"
+              tooltipText: "Clear botty.log file"
+              implicitWidth: Style.space(26)
+              implicitHeight: Style.space(26)
+              fontSize: Style.space(11)
+              onClicked: root.clearLogsNow()
+            }
+          }
+
+          // Metadata badge if inspecting a message
+          BorderSurface {
+            visible: logsViewItem.logTab === "inspected" && Boolean(root.selectedMsgLog)
+            Layout.fillWidth: true
+            implicitHeight: insRow.implicitHeight + Style.space(8)
+            radius: Style.space(4)
+            color: root.alpha(root.accent, 0.1)
+            borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.3), root.accent)
+
+            RowLayout {
+              id: insRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(6)
+              spacing: Style.space(6)
+
+              Text {
+                text: "Turn: " + (root.selectedMsgLog ? (root.selectedMsgLog.engine || "agent") + " / " + (root.selectedMsgLog.model || "model") : "")
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: Style.space(10)
+                font.bold: true
+                color: root.accent
+                Layout.fillWidth: true
+                elide: Text.ElideRight
+              }
+
+              Button {
+                text: "Dismiss"
+                implicitHeight: Style.space(20)
+                fontSize: Style.space(9)
+                onClicked: {
+                  root.selectedMsgLog = null
+                  logsViewItem.logTab = "latest"
+                }
+              }
+            }
+          }
+
+          // Monospace Monitored Log Content Surface
+          BorderSurface {
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            radius: Style.space(8)
+            color: root.alpha(root.foreground, 0.04)
+            borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.12), root.accent)
+
+            ScrollView {
+              anchors.fill: parent
+              anchors.margins: Style.space(8)
+              clip: true
+
+              TextEdit {
+                id: logDisplayArea
+                width: parent.width
+                text: {
+                  if (logsViewItem.logTab === "inspected" && root.selectedMsgLog) {
+                    return root.selectedMsgLog.raw_output || root.selectedMsgLog.content || "(No raw output saved for this message)"
+                  }
+                  if (logsViewItem.logTab === "latest") {
+                    return root.logsData.last_assistant_raw || "(No raw assistant output recorded yet. Send a message to see unstripped output & reasoning traces.)"
+                  }
+                  return root.logsData.logs || "(Log file is empty: " + (root.logsData.log_path || "~/.local/share/botty/botty.log") + ")"
+                }
+                textFormat: TextEdit.PlainText
+                wrapMode: TextEdit.Wrap
+                font.family: "JetBrainsMono Nerd Font"
+                font.pixelSize: Style.space(11)
+                color: root.foreground
+                readOnly: true
+                selectByMouse: true
+                mouseSelectionMode: TextEdit.SelectCharacters
+                cursorVisible: false
+                activeFocusOnPress: false
+                selectionColor: root.alpha(root.accent, 0.4)
+                selectedTextColor: root.foreground
               }
             }
           }

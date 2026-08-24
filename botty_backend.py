@@ -19,6 +19,7 @@ import sqlite3
 import argparse
 import mimetypes
 import hashlib
+import socket
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -32,6 +33,7 @@ STATUS_FILE = BOTTY_DATA_DIR / "status.json"
 HISTORY_FILE = BOTTY_DATA_DIR / "history.json"
 VAULT_FILE = BOTTY_DATA_DIR / "vault.enc"
 LOCK_FILE = BOTTY_DATA_DIR / "running.pid"
+BOTTY_LOG_FILE = BOTTY_DATA_DIR / "botty.log"
 VOICE_PID_FILE = BOTTY_DATA_DIR / "voice_record.pid"
 VOICE_WAV_FILE = Path("/tmp/botty_dictation.wav")
 SCREENSHOT_DIR = BOTTY_DATA_DIR / "captures"
@@ -439,6 +441,271 @@ def count_skills() -> int:
         count += len([d for d in HERMES_SKILLS_DIR.iterdir() if d.is_dir() and (d / "SKILL.md").exists()])
     return count
 
+def append_botty_log(entry: str) -> None:
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(BOTTY_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] {entry}\n")
+        secure_file_permissions(BOTTY_LOG_FILE)
+    except Exception:
+        pass
+
+def get_botty_logs(max_lines: int = 250) -> Dict[str, Any]:
+    raw_lines = []
+    if BOTTY_LOG_FILE.exists():
+        try:
+            text = BOTTY_LOG_FILE.read_text(encoding="utf-8", errors="replace")
+            lines = [l for l in text.splitlines() if l.strip()]
+            raw_lines = lines[-max_lines:]
+        except Exception:
+            pass
+
+    history = load_json_file(HISTORY_FILE, {"messages": []})
+    messages = history.get("messages", [])
+    last_assistant_raw = ""
+    last_assistant_model = ""
+    last_assistant_engine = ""
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            last_assistant_raw = m.get("raw_output") or m.get("content", "")
+            last_assistant_model = m.get("model", "")
+            last_assistant_engine = m.get("engine", "")
+            break
+
+    return {
+        "ok": True,
+        "logs": "\n".join(raw_lines),
+        "log_count": len(raw_lines),
+        "last_assistant_raw": last_assistant_raw,
+        "last_assistant_model": last_assistant_model,
+        "last_assistant_engine": last_assistant_engine,
+        "log_path": str(BOTTY_LOG_FILE)
+    }
+
+def clear_botty_logs() -> Dict[str, Any]:
+    try:
+        if BOTTY_LOG_FILE.exists():
+            BOTTY_LOG_FILE.unlink()
+        return {"ok": True, "message": "Logs cleared"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def hypr_ipc_query(cmd: str) -> Any:
+    """Fast direct Unix domain socket query to Hyprland IPC socket with CLI fallback."""
+    xdg_runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    his = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    sock_path = f"{xdg_runtime}/hypr/{his}/.socket.sock" if his else ""
+    
+    if sock_path and os.path.exists(sock_path):
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect(sock_path)
+            s.sendall(cmd.encode("utf-8"))
+            buf = []
+            while True:
+                chunk = s.recv(8192)
+                if not chunk:
+                    break
+                buf.append(chunk)
+            s.close()
+            raw = b"".join(buf).decode("utf-8", errors="replace")
+            return json.loads(raw)
+        except Exception:
+            pass
+
+    # Fallback to hyprctl CLI
+    try:
+        cli_cmd = cmd.lstrip("j/").split()
+        res = subprocess.run(["hyprctl", *cli_cmd, "-j"], capture_output=True, text=True, timeout=2.0)
+        if res.returncode == 0 and res.stdout.strip():
+            return json.loads(res.stdout)
+    except Exception:
+        pass
+    return {}
+
+def get_targeted_situation_context() -> Dict[str, Any]:
+    """Derives visible tools & environment on the active workspace in <10ms without taking a screenshot."""
+    start_t = time.perf_counter()
+    active_win = hypr_ipc_query("j/activewindow") or {}
+    active_ws = hypr_ipc_query("j/activeworkspace") or {}
+    clients = hypr_ipc_query("j/clients") or []
+
+    ws_id = active_ws.get("id")
+    active_addr = active_win.get("address", "")
+    
+    visible = []
+    if isinstance(clients, list):
+        for c in clients:
+            if not isinstance(c, dict):
+                continue
+            c_ws = c.get("workspace", {})
+            c_ws_id = c_ws.get("id") if isinstance(c_ws, dict) else c_ws
+            if (c_ws_id == ws_id or ws_id is None) and c.get("mapped") and not c.get("hidden"):
+                if c.get("class") != "meviusisback.botty":
+                    visible.append(c)
+
+    terminal_classes = {"foot", "kitty", "alacritty", "ghostty", "xterm", "gnome-terminal", "wezterm", "urxvt", "st", "terminator", "konsole"}
+    editor_classes = {"code", "code-oss", "vscodium", "cursor", "zed", "sublime_text", "neovim", "helix", "emacs"}
+    
+    tools_list = []
+    primary_cwd = ""
+    primary_git: Dict[str, Any] = {}
+    primary_app = active_win.get("class", "") or "Desktop"
+    primary_title = active_win.get("title", "")
+
+    for c in visible:
+        cls = c.get("class", "")
+        title = c.get("title", "")
+        pid = c.get("pid")
+        is_active = (c.get("address") == active_addr) or (pid and pid == active_win.get("pid"))
+        
+        tool_info: Dict[str, Any] = {
+            "class": cls,
+            "title": title,
+            "pid": pid,
+            "is_active": is_active,
+            "category": "app",
+            "cwd": "",
+            "cmd": "",
+            "git": {}
+        }
+        
+        if cls.lower() in terminal_classes and pid:
+            tool_info["category"] = "terminal"
+            cwd = ""
+            cmd = ""
+            if os.path.exists(f"/proc/{pid}"):
+                try:
+                    cur_pid = pid
+                    for _ in range(5):
+                        try:
+                            children_raw = Path(f"/proc/{cur_pid}/task/{cur_pid}/children").read_text().strip()
+                            if children_raw:
+                                cur_pid = int(children_raw.split()[-1])
+                            else:
+                                break
+                        except Exception:
+                            break
+                    cwd = os.readlink(f"/proc/{cur_pid}/cwd")
+                    cmd = Path(f"/proc/{cur_pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+            
+            tool_info["cwd"] = cwd
+            tool_info["cmd"] = cmd or title
+            if is_active and cwd:
+                primary_cwd = cwd
+
+            # Check Git
+            if cwd and (Path(cwd) / ".git").exists():
+                try:
+                    r_br = subprocess.run(["git", "-C", cwd, "branch", "--show-current"], capture_output=True, text=True, timeout=0.5)
+                    r_st = subprocess.run(["git", "-C", cwd, "status", "--short"], capture_output=True, text=True, timeout=0.5)
+                    br = r_br.stdout.strip() or "detached"
+                    st_lines = [l for l in r_st.stdout.strip().splitlines() if l.strip()]
+                    git_data = {
+                        "branch": br,
+                        "changed_count": len(st_lines),
+                        "status_summary": ", ".join(st_lines[:5]) + ("..." if len(st_lines) > 5 else "")
+                    }
+                    tool_info["git"] = git_data
+                    if is_active:
+                        primary_git = git_data
+                except Exception:
+                    pass
+                    
+        elif cls.lower() in editor_classes and pid:
+            tool_info["category"] = "editor"
+            cwd = ""
+            if os.path.exists(f"/proc/{pid}/cwd"):
+                try:
+                    cwd = os.readlink(f"/proc/{pid}/cwd")
+                except Exception:
+                    pass
+            tool_info["cwd"] = cwd
+            if is_active and cwd:
+                primary_cwd = cwd
+        elif "browser" in cls.lower() or cls.lower() in {"chromium", "google-chrome", "firefox", "zen", "brave-browser"}:
+            tool_info["category"] = "browser"
+            
+        tools_list.append(tool_info)
+
+    # Active selection (mouse highlight)
+    selection = ""
+    try:
+        r_sel = subprocess.run(["wl-paste", "--primary"], capture_output=True, text=True, timeout=0.3)
+        if r_sel.returncode == 0 and r_sel.stdout.strip():
+            sel_text = r_sel.stdout.strip()
+            if len(sel_text) > 400:
+                sel_text = sel_text[:400] + "… [truncated]"
+            selection = sel_text
+    except Exception:
+        pass
+
+    elapsed_ms = int((time.perf_counter() - start_t) * 1000)
+
+    return {
+        "ok": True,
+        "active_workspace": ws_id,
+        "active_app": primary_app,
+        "active_title": primary_title,
+        "primary_cwd": primary_cwd,
+        "primary_git": primary_git,
+        "visible_tools": tools_list,
+        "selection": selection,
+        "elapsed_ms": elapsed_ms,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+def format_situation_prompt(ctx: Dict[str, Any]) -> str:
+    if not ctx or not ctx.get("ok"):
+        return ""
+    
+    lines = ["[SCREEN TOOLS & SITUATION CONTEXT]"]
+    tools = ctx.get("visible_tools", [])
+    if tools:
+        for t in tools:
+            prefix = "[ACTIVE] " if t.get("is_active") else ""
+            cat = t.get("category", "app").capitalize()
+            cls = t.get("class", "App")
+            title = t.get("title", "")
+            cwd = t.get("cwd", "")
+            if cwd:
+                short_cwd = cwd.replace(str(Path.home()), "~")
+            else:
+                short_cwd = ""
+            
+            git = t.get("git", {})
+            git_str = ""
+            if git:
+                br = git.get("branch", "")
+                cc = git.get("changed_count", 0)
+                git_str = f" (git: {br}" + (f", {cc} changed" if cc else ", clean") + ")"
+                
+            cmd = t.get("cmd", "")
+            
+            if cat == "Terminal":
+                lines.append(f"- {prefix}Terminal ({cls}): cwd=\"{short_cwd}\"{git_str} | cmd=\"{cmd or title}\"")
+            elif cat == "Editor":
+                loc = f" in \"{short_cwd}\"" if short_cwd else ""
+                lines.append(f"- {prefix}Editor ({cls}): \"{title}\"{loc}")
+            elif cat == "Browser":
+                lines.append(f"- {prefix}Browser ({cls}): \"{title}\"")
+            else:
+                lines.append(f"- {prefix}{cls}: \"{title}\"")
+    else:
+        app = ctx.get("active_app", "Desktop")
+        tit = ctx.get("active_title", "")
+        lines.append(f"- Active Window: {app} — \"{tit}\"")
+
+    selection = ctx.get("selection", "")
+    if selection:
+        lines.append(f"- Active Mouse Highlighted Text: \"{selection}\"")
+        
+    lines.append("[END CONTEXT]")
+    return "\n".join(lines)
+
 def capture_screen(mode: str = "activewindow") -> Dict[str, Any]:
     timestamp = int(time.time() * 1000)
     capture_path = SCREENSHOT_DIR / f"capture_{timestamp}.png"
@@ -506,7 +773,7 @@ def clear_history() -> Dict[str, Any]:
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
     return {"ok": True, "message": "History cleared"}
 
-def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None) -> None:
+def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
 
@@ -530,15 +797,16 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
         "attachments": attachments or [],
         "actions": actions or [],
         "model": model or "",
-        "engine": engine or ""
+        "engine": engine or "",
+        "raw_output": raw_output or ""
     }
     msgs.append(msg)
     history["messages"] = msgs
     save_json_file(HISTORY_FILE, history)
 
-def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
-    if not query.strip() and not image_path and not file_path and not screen_context:
-        return {"ok": False, "error": "Empty query and no attachment provided."}
+def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+    if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
+        return {"ok": False, "error": "Empty query and no attachment or context provided."}
 
     if LOCK_FILE.exists():
         try:
@@ -552,8 +820,14 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     LOCK_FILE.write_text(str(os.getpid()))
 
     captured_context: Optional[Dict[str, Any]] = None
+    situation_data: Optional[Dict[str, Any]] = None
     target_image = image_path
     attached_file_info: Optional[Dict[str, Any]] = None
+
+    if situation_context:
+        sit = get_targeted_situation_context()
+        if sit.get("ok"):
+            situation_data = sit
 
     if screen_context:
         cap = capture_screen(mode="activewindow")
@@ -570,6 +844,19 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
                 target_image = finfo["path"]
 
     attachments: List[Dict[str, Any]] = []
+
+    if situation_data:
+        attachments.append({
+            "type": "situation",
+            "app_name": situation_data.get("active_app", "Desktop"),
+            "window_title": situation_data.get("active_title", ""),
+            "cwd": situation_data.get("primary_cwd", ""),
+            "git_branch": situation_data.get("primary_git", {}).get("branch", ""),
+            "git_changed": situation_data.get("primary_git", {}).get("changed_count", 0),
+            "visible_tools_count": len(situation_data.get("visible_tools", [])),
+            "is_screen_capture": False
+        })
+
     if target_image and os.path.exists(target_image):
         win_title = ""
         win_class = ""
@@ -595,10 +882,11 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "icon": attached_file_info["icon"],
             "is_screen_capture": False
         })
+
     BOTTY_AGENT_DIRECTIVE = (
         "You are acting as Botty, the friendly and capable AI desktop agent on this Omarchy Linux workstation. "
         "You have full local access to the machine environment: terminal execution, local files, system CLI tools, native IPC APIs, and installed skills. "
-        "When (optional) screen context or window information is provided, use it to understand the user's workspace state and what needs to be done. "
+        "When (optional) screen context, situational tools, or window information is provided, use it to understand the user's workspace state and what needs to be done. "
         "You are fully capable of executing tasks directly on this machine to assist the user. "
         "Do NOT attempt X11 GUI clicks, xdotool, or synthetic mouse automation. "
         "Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as herdr for driving agent TUIs, hyprctl for window/workspace management, or system utilities), and installed skills to execute tasks directly on this machine.\n\n"
@@ -610,7 +898,13 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     )
 
     prompt_parts = []
-    if captured_context or screen_context or (target_image and screen_context):
+
+    if situation_data:
+        sit_prompt = format_situation_prompt(situation_data)
+        if sit_prompt:
+            prompt_parts.append(sit_prompt + "\n")
+
+    if captured_context or (screen_context and target_image):
         win = captured_context.get("active_window", {}) if captured_context else {}
         win_title = win.get("title", "")
         win_class = win.get("class", "")
@@ -619,9 +913,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         prompt_parts.append(
             f"[SCREEN CONTEXT ATTACHED: {win_info}{img_info}]\n"
             f"Note for Agent: You have access to this screen context and full local capabilities to perform tasks on this machine. "
-            f"Use the visual/screen state to understand what is on screen and what needs to be done. "
-            f"Do NOT attempt X11 GUI clicks, `xdotool`, or synthetic mouse automation. "
-            f"Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as `herdr` for driving agent TUIs, `hyprctl` for desktop/window management, system utilities), and installed skills to execute tasks directly on this machine.\n"
+            f"Use the visual/screen state to understand what is on screen and what needs to be done.\n"
             f"[END SCREEN CONTEXT]\n"
         )
 
@@ -635,7 +927,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         else:
             prompt_parts.append(f"[ATTACHED DOCUMENT: {fname} (Path: {fpath}, Size: {attached_file_info['size_str']})]\nPlease inspect and work with this file using your terminal and file tools.\n[END ATTACHED DOCUMENT]\n")
 
-    user_query = query.strip() if query.strip() else ("Analyze the attached file." if attached_file_info else "Analyze the attached screenshot context.")
+    user_query = query.strip() if query.strip() else ("Analyze the attached file." if attached_file_info else ("Analyze the current desktop situation and active tools." if situation_data else "Analyze the attached screenshot context."))
     prompt_parts.append(user_query)
     final_prompt = "\n".join(prompt_parts)
 
@@ -648,6 +940,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     query_tmp = BOTTY_DATA_DIR / "current_query.txt"
     hermes_prompt = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
     query_tmp.write_text(hermes_prompt, encoding="utf-8")
+
+    t_start = time.perf_counter()
+    append_botty_log(f"QUERY [{engine}/{selected_model}]: {user_query}")
 
     cmd = []
 
@@ -696,11 +991,13 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         
         stdout_data, stderr_data = proc.communicate(timeout=240)
         cleaned_response = strip_reasoning(stdout_data)
+        t_duration = time.perf_counter() - t_start
 
         if proc.returncode != 0 and not cleaned_response:
             err_msg = stderr_data.strip() or f"Agent process exited with code {proc.returncode}"
             set_status("error", headline="Error", last_error=err_msg)
-            add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine)
+            append_botty_log(f"ERROR [{engine}/{selected_model}] (Code {proc.returncode}): {err_msg}")
+            add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine, raw_output=redact_secrets(stderr_data or stdout_data))
             return {"ok": False, "error": err_msg}
 
         if not cleaned_response:
@@ -715,7 +1012,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             elif "Created skill" in line or "Skill installed" in line:
                 actions.append({"type": "skill", "text": line.strip()})
 
-        add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine)
+        raw_output_saved = redact_secrets(stdout_data)
+        append_botty_log(f"RESPONSE [{engine}/{selected_model}] ({t_duration:.1f}s): {cleaned_response[:140]}...")
+        add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved)
         set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
 
         try:
@@ -726,7 +1025,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         return {
             "ok": True,
             "response": cleaned_response,
-            "raw_output": redact_secrets(stdout_data),
+            "raw_output": raw_output_saved,
             "actions": actions,
             "attachments": attachments
         }
@@ -736,12 +1035,14 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             proc.kill()
         err = "Request timed out after 240 seconds."
         set_status("error", headline="Timeout", last_error=err)
-        add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine)
+        append_botty_log(f"TIMEOUT [{engine}/{selected_model}]: {err}")
+        add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine, raw_output=err)
         return {"ok": False, "error": err}
     except Exception as e:
         err = f"Execution error: {str(e)}"
         set_status("error", headline="Error", last_error=err)
-        add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine)
+        append_botty_log(f"EXCEPTION [{engine}/{selected_model}]: {err}")
+        add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine, raw_output=err)
         return {"ok": False, "error": err}
     finally:
         LOCK_FILE.unlink(missing_ok=True)
@@ -1257,7 +1558,8 @@ def main():
     ask_p.add_argument("query", nargs="?", default="", help="Query prompt text")
     ask_p.add_argument("--image", dest="image", default=None, help="Path to image/media file")
     ask_p.add_argument("--file", dest="file", default=None, help="Path to any file/code/document")
-    ask_p.add_argument("--screen", dest="screen", action="store_true", help="Capture and include screen context")
+    ask_p.add_argument("--screen", dest="screen", action="store_true", help="Capture and include screen screenshot context")
+    ask_p.add_argument("--situation", dest="situation", action="store_true", help="Include targeted desktop & tool situation context")
     ask_p.add_argument("--model", dest="model", default=None, help="Model override")
     ask_p.add_argument("--provider", dest="provider", default=None, help="Provider override")
 
@@ -1268,6 +1570,10 @@ def main():
 
     cap_p = subparsers.add_parser("capture", help="Capture screen/window")
     cap_p.add_argument("--mode", dest="mode", default="activewindow", choices=["activewindow", "fullscreen", "region"])
+
+    subparsers.add_parser("situation-context", help="Extract visible workspace tools and desktop situation context")
+    subparsers.add_parser("logs", help="Get execution logs and raw agent outputs")
+    subparsers.add_parser("clear-logs", help="Clear execution logs")
 
     subparsers.add_parser("history", help="Get conversation history")
     subparsers.add_parser("clear", help="Clear conversation history")
@@ -1319,7 +1625,7 @@ def main():
     if not args.command or args.command == "status":
         print(json.dumps(get_status(), ensure_ascii=False))
     elif args.command == "ask":
-        res = ask(args.query, image_path=args.image, file_path=args.file, screen_context=args.screen, model=args.model, provider=args.provider)
+        res = ask(args.query, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider)
         print(json.dumps(res, ensure_ascii=False))
     elif args.command == "inspect-file":
         print(json.dumps(inspect_file(args.path), ensure_ascii=False))
@@ -1327,6 +1633,12 @@ def main():
         print(json.dumps(pick_file_dialog(), ensure_ascii=False))
     elif args.command == "capture":
         print(json.dumps(capture_screen(args.mode), ensure_ascii=False))
+    elif args.command == "situation-context":
+        print(json.dumps(get_targeted_situation_context(), ensure_ascii=False))
+    elif args.command == "logs":
+        print(json.dumps(get_botty_logs(), ensure_ascii=False))
+    elif args.command == "clear-logs":
+        print(json.dumps(clear_botty_logs(), ensure_ascii=False))
     elif args.command == "history":
         print(json.dumps(get_history(), ensure_ascii=False))
     elif args.command == "clear":

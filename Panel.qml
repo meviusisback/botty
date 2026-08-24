@@ -196,6 +196,8 @@ Panel {
   }
 
   function fetchSituationContext() {
+    root.situationContextEnabled = true
+    root.screenContextEnabled = false
     situationProc.command = ["python3", root.scriptPath(), "situation-context"]
     situationProc.running = false
     situationProc.running = true
@@ -793,6 +795,7 @@ Panel {
     function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
     function situationContext(): void {
+      root.currentView = "chat"
       if (root.opened && root.situationContextEnabled) {
         root.situationContextEnabled = false
         root.situationData = null
@@ -807,6 +810,7 @@ Panel {
       root.situationContext()
     }
     function captureScreenshot(): void {
+      root.currentView = "chat"
       if (root.opened && root.screenContextEnabled) {
         root.screenContextEnabled = false
         root.attachedFilePath = ""
@@ -832,6 +836,7 @@ Panel {
     function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
     function situationContext(): void {
+      root.currentView = "chat"
       if (root.opened && root.situationContextEnabled) {
         root.situationContextEnabled = false
         root.situationData = null
@@ -846,6 +851,7 @@ Panel {
       root.situationContext()
     }
     function captureScreenshot(): void {
+      root.currentView = "chat"
       if (root.opened && root.screenContextEnabled) {
         root.screenContextEnabled = false
         root.attachedFilePath = ""

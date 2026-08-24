@@ -1794,12 +1794,14 @@ Panel {
 
                     // Sandbox Permission Request Card
                     BorderSurface {
+                      id: permCard
                       visible: !isUser && Model.detectPermissionRequest(modelData.content).isPermission
+                      width: parent.width
                       Layout.fillWidth: true
                       implicitHeight: permCol.implicitHeight + Style.space(16)
                       radius: Style.space(6)
-                      color: root.alpha("#F59E0B", 0.12)
-                      borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.5), "#F59E0B")
+                      color: root.alpha("#F59E0B", 0.14)
+                      borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.55), "#F59E0B")
 
                       ColumnLayout {
                         id: permCol
@@ -1810,6 +1812,7 @@ Panel {
                         spacing: Style.space(6)
 
                         RowLayout {
+                          Layout.fillWidth: true
                           spacing: Style.space(8)
                           Text {
                             text: "🔒"
@@ -1843,6 +1846,7 @@ Panel {
                           Button {
                             iconText: "󰄬"
                             text: "Approve & Bypass Sandbox"
+                            selected: true
                             implicitHeight: Style.space(26)
                             fontSize: Style.space(10)
                             onClicked: {
@@ -1970,6 +1974,87 @@ Panel {
                 font.pixelSize: Style.font.body
                 color: root.foreground
                 Layout.fillWidth: true
+              }
+            }
+          }
+
+          // Pinned Pending Sandbox Permission Banner
+          BorderSurface {
+            id: pendingPermissionBanner
+            visible: {
+              if (root.isProcessing || !root.historyMessages || root.historyMessages.length === 0) return false
+              var lastMsg = root.historyMessages[root.historyMessages.length - 1]
+              return lastMsg && lastMsg.role === "assistant" && Model.detectPermissionRequest(lastMsg.content).isPermission
+            }
+            Layout.fillWidth: true
+            implicitHeight: permBannerCol.implicitHeight + Style.space(16)
+            radius: Style.space(8)
+            color: root.alpha("#F59E0B", 0.16)
+            borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.6), "#F59E0B")
+
+            ColumnLayout {
+              id: permBannerCol
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(8)
+              spacing: Style.space(6)
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(8)
+
+                Text {
+                  text: "🔒"
+                  font.pixelSize: Style.space(16)
+                }
+
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: Style.space(2)
+
+                  Text {
+                    text: "Permission Required for Sandbox Bypass"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                    color: "#F59E0B"
+                  }
+
+                  Text {
+                    text: "Botty halted file/system writes. Choose an action below:"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(10)
+                    color: root.foreground
+                  }
+                }
+              }
+
+              RowLayout {
+                Layout.fillWidth: true
+                spacing: Style.space(8)
+                Layout.topMargin: Style.space(2)
+
+                Button {
+                  iconText: "󰄬"
+                  text: "Approve & Run (Bypass)"
+                  selected: true
+                  implicitHeight: Style.space(28)
+                  fontSize: Style.space(10)
+                  onClicked: {
+                    root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
+                  }
+                }
+
+                Button {
+                  iconText: "󰅖"
+                  text: "Deny (Keep Sandboxed)"
+                  implicitHeight: Style.space(28)
+                  fontSize: Style.space(10)
+                  onClicked: {
+                    root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
+                  }
+                }
               }
             }
           }

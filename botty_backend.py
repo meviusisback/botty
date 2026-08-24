@@ -259,19 +259,115 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
         "text_preview": text_content
     }
 
+# ── Configuration, Sandboxing & Notifications ─────────────────────────────────
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "agent_engine": "hermes",
+    "engine_models": {},
+    "sandbox_mode": True,
+    "notifications": {
+        "enabled": True,
+        "on_complete": True,
+        "on_blocked": True,
+        "on_error": True
+    }
+}
+
+def get_config() -> Dict[str, Any]:
+    cfg = load_json_file(CONFIG_FILE, DEFAULT_CONFIG)
+    if "sandbox_mode" not in cfg:
+        cfg["sandbox_mode"] = True
+    if "notifications" not in cfg or not isinstance(cfg["notifications"], dict):
+        cfg["notifications"] = {
+            "enabled": True,
+            "on_complete": True,
+            "on_blocked": True,
+            "on_error": True
+        }
+    return cfg
+
+def save_config(cfg: Dict[str, Any]) -> None:
+    save_json_file(CONFIG_FILE, cfg)
+
+def get_sandbox_mode() -> bool:
+    return bool(get_config().get("sandbox_mode", True))
+
+def set_sandbox_mode(enabled: bool) -> Dict[str, Any]:
+    cfg = get_config()
+    cfg["sandbox_mode"] = bool(enabled)
+    save_config(cfg)
+    append_botty_log(f"CONFIG: Sandbox mode set to {bool(enabled)}")
+    return {"ok": True, "sandbox_mode": bool(enabled)}
+
+def get_notification_config() -> Dict[str, Any]:
+    return get_config().get("notifications", {
+        "enabled": True,
+        "on_complete": True,
+        "on_blocked": True,
+        "on_error": True
+    })
+
+def set_notification_config(enabled: Optional[bool] = None, on_complete: Optional[bool] = None, on_blocked: Optional[bool] = None, on_error: Optional[bool] = None) -> Dict[str, Any]:
+    cfg = get_config()
+    notif = cfg.get("notifications", {})
+    if enabled is not None:
+        notif["enabled"] = bool(enabled)
+    if on_complete is not None:
+        notif["on_complete"] = bool(on_complete)
+    if on_blocked is not None:
+        notif["on_blocked"] = bool(on_blocked)
+    if on_error is not None:
+        notif["on_error"] = bool(on_error)
+    cfg["notifications"] = notif
+    save_config(cfg)
+    return {"ok": True, "notifications": notif}
+
+def send_system_notification(event_type: str, title: str, message: str, urgency: str = "normal") -> bool:
+    """Dispatches a desktop notification respecting user notification preferences."""
+    notif_cfg = get_notification_config()
+    if not notif_cfg.get("enabled", True):
+        return False
+    
+    if event_type == "complete" and not notif_cfg.get("on_complete", True):
+        return False
+    if event_type == "blocked" and not notif_cfg.get("on_blocked", True):
+        return False
+    if event_type == "error" and not notif_cfg.get("on_error", True):
+        return False
+
+    clean_title = redact_secrets(title).strip()
+    clean_msg = redact_secrets(message).strip()
+    if len(clean_msg) > 180:
+        clean_msg = clean_msg[:177] + "…"
+
+    try:
+        botty_icon = Path(__file__).resolve().parent / "assets" / "icons" / "botty.svg"
+        if not botty_icon.exists():
+            botty_icon = Path.home() / ".config" / "omarchy" / "plugins" / "meviusisback.botty" / "assets" / "icons" / "botty.svg"
+        
+        icon = str(botty_icon) if botty_icon.exists() else "dialog-information"
+
+        cmd = ["notify-send", "-a", "Botty", "-u", urgency, "-i", icon, clean_title, clean_msg]
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        logger_err = f"Failed to send notification: {str(e)}"
+        append_botty_log(f"NOTIFY_ERR: {logger_err}")
+        return False
+
 # ── Agent Engines & Models ────────────────────────────────────────────────────
 
 def get_active_engine() -> str:
-    cfg = load_json_file(CONFIG_FILE, {"agent_engine": "hermes"})
+    cfg = get_config()
     return cfg.get("agent_engine", "hermes")
 
 def set_active_engine(engine: str) -> Dict[str, Any]:
     valid = ["hermes", "omp", "claude", "codex"]
     if engine not in valid:
         return {"ok": False, "error": f"Invalid engine '{engine}'. Valid options: {valid}"}
-    cfg = load_json_file(CONFIG_FILE, {"agent_engine": "hermes"})
+    cfg = get_config()
     cfg["agent_engine"] = engine
-    save_json_file(CONFIG_FILE, cfg)
+    save_config(cfg)
     
     current_model = get_active_model_for_engine(engine)
     set_status(get_status().get("state", "idle"), headline=f"Agent: {engine.upper()} ({current_model.get('model', '')})")
@@ -450,6 +546,159 @@ def append_botty_log(entry: str) -> None:
     except Exception:
         pass
 
+def get_hermes_task_traces(session_id: Optional[str] = None, limit: int = 20) -> Dict[str, Any]:
+    """Extracts structured task execution steps, tool calls, and model reasoning from Hermes state.db."""
+    state_db_path = HERMES_BOTTY_DIR / "state.db"
+    if not state_db_path.exists():
+        state_db_path = HERMES_DIR / "state.db"
+    if not state_db_path.exists():
+        return {"ok": False, "error": "Hermes state database not found."}
+
+    con = None
+    try:
+        con = sqlite3.connect(str(state_db_path), timeout=3.0)
+        cur = con.cursor()
+        
+        target_session = session_id
+        if not target_session:
+            # Find the latest session with messages
+            row = cur.execute(
+                "SELECT id, title, model, started_at, message_count, tool_call_count, input_tokens, output_tokens, reasoning_tokens "
+                "FROM sessions WHERE message_count > 0 ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                target_session = row[0]
+                session_meta = {
+                    "id": row[0],
+                    "title": row[1] or "Active Session",
+                    "model": row[2] or "default",
+                    "started_at": row[3],
+                    "message_count": row[4],
+                    "tool_call_count": row[5],
+                    "tokens": {
+                        "input": row[6] or 0,
+                        "output": row[7] or 0,
+                        "reasoning": row[8] or 0
+                    }
+                }
+            else:
+                return {"ok": True, "session": None, "steps": []}
+        else:
+            row = cur.execute(
+                "SELECT id, title, model, started_at, message_count, tool_call_count, input_tokens, output_tokens, reasoning_tokens "
+                "FROM sessions WHERE id=?", (target_session,)
+            ).fetchone()
+            session_meta = {
+                "id": row[0] if row else target_session,
+                "title": (row[1] if row else None) or "Session",
+                "model": (row[2] if row else "") or "default",
+                "started_at": row[3] if row else int(time.time()),
+                "message_count": row[4] if row else 0,
+                "tool_call_count": row[5] if row else 0,
+                "tokens": {
+                    "input": (row[6] if row else 0) or 0,
+                    "output": (row[7] if row else 0) or 0,
+                    "reasoning": (row[8] if row else 0) or 0
+                }
+            }
+
+        msg_rows = cur.execute(
+            "SELECT id, role, content, tool_name, tool_calls, reasoning, timestamp, token_count "
+            "FROM messages WHERE session_id=? ORDER BY id ASC",
+            (target_session,)
+        ).fetchall()
+
+        steps: List[Dict[str, Any]] = []
+        for mr in msg_rows:
+            m_id, role, content, tool_name, tool_calls_raw, reasoning, m_time, token_count = mr
+            
+            parsed_tool_calls = []
+            if tool_calls_raw:
+                try:
+                    tc_data = json.loads(tool_calls_raw)
+                    if isinstance(tc_data, list):
+                        for tc in tc_data:
+                            fn = tc.get("function", {})
+                            fn_name = fn.get("name", tc.get("name", "tool"))
+                            fn_args = fn.get("arguments", tc.get("arguments", {}))
+                            if isinstance(fn_args, str):
+                                try:
+                                    fn_args = json.loads(fn_args)
+                                except Exception:
+                                    pass
+                            parsed_tool_calls.append({
+                                "id": tc.get("id", str(m_id)),
+                                "name": fn_name,
+                                "arguments": fn_args
+                            })
+                except Exception:
+                    pass
+
+            if role == "user":
+                steps.append({
+                    "id": m_id,
+                    "role": "user",
+                    "content": redact_secrets(content or ""),
+                    "timestamp": m_time
+                })
+            elif role == "assistant":
+                steps.append({
+                    "id": m_id,
+                    "role": "assistant",
+                    "content": redact_secrets(strip_reasoning(content or "")),
+                    "reasoning": redact_secrets(reasoning or ""),
+                    "tool_calls": parsed_tool_calls,
+                    "timestamp": m_time,
+                    "tokens": token_count
+                })
+            elif role == "tool":
+                steps.append({
+                    "id": m_id,
+                    "role": "tool",
+                    "tool_name": tool_name or "tool",
+                    "content": redact_secrets(content or "")[:3500],
+                    "timestamp": m_time
+                })
+
+        return {
+            "ok": True,
+            "session": session_meta,
+            "steps": steps[-limit * 3:]
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to query Hermes task traces: {str(e)}"}
+    finally:
+        if con:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+def get_hermes_file_logs(log_name: str = "agent", max_lines: int = 250) -> Dict[str, Any]:
+    """Reads real Hermes log files (agent.log, errors.log, gui.log)."""
+    log_dir = HERMES_BOTTY_DIR / "logs"
+    if not log_dir.exists():
+        log_dir = HERMES_DIR / "logs"
+    
+    target_name = f"{log_name}.log" if not log_name.endswith(".log") else log_name
+    target_file = log_dir / target_name
+    if not target_file.exists():
+        return {"ok": False, "error": f"Log file '{target_name}' not found."}
+
+    try:
+        text = target_file.read_text(encoding="utf-8", errors="replace")
+        lines = [redact_secrets(l) for l in text.splitlines() if l.strip()]
+        tail_lines = lines[-max_lines:]
+        return {
+            "ok": True,
+            "log_name": target_name,
+            "total_lines": len(lines),
+            "lines": tail_lines,
+            "content": "\n".join(tail_lines)
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to read Hermes log file: {str(e)}"}
+
 def get_botty_logs(max_lines: int = 250) -> Dict[str, Any]:
     raw_lines = []
     if BOTTY_LOG_FILE.exists():
@@ -472,6 +721,10 @@ def get_botty_logs(max_lines: int = 250) -> Dict[str, Any]:
             last_assistant_engine = m.get("engine", "")
             break
 
+    hermes_trace = get_hermes_task_traces(limit=15)
+    hermes_agent_log = get_hermes_file_logs("agent", max_lines=max_lines)
+    hermes_errors_log = get_hermes_file_logs("errors", max_lines=max_lines)
+
     return {
         "ok": True,
         "logs": "\n".join(raw_lines),
@@ -479,6 +732,9 @@ def get_botty_logs(max_lines: int = 250) -> Dict[str, Any]:
         "last_assistant_raw": last_assistant_raw,
         "last_assistant_model": last_assistant_model,
         "last_assistant_engine": last_assistant_engine,
+        "hermes_trace": hermes_trace if hermes_trace.get("ok") else None,
+        "hermes_agent_log": hermes_agent_log.get("content", ""),
+        "hermes_errors_log": hermes_errors_log.get("content", ""),
         "log_path": str(BOTTY_LOG_FILE)
     }
 
@@ -804,7 +1060,7 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     history["messages"] = msgs
     save_json_file(HISTORY_FILE, history)
 
-def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None) -> Dict[str, Any]:
+def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False) -> Dict[str, Any]:
     if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
         return {"ok": False, "error": "Empty query and no attachment or context provided."}
 
@@ -883,13 +1139,36 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "is_screen_capture": False
         })
 
+    is_sandboxed = get_sandbox_mode() and not bypass_sandbox
+
+    if is_sandboxed:
+        sandbox_directive = (
+            "SANDBOXED WRITE MODE (ACTIVE — PERMISSION REQUIRED FOR WRITES):\n"
+            "- You are running in a Sandboxed Environment on this Omarchy workstation.\n"
+            "- READ ACCESS: You have full unrestricted read access across the workstation (viewing files, reading directories, git status, terminal processes, environment inspection, web queries).\n"
+            "- WRITE ACCESS RESTRICTION: You are strictly restricted from directly creating, editing, overwriting, or deleting files outside temporary paths (/tmp) or executing state-altering system commands without explicit permission.\n"
+            "- IF THE USER'S TASK REQUIRES WRITING, MODIFYING FILES, OR SYSTEM CHANGES:\n"
+            "  Do NOT execute the write yet. Instead, halt and request user permission using this exact format:\n"
+            "  🔒 SANDBOX PERMISSION REQUIRED: <Concise 1-sentence summary of what will be done>\n\n"
+            "  Proposed Actions:\n"
+            "  - Files to create/modify: <file paths>\n"
+            "  - Commands to run: <commands>\n\n"
+            "  Please approve to bypass the sandbox and apply these changes.\n"
+        )
+    else:
+        sandbox_directive = (
+            "UNRESTRICTED WORKSTATION MODE (SANDBOX BYPASSED):\n"
+            "- You have full read and write execution permissions on this workstation.\n"
+            "- You may directly create, modify, or delete files and execute necessary commands to complete the user's task.\n"
+        )
+
     BOTTY_AGENT_DIRECTIVE = (
         "You are acting as Botty, the friendly and capable AI desktop agent on this Omarchy Linux workstation. "
-        "You have full local access to the machine environment: terminal execution, local files, system CLI tools, native IPC APIs, and installed skills. "
+        "You have access to the machine environment: terminal execution, local files, system CLI tools, native IPC APIs, and installed skills. "
         "When (optional) screen context, situational tools, or window information is provided, use it to understand the user's workspace state and what needs to be done. "
-        "You are fully capable of executing tasks directly on this machine to assist the user. "
         "Do NOT attempt X11 GUI clicks, xdotool, or synthetic mouse automation. "
-        "Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as herdr for driving agent TUIs, hyprctl for window/workspace management, or system utilities), and installed skills to execute tasks directly on this machine.\n\n"
+        "Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as herdr for driving agent TUIs, hyprctl for window/workspace management, or system utilities), and installed skills.\n\n"
+        f"{sandbox_directive}\n"
         "COMMUNICATION & ANSWER GUIDELINES (CRITICAL):\n"
         "- When you apply changes to the computer or execute actions, and in general for all answers: your response must be non-technical, human-friendly, and concise.\n"
         "- Clearly describe exactly what you did and what changes were made in simple, plain human language (e.g. 'I updated the volume settings and restarted the audio service.').\n"
@@ -912,7 +1191,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         img_info = f" (Screenshot image: {target_image})" if target_image else ""
         prompt_parts.append(
             f"[SCREEN CONTEXT ATTACHED: {win_info}{img_info}]\n"
-            f"Note for Agent: You have access to this screen context and full local capabilities to perform tasks on this machine. "
+            f"Note for Agent: You have access to this screen context and local capabilities to perform tasks on this machine. "
             f"Use the visual/screen state to understand what is on screen and what needs to be done.\n"
             f"[END SCREEN CONTEXT]\n"
         )
@@ -942,7 +1221,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     query_tmp.write_text(hermes_prompt, encoding="utf-8")
 
     t_start = time.perf_counter()
-    append_botty_log(f"QUERY [{engine}/{selected_model}]: {user_query}")
+    append_botty_log(f"QUERY [{engine}/{selected_model}] (Sandbox: {is_sandboxed}): {user_query}")
 
     cmd = []
 
@@ -998,6 +1277,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             set_status("error", headline="Error", last_error=err_msg)
             append_botty_log(f"ERROR [{engine}/{selected_model}] (Code {proc.returncode}): {err_msg}")
             add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine, raw_output=redact_secrets(stderr_data or stdout_data))
+            send_system_notification("error", "Botty — Execution Error", err_msg, urgency="critical")
             return {"ok": False, "error": err_msg}
 
         if not cleaned_response:
@@ -1015,7 +1295,14 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         raw_output_saved = redact_secrets(stdout_data)
         append_botty_log(f"RESPONSE [{engine}/{selected_model}] ({t_duration:.1f}s): {cleaned_response[:140]}...")
         add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved)
-        set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
+
+        is_permission_required = "🔒 SANDBOX PERMISSION REQUIRED" in cleaned_response
+        if is_permission_required:
+            set_status("idle", headline="Permission Required", last_query=query, last_answer=cleaned_response)
+            send_system_notification("blocked", "Botty — Permission Required", "Botty needs your approval to bypass sandbox for writes.", urgency="critical")
+        else:
+            set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
+            send_system_notification("complete", "Botty — Done", cleaned_response)
 
         try:
             update_encrypted_vault()
@@ -1027,7 +1314,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "response": cleaned_response,
             "raw_output": raw_output_saved,
             "actions": actions,
-            "attachments": attachments
+            "attachments": attachments,
+            "is_permission_required": is_permission_required,
+            "sandbox_active": is_sandboxed
         }
 
     except subprocess.TimeoutExpired:
@@ -1037,12 +1326,14 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         set_status("error", headline="Timeout", last_error=err)
         append_botty_log(f"TIMEOUT [{engine}/{selected_model}]: {err}")
         add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine, raw_output=err)
+        send_system_notification("error", "Botty — Timeout", err, urgency="critical")
         return {"ok": False, "error": err}
     except Exception as e:
         err = f"Execution error: {str(e)}"
         set_status("error", headline="Error", last_error=err)
         append_botty_log(f"EXCEPTION [{engine}/{selected_model}]: {err}")
         add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine, raw_output=err)
+        send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
         return {"ok": False, "error": err}
     finally:
         LOCK_FILE.unlink(missing_ok=True)
@@ -1562,6 +1853,7 @@ def main():
     ask_p.add_argument("--situation", dest="situation", action="store_true", help="Include targeted desktop & tool situation context")
     ask_p.add_argument("--model", dest="model", default=None, help="Model override")
     ask_p.add_argument("--provider", dest="provider", default=None, help="Provider override")
+    ask_p.add_argument("--bypass-sandbox", dest="bypass_sandbox", action="store_true", help="Bypass write sandboxing for this request")
 
     inspect_p = subparsers.add_parser("inspect-file", help="Inspect file metadata")
     inspect_p.add_argument("path", help="Path to file")
@@ -1572,8 +1864,27 @@ def main():
     cap_p.add_argument("--mode", dest="mode", default="activewindow", choices=["activewindow", "fullscreen", "region"])
 
     subparsers.add_parser("situation-context", help="Extract visible workspace tools and desktop situation context")
-    subparsers.add_parser("logs", help="Get execution logs and raw agent outputs")
+    
+    logs_p = subparsers.add_parser("logs", help="Get execution logs, Hermes task trace, and raw agent outputs")
+    logs_p.add_argument("--type", dest="type", default="all", choices=["all", "hermes-trace", "hermes-agent", "hermes-errors", "botty"])
+    logs_p.add_argument("--session", dest="session", default=None, help="Session ID for trace")
+    logs_p.add_argument("--lines", dest="lines", type=int, default=250, help="Max lines to retrieve")
+
     subparsers.add_parser("clear-logs", help="Clear execution logs")
+
+    subparsers.add_parser("get-sandbox", help="Get current sandbox mode")
+    set_sb = subparsers.add_parser("set-sandbox", help="Set sandbox mode (true/false)")
+    set_sb.add_argument("enabled", choices=["true", "false", "1", "0"])
+
+    subparsers.add_parser("get-notifications", help="Get system notifications configuration")
+    set_n = subparsers.add_parser("set-notifications", help="Configure system notifications")
+    set_n.add_argument("--enabled", dest="enabled", default=None, choices=["true", "false"])
+    set_n.add_argument("--complete", dest="on_complete", default=None, choices=["true", "false"])
+    set_n.add_argument("--blocked", dest="on_blocked", default=None, choices=["true", "false"])
+    set_n.add_argument("--error", dest="on_error", default=None, choices=["true", "false"])
+
+    test_n = subparsers.add_parser("test-notification", help="Send a test notification")
+    test_n.add_argument("--event", dest="event", default="complete", choices=["complete", "blocked", "error"])
 
     subparsers.add_parser("history", help="Get conversation history")
     subparsers.add_parser("clear", help="Clear conversation history")
@@ -1625,7 +1936,7 @@ def main():
     if not args.command or args.command == "status":
         print(json.dumps(get_status(), ensure_ascii=False))
     elif args.command == "ask":
-        res = ask(args.query, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider)
+        res = ask(args.query, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider, bypass_sandbox=getattr(args, 'bypass_sandbox', False))
         print(json.dumps(res, ensure_ascii=False))
     elif args.command == "inspect-file":
         print(json.dumps(inspect_file(args.path), ensure_ascii=False))
@@ -1636,9 +1947,33 @@ def main():
     elif args.command == "situation-context":
         print(json.dumps(get_targeted_situation_context(), ensure_ascii=False))
     elif args.command == "logs":
-        print(json.dumps(get_botty_logs(), ensure_ascii=False))
+        l_type = getattr(args, 'type', 'all')
+        if l_type == "hermes-trace":
+            print(json.dumps(get_hermes_task_traces(session_id=args.session, limit=args.lines), ensure_ascii=False))
+        elif l_type == "hermes-agent":
+            print(json.dumps(get_hermes_file_logs("agent", max_lines=args.lines), ensure_ascii=False))
+        elif l_type == "hermes-errors":
+            print(json.dumps(get_hermes_file_logs("errors", max_lines=args.lines), ensure_ascii=False))
+        else:
+            print(json.dumps(get_botty_logs(max_lines=args.lines), ensure_ascii=False))
     elif args.command == "clear-logs":
         print(json.dumps(clear_botty_logs(), ensure_ascii=False))
+    elif args.command == "get-sandbox":
+        print(json.dumps({"ok": True, "sandbox_mode": get_sandbox_mode()}, ensure_ascii=False))
+    elif args.command == "set-sandbox":
+        enabled_val = args.enabled.lower() in ["true", "1"]
+        print(json.dumps(set_sandbox_mode(enabled_val), ensure_ascii=False))
+    elif args.command == "get-notifications":
+        print(json.dumps({"ok": True, "notifications": get_notification_config()}, ensure_ascii=False))
+    elif args.command == "set-notifications":
+        en = (args.enabled.lower() == "true") if args.enabled is not None else None
+        comp = (args.on_complete.lower() == "true") if args.on_complete is not None else None
+        blk = (args.on_blocked.lower() == "true") if args.on_blocked is not None else None
+        err = (args.on_error.lower() == "true") if args.on_error is not None else None
+        print(json.dumps(set_notification_config(en, comp, blk, err), ensure_ascii=False))
+    elif args.command == "test-notification":
+        sent = send_system_notification(args.event, f"Botty Notification ({args.event})", f"This is a test notification for {args.event}.")
+        print(json.dumps({"ok": True, "sent": sent, "event": args.event}, ensure_ascii=False))
     elif args.command == "history":
         print(json.dumps(get_history(), ensure_ascii=False))
     elif args.command == "clear":

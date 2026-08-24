@@ -50,6 +50,8 @@ Panel {
 
   property var historyData: ({ session_id: "botty-widget", messages: [] })
   property int lastMessageCount: 0
+  property int lastReadMessageCount: 0
+  property int unreadCount: 0
 
   property var modelsCatalog: ({ providers: [] })
   property var enginesData: ({ engines: [] })
@@ -95,6 +97,21 @@ Panel {
     chatListView.contentY = targetY
     chatListView.returnToBounds()
   }
+
+  function scrollChatToEnd() {
+    if (!chatListView) return
+    chatListView.positionViewAtEnd()
+    Qt.callLater(function() {
+      if (chatListView) {
+        chatListView.positionViewAtEnd()
+        var minY = chatListView.originY
+        var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
+        chatListView.contentY = maxY
+        chatListView.returnToBounds()
+      }
+    })
+  }
+
   function fetchStatus() {
     if (!statusProc.running) {
       statusProc.running = true
@@ -176,7 +193,11 @@ Panel {
     root.screenContextEnabled = false
     root.lastCaptureInfo = null
     root.fetchHistory()
-    Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+    root.scrollChatToEnd()
+    Qt.callLater(function() { 
+      root.scrollChatToEnd()
+      if (promptInput) promptInput.forceActiveFocus() 
+    })
   }
   function captureScreenNow() {
     captureProc.command = ["python3", root.scriptPath(), "capture", "--mode", "activewindow"]
@@ -280,6 +301,8 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      root.unreadCount = 0
+      root.lastReadMessageCount = (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
       focusTimer.start()
       Qt.callLater(function() {
         if (root.currentView === "chat" && promptInput) {
@@ -371,12 +394,16 @@ Panel {
             var shouldScroll = (newCount > root.lastMessageCount)
             root.lastMessageCount = newCount
             root.historyData = data.history
+            if (root.opened) {
+              root.unreadCount = 0
+              root.lastReadMessageCount = newCount
+            } else {
+              if (newCount > root.lastReadMessageCount) {
+                root.unreadCount = newCount - root.lastReadMessageCount
+              }
+            }
             if (shouldScroll) {
-              Qt.callLater(function() {
-                if (chatListView.count > 0) {
-                  chatListView.positionViewAtEnd()
-                }
-              })
+              root.scrollChatToEnd()
             }
           }
         } catch (e) {}
@@ -661,7 +688,21 @@ Panel {
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
     function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
-    function captureWindowContext(): void { root.captureScreenNow(); root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
+    function captureWindowContext(): void {
+      if (root.opened && root.screenContextEnabled) {
+        root.screenContextEnabled = false
+        root.attachedFilePath = ""
+        root.attachedFileName = ""
+        root.attachedFileSize = ""
+        root.attachedFileIsImage = false
+        root.lastCaptureInfo = null
+      } else {
+        root.captureScreenNow()
+        root.open()
+        focusTimer.start()
+        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      }
+    }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
@@ -675,7 +716,21 @@ Panel {
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
     function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false) }
     function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", true) }
-    function captureWindowContext(): void { root.captureScreenNow(); root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
+    function captureWindowContext(): void {
+      if (root.opened && root.screenContextEnabled) {
+        root.screenContextEnabled = false
+        root.attachedFilePath = ""
+        root.attachedFileName = ""
+        root.attachedFileSize = ""
+        root.attachedFileIsImage = false
+        root.lastCaptureInfo = null
+      } else {
+        root.captureScreenNow()
+        root.open()
+        focusTimer.start()
+        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      }
+    }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
   }
@@ -693,8 +748,14 @@ Panel {
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) {
-        root.captureScreenNow()
-        root.open()
+        if (root.opened && root.screenContextEnabled) {
+          root.screenContextEnabled = false
+          root.attachedFilePath = ""
+          root.lastCaptureInfo = null
+        } else {
+          root.captureScreenNow()
+          root.open()
+        }
       } else {
         root.toggle()
       }
@@ -702,7 +763,7 @@ Panel {
 
     Rectangle {
       id: iconDot
-      visible: root.rawStatus.state !== "idle" || root.rawStatus.memory_count > 0
+      visible: (!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error"
       anchors.top: parent.top
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)
@@ -723,8 +784,14 @@ Panel {
     function triggerPress(buttonCode) {
       if (root.bar) root.bar.hideTooltip(dataButton)
       if (buttonCode === Qt.RightButton) {
-        root.captureScreenNow()
-        root.open()
+        if (root.opened && root.screenContextEnabled) {
+          root.screenContextEnabled = false
+          root.attachedFilePath = ""
+          root.lastCaptureInfo = null
+        } else {
+          root.captureScreenNow()
+          root.open()
+        }
       } else {
         root.toggle()
       }
@@ -755,6 +822,7 @@ Panel {
       }
 
       Rectangle {
+        visible: (!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error"
         width: Style.space(6)
         height: Style.space(6)
         radius: width / 2
@@ -990,17 +1058,31 @@ Panel {
           anchors.fill: parent
           spacing: Style.space(8)
 
-          // Scrollable Chat Message List
-          ScrollView {
-            id: chatScrollView
+          // Scrollable Chat Message List Container
+          Item {
+            id: chatListContainer
             Layout.fillWidth: true
             Layout.fillHeight: true
-            clip: true
 
             ListView {
               id: chatListView
+              anchors.fill: parent
               model: (root.historyData && root.historyData.messages) ? root.historyData.messages : []
               spacing: Style.space(10)
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              flickableDirection: Flickable.VerticalFlick
+
+              ScrollBar.vertical: ScrollBar {
+                id: chatVerticalScrollBar
+                policy: ScrollBar.AsNeeded
+                active: true
+              }
+
+              onCountChanged: {
+                root.scrollChatToEnd()
+              }
+
               Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_Up) {
                   root.scrollChat(-1)
@@ -1047,6 +1129,18 @@ Panel {
                 readonly property var blocks: Model.parseBlocks(modelData.content || "")
                 readonly property var attachments: modelData.attachments || []
                 readonly property var actions: modelData.actions || []
+                readonly property string assistantModel: {
+                  if (modelData.model && String(modelData.model).trim().length > 0) {
+                    return String(modelData.model).trim()
+                  }
+                  return String(root.rawStatus.active_model || "ox-alpha-free")
+                }
+                readonly property string assistantEngine: {
+                  if (modelData.engine && String(modelData.engine).trim().length > 0) {
+                    return String(modelData.engine).trim()
+                  }
+                  return String(root.rawStatus.active_engine || "hermes")
+                }
 
                 BorderSurface {
                   id: msgCard
@@ -1081,10 +1175,116 @@ Panel {
                         color: isUser ? root.accent : root.foreground
                       }
 
+                      // Agent badge for assistant answers
+                      BorderSurface {
+                        id: agentBadge
+                        visible: !isUser && Boolean(assistantEngine.length > 0)
+                        readonly property var agInfo: Model.agentLogoInfo(assistantEngine)
+                        implicitHeight: Style.space(19)
+                        implicitWidth: agRow.implicitWidth + Style.space(10)
+                        radius: Style.space(4)
+                        color: root.alpha(agInfo.color, 0.08)
+                        borderSpec: Border.controlSpec("normal", root.alpha(agInfo.color, 0.22), agInfo.color)
+
+                        Row {
+                          id: agRow
+                          anchors.centerIn: parent
+                          spacing: Style.space(4)
+
+                          Item {
+                            width: Style.space(11)
+                            height: Style.space(11)
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Image {
+                              id: agLogoImg
+                              anchors.fill: parent
+                              source: (agentBadge.agInfo && agentBadge.agInfo.svg) ? Qt.resolvedUrl(agentBadge.agInfo.svg) : ""
+                              sourceSize.width: Style.space(22)
+                              sourceSize.height: Style.space(22)
+                              fillMode: Image.PreserveAspectFit
+                              visible: status === Image.Ready
+                            }
+
+                            Text {
+                              anchors.centerIn: parent
+                              visible: agLogoImg.status !== Image.Ready
+                              text: (agentBadge.agInfo && agentBadge.agInfo.fallbackIcon) ? agentBadge.agInfo.fallbackIcon : "󱚣"
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.space(9)
+                              color: agentBadge.agInfo.color
+                            }
+                          }
+
+                          Text {
+                            text: agentBadge.agInfo.name || "Agent"
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(9)
+                            font.bold: true
+                            color: root.foreground
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+                        }
+                      }
+
+                      // Model badge for assistant answers
+                      BorderSurface {
+                        id: modelBadge
+                        visible: !isUser && Boolean(assistantModel.length > 0)
+                        readonly property var logoInfo: Model.modelLogoInfo(assistantModel, assistantEngine)
+                        implicitHeight: Style.space(19)
+                        implicitWidth: badgeRow.implicitWidth + Style.space(10)
+                        radius: Style.space(4)
+                        color: root.alpha(logoInfo.color || root.accent, 0.08)
+                        borderSpec: Border.controlSpec("normal", root.alpha(logoInfo.color || root.accent, 0.22), logoInfo.color || root.accent)
+
+                        Row {
+                          id: badgeRow
+                          anchors.centerIn: parent
+                          spacing: Style.space(4)
+
+                          // Logo / Icon
+                          Item {
+                            width: Style.space(11)
+                            height: Style.space(11)
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Image {
+                              id: badgeLogoImg
+                              anchors.fill: parent
+                              source: (modelBadge.logoInfo && modelBadge.logoInfo.svg) ? Qt.resolvedUrl(modelBadge.logoInfo.svg) : ""
+                              sourceSize.width: Style.space(22)
+                              sourceSize.height: Style.space(22)
+                              fillMode: Image.PreserveAspectFit
+                              visible: status === Image.Ready
+                            }
+
+                            Text {
+                              anchors.centerIn: parent
+                              visible: badgeLogoImg.status !== Image.Ready
+                              text: (modelBadge.logoInfo && modelBadge.logoInfo.fallbackIcon) ? modelBadge.logoInfo.fallbackIcon : "󰚩"
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.space(9)
+                              color: (modelBadge.logoInfo && modelBadge.logoInfo.color) ? modelBadge.logoInfo.color : root.accent
+                            }
+                          }
+
+                          // Model Name Label
+                          Text {
+                            text: Model.cleanModelName(assistantModel)
+                            font.family: "JetBrainsMono Nerd Font"
+                            font.pixelSize: Style.space(9)
+                            font.bold: true
+                            color: root.foreground
+                            anchors.verticalCenter: parent.verticalCenter
+                          }
+                        }
+                      }
+
                       Item { Layout.fillWidth: true }
 
                       Text {
-                        text: Model.formatTime(modelData.timestamp)
+                        text: Model.formatTimestamp(modelData.timestamp)
                         font.family: root.fontFamily
                         font.pixelSize: Style.space(9)
                         color: root.muted
@@ -1289,6 +1489,41 @@ Panel {
                 }
               }
             }
+
+            // Floating scroll to bottom button
+            BorderSurface {
+              id: scrollToBottomBtn
+              visible: chatListView.count > 0 && !chatListView.atYEnd
+              anchors.right: parent.right
+              anchors.bottom: parent.bottom
+              anchors.margins: Style.space(12)
+              width: Style.space(32)
+              height: Style.space(32)
+              radius: width / 2
+              color: scrollBottomMouse.containsMouse ? root.accent : root.alpha(root.foreground, 0.22)
+              borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.4), root.accent)
+              z: 10
+
+              Text {
+                anchors.centerIn: parent
+                text: "󰁅"
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(14)
+                font.bold: true
+                color: scrollBottomMouse.containsMouse ? Color.background : root.foreground
+              }
+
+              MouseArea {
+                id: scrollBottomMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  chatListView.positionViewAtEnd()
+                  if (promptInput) promptInput.forceActiveFocus()
+                }
+              }
+            }
           }
 
           // Active Thinking Indicator Card
@@ -1347,42 +1582,51 @@ Panel {
 
               Text {
                 text: root.attachedFileIcon || (root.screenContextEnabled ? "󰹑" : "󰈔")
-                font.family: root.fontFamily
-                font.pixelSize: Style.space(14)
                 color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(16)
               }
 
               ColumnLayout {
                 Layout.fillWidth: true
-                spacing: Style.space(1)
+                spacing: Style.space(2)
 
                 Text {
                   text: {
                     if (root.screenContextEnabled) {
-                      var win = root.lastCaptureInfo && root.lastCaptureInfo.active_window ? root.lastCaptureInfo.active_window : null
-                      var app = win ? (win.class || win.title || "Active Window") : "Active Window"
-                      return "Screen Context (" + app + ")"
+                      if (root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
+                        var w = root.lastCaptureInfo.active_window
+                        var cls = w.class || "Active Window"
+                        var tit = w.title ? (" — " + w.title) : ""
+                        return cls + tit
+                      }
+                      return "Active Screen Context"
                     }
-                    var sz = root.attachedFileSize ? (" • " + root.attachedFileSize) : ""
-                    return "Attached: " + (root.attachedFileName || "File") + sz
+                    return root.attachedFileName || "Attached File"
                   }
+                  textFormat: Text.PlainText
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
-                  color: root.accent
+                  color: root.foreground
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
                 }
 
                 Text {
                   text: {
                     if (root.screenContextEnabled && root.lastCaptureInfo && root.lastCaptureInfo.active_window) {
-                      return root.lastCaptureInfo.active_window.title || "Active window context attached"
+                      return "Window Context: " + (root.lastCaptureInfo.active_window.class || "App") + " (Desktop)"
                     }
-                    return root.attachedFilePath || "Attached file ready to send"
+                    var s = root.attachedFileSize ? ("Size: " + root.attachedFileSize + " • ") : ""
+                    var p = root.attachedFilePath || ""
+                    if (p.length > 42) p = "…" + p.substring(p.length - 40)
+                    return s + p
                   }
                   textFormat: Text.PlainText
                   font.family: root.fontFamily
-                  font.pixelSize: Style.space(10)
-                  color: root.dim
+                  font.pixelSize: Style.space(9)
+                  color: root.muted
                   elide: Text.ElideMiddle
                   Layout.fillWidth: true
                 }
@@ -1393,6 +1637,7 @@ Panel {
                 tooltipText: "Remove attachment"
                 implicitWidth: Style.space(24)
                 implicitHeight: Style.space(24)
+                fontSize: Style.space(11)
                 onClicked: {
                   root.attachedFilePath = ""
                   root.attachedFileName = ""
@@ -1466,7 +1711,7 @@ Panel {
                 id: screenBtn
                 enabled: !root.isProcessing
                 iconText: "󰹑"
-                tooltipText: root.screenContextEnabled ? "Screen Context Active (Click to remove)" : "Attach Active Screen Context"
+                tooltipText: root.screenContextEnabled ? "Screen Context Active (Super + Shift + A to toggle off)" : "Attach Active Screen Context (Super + Shift + A)"
                 selected: root.screenContextEnabled
                 implicitHeight: promptInput.implicitHeight
                 implicitWidth: promptInput.implicitHeight

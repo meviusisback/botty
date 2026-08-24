@@ -506,7 +506,7 @@ def clear_history() -> Dict[str, Any]:
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
     return {"ok": True, "message": "History cleared"}
 
-def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None) -> None:
+def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
 
@@ -528,7 +528,9 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
         "content": safe_content,
         "timestamp": int(time.time()),
         "attachments": attachments or [],
-        "actions": actions or []
+        "actions": actions or [],
+        "model": model or "",
+        "engine": engine or ""
     }
     msgs.append(msg)
     history["messages"] = msgs
@@ -594,13 +596,17 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "is_screen_capture": False
         })
     BOTTY_AGENT_DIRECTIVE = (
-        "You are acting as Botty, the AI desktop agent on this Omarchy Linux workstation. "
+        "You are acting as Botty, the friendly and capable AI desktop agent on this Omarchy Linux workstation. "
         "You have full local access to the machine environment: terminal execution, local files, system CLI tools, native IPC APIs, and installed skills. "
         "When (optional) screen context or window information is provided, use it to understand the user's workspace state and what needs to be done. "
         "You are fully capable of executing tasks directly on this machine to assist the user. "
         "Do NOT attempt X11 GUI clicks, xdotool, or synthetic mouse automation. "
-        "Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as herdr for driving agent TUIs, hyprctl for window/workspace management, or system utilities), and installed skills to execute tasks directly on the machine. "
-        "Answer concisely and execute actions cleanly."
+        "Instead, operate natively in the terminal using your CLI tools, shell commands, native IPC APIs (such as herdr for driving agent TUIs, hyprctl for window/workspace management, or system utilities), and installed skills to execute tasks directly on this machine.\n\n"
+        "COMMUNICATION & ANSWER GUIDELINES (CRITICAL):\n"
+        "- When you apply changes to the computer or execute actions, and in general for all answers: your response must be non-technical, human-friendly, and concise.\n"
+        "- Clearly describe exactly what you did and what changes were made in simple, plain human language (e.g. 'I updated the volume settings and restarted the audio service.').\n"
+        "- Avoid technical jargon, raw command dumps, internal monologue, or unnecessary technical minutiae unless the user specifically asks for technical details or code.\n"
+        "- Execute actions cleanly and confirm what was accomplished."
     )
 
     prompt_parts = []
@@ -635,12 +641,14 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
 
     add_history_message("user", user_query, attachments=attachments)
 
-    query_tmp = BOTTY_DATA_DIR / "current_query.txt"
-    query_tmp.write_text(final_prompt, encoding="utf-8")
-
     engine = get_active_engine()
     active_m = get_active_model_for_engine(engine)
     selected_model = model or active_m.get("model", "")
+
+    query_tmp = BOTTY_DATA_DIR / "current_query.txt"
+    hermes_prompt = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
+    query_tmp.write_text(hermes_prompt, encoding="utf-8")
+
     cmd = []
 
     if engine == "omp":
@@ -692,7 +700,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         if proc.returncode != 0 and not cleaned_response:
             err_msg = stderr_data.strip() or f"Agent process exited with code {proc.returncode}"
             set_status("error", headline="Error", last_error=err_msg)
-            add_history_message("assistant", f"⚠️ Error: {err_msg}")
+            add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine)
             return {"ok": False, "error": err_msg}
 
         if not cleaned_response:
@@ -707,7 +715,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             elif "Created skill" in line or "Skill installed" in line:
                 actions.append({"type": "skill", "text": line.strip()})
 
-        add_history_message("assistant", cleaned_response, actions=actions)
+        add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine)
         set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
 
         try:
@@ -728,12 +736,12 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             proc.kill()
         err = "Request timed out after 240 seconds."
         set_status("error", headline="Timeout", last_error=err)
-        add_history_message("assistant", f"⚠️ {err}")
+        add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine)
         return {"ok": False, "error": err}
     except Exception as e:
         err = f"Execution error: {str(e)}"
         set_status("error", headline="Error", last_error=err)
-        add_history_message("assistant", f"⚠️ {err}")
+        add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine)
         return {"ok": False, "error": err}
     finally:
         LOCK_FILE.unlink(missing_ok=True)

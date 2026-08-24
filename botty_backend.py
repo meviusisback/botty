@@ -322,8 +322,10 @@ def set_notification_config(enabled: Optional[bool] = None, on_complete: Optiona
     save_config(cfg)
     return {"ok": True, "notifications": notif}
 
+import threading
+
 def send_system_notification(event_type: str, title: str, message: str, urgency: str = "normal") -> bool:
-    """Dispatches a desktop notification respecting user notification preferences."""
+    """Dispatches an interactive desktop notification with buttons and automatic Botty app redirects."""
     notif_cfg = get_notification_config()
     if not notif_cfg.get("enabled", True):
         return False
@@ -347,8 +349,53 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
         
         icon = str(botty_icon) if botty_icon.exists() else "dialog-information"
 
-        cmd = ["notify-send", "-a", "Botty", "-u", urgency, "-i", icon, clean_title, clean_msg]
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = ["notify-send", "-a", "Botty", "-u", urgency, "-i", icon]
+
+        if event_type == "blocked":
+            cmd.extend([
+                "-A", "default=Open Botty & Review",
+                "-A", "approve=✓ Approve & Run",
+                "-A", "open=🔍 Open Botty"
+            ])
+            if not clean_msg.endswith(".") and not clean_msg.endswith("!"):
+                clean_msg += " Click to open Botty or choose an action below."
+        elif event_type == "complete":
+            cmd.extend([
+                "-A", "default=Open Botty",
+                "-A", "open=🔍 View in Botty"
+            ])
+        elif event_type == "error":
+            cmd.extend([
+                "-A", "default=Open Botty",
+                "-A", "open=🔍 Inspect Error"
+            ])
+
+        cmd.extend([clean_title, clean_msg])
+
+        def _notification_action_listener(exec_cmd, ev_type):
+            try:
+                res = subprocess.run(exec_cmd, capture_output=True, text=True, timeout=120)
+                action = (res.stdout or "").strip()
+                if not action:
+                    return
+                append_botty_log(f"NOTIFICATION_ACTION [{ev_type}]: {action}")
+                
+                # Summon Botty popup in Omarchy
+                subprocess.run(["omarchy-shell", "shell", "summon", "meviusisback.botty"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                # If user directly pressed "Approve & Run" in notification
+                if action == "approve" and ev_type == "blocked":
+                    script_file = str(Path(__file__).resolve())
+                    subprocess.Popen([
+                        "python3", script_file, "ask",
+                        "I approve this operation. Please bypass the sandbox and execute the proposed file/system write actions.",
+                        "--bypass-sandbox"
+                    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as ex:
+                append_botty_log(f"NOTIFY_ACTION_ERR: {str(ex)}")
+
+        listener_thread = threading.Thread(target=_notification_action_listener, args=(cmd, event_type), daemon=True)
+        listener_thread.start()
         return True
     except Exception as e:
         logger_err = f"Failed to send notification: {str(e)}"

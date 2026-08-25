@@ -50,6 +50,7 @@ HERMES_STATE_DB = HERMES_BOTTY_DIR / "state.db"
 
 DEFAULT_AUTO_COMPACT_THRESHOLD = 14
 DEFAULT_COMPACT_PRESERVE_TAIL = 4
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600
 
 def get_auto_compact_threshold() -> int:
     cfg = load_json_file(CONFIG_FILE, {})
@@ -58,6 +59,18 @@ def get_auto_compact_threshold() -> int:
 def get_compact_preserve_tail() -> int:
     cfg = load_json_file(CONFIG_FILE, {})
     return int(cfg.get("compact_preserve_tail", DEFAULT_COMPACT_PRESERVE_TAIL))
+
+def get_request_timeout_seconds() -> int:
+    """Return the configured maximum duration for one agent request."""
+    cfg = load_json_file(CONFIG_FILE, {})
+    value = cfg.get("request_timeout_seconds", DEFAULT_REQUEST_TIMEOUT_SECONDS)
+    if isinstance(value, bool):
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    try:
+        timeout = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return timeout if timeout > 0 else DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 OMP_DIR = Path.home() / ".omp"
 OMP_AGENT_DIR = OMP_DIR / "agent"
@@ -278,6 +291,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "agent_engine": "hermes",
     "engine_models": {},
     "sandbox_mode": True,
+    "request_timeout_seconds": DEFAULT_REQUEST_TIMEOUT_SECONDS,
     "notifications": {
         "enabled": True,
         "on_complete": True,
@@ -1327,6 +1341,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
 
     t_start = time.perf_counter()
     append_botty_log(f"QUERY [{engine}/{selected_model}] (Sandbox: {is_sandboxed}): {user_query}")
+    request_timeout_seconds = get_request_timeout_seconds()
 
     cmd = []
 
@@ -1375,7 +1390,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             bufsize=1
         )
         
-        stdout_data, stderr_data = proc.communicate(timeout=240)
+        stdout_data, stderr_data = proc.communicate(timeout=request_timeout_seconds)
         cleaned_response = strip_reasoning(stdout_data)
         t_duration = time.perf_counter() - t_start
 
@@ -1437,7 +1452,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     except subprocess.TimeoutExpired:
         if 'proc' in locals():
             proc.kill()
-        err = "Request timed out after 240 seconds."
+        err = f"Request timed out after {request_timeout_seconds} seconds."
         set_status("error", headline="Timeout", last_error=err)
         append_botty_log(f"TIMEOUT [{engine}/{selected_model}]: {err}")
         add_history_message("assistant", f"⚠️ {err}", model=selected_model, engine=engine, raw_output=err)

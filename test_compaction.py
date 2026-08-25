@@ -47,6 +47,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
         self.orig_archive_file = botty_backend.HISTORY_ARCHIVE_FILE
         self.orig_config_file = botty_backend.CONFIG_FILE
         self.orig_status_file = botty_backend.STATUS_FILE
+        self.orig_lock_file = botty_backend.LOCK_FILE
         self.orig_hermes_mem_dir = botty_backend.HERMES_MEMORY_DIR
         self.orig_hermes_skills_dir = botty_backend.HERMES_SKILLS_DIR
         self.orig_hermes_state_db = botty_backend.HERMES_STATE_DB
@@ -56,6 +57,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.HISTORY_ARCHIVE_FILE = self.history_archive_file
         botty_backend.CONFIG_FILE = self.config_file
         botty_backend.STATUS_FILE = self.status_file
+        botty_backend.LOCK_FILE = self.data_dir / "running.pid"
         botty_backend.HERMES_MEMORY_DIR = self.hermes_mem_dir
         botty_backend.HERMES_SKILLS_DIR = self.hermes_skills_dir
         botty_backend.HERMES_STATE_DB = self.hermes_state_db
@@ -75,6 +77,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.HISTORY_ARCHIVE_FILE = self.orig_archive_file
         botty_backend.CONFIG_FILE = self.orig_config_file
         botty_backend.STATUS_FILE = self.orig_status_file
+        botty_backend.LOCK_FILE = self.orig_lock_file
         botty_backend.HERMES_MEMORY_DIR = self.orig_hermes_mem_dir
         botty_backend.HERMES_SKILLS_DIR = self.orig_hermes_skills_dir
         botty_backend.HERMES_STATE_DB = self.orig_hermes_state_db
@@ -91,6 +94,37 @@ class TestCompactionAndDistillation(unittest.TestCase):
         }))
         self.assertEqual(botty_backend.get_auto_compact_threshold(), 20)
         self.assertEqual(botty_backend.get_compact_preserve_tail(), 6)
+
+    def test_request_timeout_config_defaults_and_overrides(self):
+        self.assertEqual(botty_backend.get_request_timeout_seconds(), 600)
+
+        self.config_file.write_text(json.dumps({"request_timeout_seconds": 901}))
+        self.assertEqual(botty_backend.get_request_timeout_seconds(), 901)
+
+    def test_request_timeout_config_rejects_invalid_values(self):
+        self.config_file.write_text(json.dumps({"request_timeout_seconds": "not-a-number"}))
+        self.assertEqual(botty_backend.get_request_timeout_seconds(), 600)
+
+        self.config_file.write_text(json.dumps({"request_timeout_seconds": 0}))
+        self.assertEqual(botty_backend.get_request_timeout_seconds(), 600)
+
+    def test_request_timeout_is_passed_to_agent_and_error_text_matches(self):
+        self.config_file.write_text(json.dumps({"request_timeout_seconds": 901}))
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = botty_backend.subprocess.TimeoutExpired(["omp"], 901)
+
+        with patch("botty_backend.set_status"), \
+             patch("botty_backend.append_botty_log"), \
+             patch("botty_backend.add_history_message"), \
+             patch("botty_backend.send_system_notification"), \
+             patch("botty_backend.get_active_engine", return_value="omp"), \
+             patch("botty_backend.get_active_model_for_engine", return_value={"model": "test", "provider": "test"}), \
+             patch("botty_backend.get_sandbox_mode", return_value=False), \
+             patch("botty_backend.subprocess.Popen", return_value=mock_proc):
+            result = botty_backend.ask("hello")
+
+        mock_proc.communicate.assert_called_once_with(timeout=901)
+        self.assertEqual(result, {"ok": False, "error": "Request timed out after 901 seconds."})
 
     def test_reset_hermes_session(self):
         # Check initial state

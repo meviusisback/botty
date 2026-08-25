@@ -68,6 +68,22 @@ hyprctl reload
 omarchy restart shell
 ```
 
+### Request timeout
+
+Botty allows long-running agent requests to complete before reporting a timeout.
+The default request timeout is **600 seconds**. Override it in Botty's existing
+JSON configuration file at `~/.local/share/botty/config.json`:
+
+```json
+{
+  "request_timeout_seconds": 900
+}
+```
+
+The value is a positive number of seconds. Invalid or non-positive values use
+the 600-second default. Other Botty configuration keys may be kept alongside
+this setting.
+
 ---
 
 ## 📄 License

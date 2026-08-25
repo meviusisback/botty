@@ -8,6 +8,9 @@ Tests:
 - Context compaction, history pruning, and archive persistence
 - Threshold and tail preservation logic
 - Clear history synchronization
+- CONTINUITY BRIDGE: distilled context must survive a Hermes session reset and be
+  re-injected into the next ask() prompt (regression: agent lost the thread after
+  compaction and asked the user to re-explain the task).
 """
 
 import os
@@ -248,6 +251,90 @@ class TestCompactionAndDistillation(unittest.TestCase):
         skills = botty_backend.get_skills()
         self.assertEqual(skills["count"], 1)
         self.assertEqual(skills["skills"][0]["name"], "audio-restart")
+
+    def test_compaction_writes_continuity_bridge(self):
+        """Compaction must persist a context bridge so the model keeps prior
+        context even after reset_hermes_session() renames the SQLite session."""
+        messages = []
+        for i in range(16):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({
+                "id": f"msg_{i}",
+                "role": role,
+                "content": f"Turn {i}: configuring K380 keyboard systemd service.",
+                "timestamp": 1700000000 + i,
+                "attachments": [],
+                "actions": []
+            })
+        self.history_file.write_text(json.dumps({"session_id": "botty-widget", "messages": messages}))
+
+        mock_llm_json = json.dumps({
+            "user_memories": [],
+            "system_memories": [],
+            "skills": [],
+            "context_summary": "Working on K380 Bluetooth keyboard SDDM wait service."
+        })
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = f"```json\n{mock_llm_json}\n```"
+        with patch("subprocess.run", return_value=mock_proc):
+            res = botty_backend.distill_and_compact_session(force=False, preserve_tail=4)
+
+        self.assertTrue(res["ok"])
+        # Bridge file must exist and contain the distilled summary
+        self.assertTrue(botty_backend.CONTEXT_BRIDGE_FILE.exists())
+        bridge = botty_backend.CONTEXT_BRIDGE_FILE.read_text(encoding="utf-8")
+        self.assertIn("K380 Bluetooth keyboard SDDM wait service", bridge)
+        # The preserved tail must also be carried over
+        self.assertIn("Turn 15", bridge)
+
+    def test_ask_injects_continuity_bridge_into_prompt(self):
+        """ask() must prepend the continuity bridge to the model prompt so the
+        agent never loses prior context after a Hermes session reset."""
+        # Seed a bridge file
+        botty_backend.CONTEXT_BRIDGE_FILE.write_text(
+            "[COMPACTED CONTEXT] K380 keyboard task in progress.", encoding="utf-8"
+        )
+        # Avoid actually spawning hermes/openssl: mock Popen to capture the composed prompt.
+        # Collect ALL Popen invocations; ask() also spawns openssl for the vault update.
+        # ask() deletes current_query.txt after the call, so we spy on Path.write_text to
+        # capture the prompt that was actually handed to the model.
+        captured_cmds = []
+        written_files = {}
+
+        orig_write = botty_backend.Path.write_text
+        def spy_write(self, data, *a, **k):
+            written_files[str(self)] = data
+            return orig_write(self, data, *a, **k)
+
+        class FakeProc:
+            def __init__(self, *a, **k):
+                captured_cmds.append(a[0] if a else k.get("args"))
+            def communicate(self, timeout=None):
+                return ("Done.", "")
+            @property
+            def returncode(self):
+                return 0
+
+        with patch("botty_backend.subprocess.Popen", FakeProc), \
+             patch("botty_backend.Path.write_text", spy_write), \
+             patch("botty_backend.set_status"), \
+             patch("botty_backend.append_botty_log"), \
+             patch("botty_backend.add_history_message"), \
+             patch("botty_backend.send_system_notification"), \
+             patch("botty_backend.get_active_engine", return_value="hermes"), \
+             patch("botty_backend.get_active_model_for_engine", return_value={"model": "x", "provider": "y"}):
+            botty_backend.ask("can you check if it's done now?")
+
+        hermes_cmds = [c for c in captured_cmds if isinstance(c, (list, tuple)) and "--query-file" in c]
+        self.assertTrue(hermes_cmds, "hermes command with --query-file was not spawned")
+        # The prompt written to current_query.txt is what the model receives
+        query_file_writes = [v for k, v in written_files.items() if "current_query" in k]
+        self.assertTrue(query_file_writes, "current_query.txt prompt was never written")
+        prompt = query_file_writes[0]
+        self.assertIn("CARRIED-OVER CONTEXT FROM PRIOR COMPACTED SESSION", prompt)
+        self.assertIn("K380 keyboard task in progress", prompt)
+        self.assertIn("can you check if it's done now?", prompt)
 
     def test_clear_history_resets_session(self):
         self.history_file.write_text(json.dumps({

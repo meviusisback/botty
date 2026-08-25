@@ -32,6 +32,11 @@ CONFIG_FILE = BOTTY_DATA_DIR / "config.json"
 STATUS_FILE = BOTTY_DATA_DIR / "status.json"
 HISTORY_FILE = BOTTY_DATA_DIR / "history.json"
 HISTORY_ARCHIVE_FILE = BOTTY_DATA_DIR / "history_archive.jsonl"
+# Continuity bridge: distilled context the MODEL must keep across a Hermes session reset.
+# Compaction resets the Hermes SQLite session (so Hermes's own context shrinks), but the
+# distilled summary + preserved tail must still reach the model next turn. history.json is only
+# the UI display, so we persist a dedicated bridge file that ask() injects into every prompt.
+CONTEXT_BRIDGE_FILE = BOTTY_DATA_DIR / "context_bridge.txt"
 VAULT_FILE = BOTTY_DATA_DIR / "vault.enc"
 LOCK_FILE = BOTTY_DATA_DIR / "running.pid"
 BOTTY_LOG_FILE = BOTTY_DATA_DIR / "botty.log"
@@ -1329,6 +1334,21 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     prompt_parts.append(user_query)
     final_prompt = "\n".join(prompt_parts)
 
+    # Inject the continuity bridge: context recovered from the last compaction. This is the
+    # only reliable way for the model to retain prior context across a Hermes session reset,
+    # because the Hermes session DB is renamed (archived-*) during compaction and history.json
+    # is display-only. Without this, the agent loses the thread (asks the user to re-explain).
+    try:
+        if CONTEXT_BRIDGE_FILE.exists():
+            bridge = CONTEXT_BRIDGE_FILE.read_text(encoding="utf-8").strip()
+            if bridge:
+                final_prompt = (
+                    f"[CARRIED-OVER CONTEXT FROM PRIOR COMPACTED SESSION]\n{bridge}\n"
+                    f"[END CARRIED-OVER CONTEXT]\n\n{final_prompt}"
+                )
+    except Exception as e:
+        append_botty_log(f"Context bridge read error: {str(e)}")
+
     add_history_message("user", user_query, attachments=attachments)
 
     engine = get_active_engine()
@@ -2094,6 +2114,26 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
     }
     history["messages"] = [summary_msg] + tail_messages
     save_json_file(HISTORY_FILE, history)
+
+    # 4b. Write the continuity bridge so the model keeps this context across the
+    # Hermes session reset below. Without this, the next turn loads a fresh, empty
+    # Hermes session and the agent loses the entire conversation (regression seen in
+    # the K380/SDDM task: agent answered "Could you clarify what you'd like me to check on?").
+    try:
+        tail_text = "\n".join(
+            f"{('User' if m.get('role') == 'user' else 'Assistant')}: {m.get('content', '').strip()}"
+            for m in tail_messages if m.get("content", "").strip()
+        )
+        bridge_parts = [
+            "📌 [COMPACTED CONTEXT — retain this as your prior conversation summary]:",
+            summary_text,
+        ]
+        if tail_text:
+            bridge_parts.append("\n🧵 [Recent messages preserved verbatim]:\n" + tail_text)
+        CONTEXT_BRIDGE_FILE.write_text("\n".join(bridge_parts), encoding="utf-8")
+        secure_file_permissions(CONTEXT_BRIDGE_FILE)
+    except Exception as e:
+        append_botty_log(f"Context bridge write error: {str(e)}")
 
     # 5. Reset Hermes session context in SQLite state.db
     reset_hermes_session("botty-widget")

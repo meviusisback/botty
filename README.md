@@ -1,5 +1,7 @@
 # Botty — Omarchy Desktop Agent Assistant Bar Widget
 
+![](infographic.png)
+
 **Botty** is an interactive, native Omarchy bar widget and desktop assistant powered by the Hermes Agent profile `botty`, with support for OMP, Claude Code, and Codex. It integrates directly into your top bar to provide instant ambient screen awareness, universal file & document context, persistent memory, continuous learning, model switching, and desktop automation actions.
 
 ![Botty Preview](preview.png)

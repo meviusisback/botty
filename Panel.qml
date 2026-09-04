@@ -2478,13 +2478,13 @@ Panel {
                 radius: Style.cornerRadius
                 color: Style.controlFill(promptInput.activeFocus, promptInput.hovered, root.foreground, root.accent)
                 borderSpec: Border.controlSpec(promptInput.activeFocus ? "focus" : (promptInput.hovered ? "hover-cursor" : "normal"), root.foreground, root.accent)
-                implicitHeight: Math.min(Math.max(promptInputFlickable.contentHeight + Style.space(6), Style.space(32)), Style.space(160))
+                implicitHeight: Math.min(Math.max(promptInputFlickable.contentHeight, Style.space(32)), Style.space(160))
 
                 Flickable {
                   id: promptInputFlickable
                   anchors.fill: parent
-                  anchors.topMargin: Style.space(2)
-                  anchors.bottomMargin: Style.space(2)
+                  anchors.topMargin: 1
+                  anchors.bottomMargin: 1
                   anchors.leftMargin: Style.space(4)
                   anchors.rightMargin: Style.space(4)
                   clip: true

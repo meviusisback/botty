@@ -3001,6 +3001,8 @@ Panel {
                 font.pixelSize: Style.font.caption
                 font.bold: true
                 color: root.accent
+                elide: Text.ElideRight
+                Layout.fillWidth: true
               }
 
               Flow {
@@ -3038,6 +3040,8 @@ Panel {
                 font.pixelSize: Style.font.caption
                 font.bold: true
                 color: root.accent
+                elide: Text.ElideRight
+                Layout.fillWidth: true
               }
 
               Flow {
@@ -3076,6 +3080,8 @@ Panel {
                   font.pixelSize: Style.font.caption
                   font.bold: true
                   color: root.accent
+                  elide: Text.ElideRight
+                  Layout.fillWidth: true
                 }
 
                 Item { Layout.fillWidth: true }
@@ -3218,6 +3224,8 @@ Panel {
                       font.pixelSize: Style.font.body
                       font.bold: true
                       color: root.foreground
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
                     }
 
                     Text {
@@ -3225,6 +3233,8 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
                       color: root.dim
+                      wrapMode: Text.Wrap
+                      Layout.fillWidth: true
                     }
                   }
 
@@ -3306,6 +3316,8 @@ Panel {
                       font.pixelSize: Style.font.body
                       font.bold: true
                       color: root.foreground
+                      elide: Text.ElideRight
+                      Layout.fillWidth: true
                     }
 
                     Text {
@@ -3313,6 +3325,8 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
                       color: root.dim
+                      wrapMode: Text.Wrap
+                      Layout.fillWidth: true
                     }
                   }
 
@@ -3451,6 +3465,8 @@ Panel {
               font.pixelSize: Style.font.title
               font.bold: true
               color: root.foreground
+              elide: Text.ElideRight
+              Layout.fillWidth: true
             }
 
             Item { Layout.fillWidth: true }
@@ -3627,17 +3643,23 @@ Panel {
 
                   Text {
                     text: "🐼 " + (logsViewItem.hermesTraceObj && logsViewItem.hermesTraceObj.session ? logsViewItem.hermesTraceObj.session.id : "")
+                    textFormat: Text.PlainText
                     font.family: "JetBrainsMono Nerd Font"
                     font.pixelSize: Style.space(11)
                     font.bold: true
                     color: root.foreground
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                   }
 
                   Text {
                     text: "• Model: " + (logsViewItem.hermesTraceObj && logsViewItem.hermesTraceObj.session ? logsViewItem.hermesTraceObj.session.model : "")
+                    textFormat: Text.PlainText
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
                     color: root.dim
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                   }
 
                   Item { Layout.fillWidth: true }
@@ -3740,6 +3762,8 @@ Panel {
                                 font.pixelSize: Style.space(9)
                                 font.bold: true
                                 color: root.accent
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
                               }
 
                               TextEdit {

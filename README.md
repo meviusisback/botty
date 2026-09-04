@@ -34,7 +34,13 @@
 
 ## ⌨️ Global Keyboard Shortcuts
 
-Configured in `~/.config/hypr/bindings.lua`:
+Botty registers the IPC handlers, but the keybinds live in your Hyprland
+bindings file (e.g. `~/.config/hypr/bindings.lua` on Omarchy). Add:
+
+```lua
+o.bind("SUPER + A", "Toggle Botty", "omarchy-shell -q meviusisback.botty toggle")
+o.bind("SUPER + SHIFT + A", "Botty with window context", "omarchy-shell -q meviusisback.botty situationContext")
+```
 
 | Shortcut | Action | Description |
 |---|---|---|
@@ -45,25 +51,47 @@ Configured in `~/.config/hypr/bindings.lua`:
 
 ## 🚀 Installation & Window Rules
 
-### 1. Link Plugin to Omarchy
+### 1. Prerequisite: a Hermes profile named `botty`
+
+Botty drives the Hermes Agent CLI (`hermes`) using a profile named `botty` —
+without it, the engine shows as unavailable. If you don't have one yet:
 
 ```bash
-mkdir -p ~/.config/omarchy/plugins
-ln -s ~/repo/botty ~/.config/omarchy/plugins/meviusisback.botty
+hermes profile create botty
 ```
 
-### 2. Configure Floating File Dialogs in Hyprland
+Install the engine's own tools (`hermes`, plus `ffmpeg`, `grim`, `wl-clipboard`,
+`openssl` for the vault backup) and, for voice dictation, `voxtype` with a
+local Whisper model.
 
-Add to your `~/.config/hypr/hyprland.lua`:
+### 2. Install the Plugin
+
+```bash
+omarchy plugin add https://github.com/meviusisback/botty --enable
+```
+
+Omarchy clones the plugin into `~/.config/omarchy/plugins/meviusisback.botty/`
+and enables the bar widget.
+
+### 3. Optional Keybinds & Floating File Dialogs
+
+Add to your Hyprland bindings file (e.g. `~/.config/hypr/bindings.lua`):
 
 ```lua
--- Float, center, and size file dialogs on top of the widget
+o.bind("SUPER + A", "Toggle Botty", "omarchy-shell -q meviusisback.botty toggle")
+o.bind("SUPER + SHIFT + A", "Botty with window context", "omarchy-shell -q meviusisback.botty situationContext")
+```
+
+Add to your `~/.config/hypr/hyprland.lua` to float, center, and size file
+dialogs on top of the widget:
+
+```lua
 o.window({ title = ".*Attach File.*" }, { float = true, center = true, size = { 740, 500 }, stay_focused = true })
 o.window({ title = ".*(Open File|Select File|Choose File|Open Folder|Save File).*" }, { float = true, center = true, size = { 740, 500 }, stay_focused = true })
 o.window("xdg-desktop-portal.*", { float = true, center = true, size = { 740, 500 } })
 ```
 
-### 3. Reload Omarchy Shell & Hyprland
+### 4. Reload Omarchy Shell & Hyprland
 
 ```bash
 hyprctl reload
@@ -85,6 +113,49 @@ JSON configuration file at `~/.local/share/botty/config.json`:
 The value is a positive number of seconds. Invalid or non-positive values use
 the 600-second default. Other Botty configuration keys may be kept alongside
 this setting.
+
+---
+
+## 🧹 Removal
+
+```bash
+omarchy plugin remove meviusisback.botty
+```
+
+This removes the plugin from the bar and deletes
+`~/.config/omarchy/plugins/meviusisback.botty/`. To also wipe Botty's own data
+(chat history, memories, captures), remove:
+
+```bash
+rm -rf ~/.local/share/botty
+```
+
+Your Hermes profile (`~/.hermes/profiles/botty`) is a separate Hermes resource
+and is not touched by the plugin; remove it manually if you want a full purge.
+
+---
+
+## 📦 Requirements
+
+**Runtime (required by the default Hermes engine):**
+
+| Dependency | Purpose |
+|---|---|
+| Omarchy (Hyprland + Quickshell shell) | The host desktop this widget runs in |
+| [`hermes`](https://github.com/NousResearch/hermes-agent) CLI | The agent engine behind the default profile |
+| A Hermes profile named `botty` (`hermes profile create botty`) | Botty's agent profile, memory, and skills |
+| `grim` | Screenshot capture for visual screen context |
+| `wl-clipboard` (`wl-copy`/`wl-paste`) | Clipboard image attach and copy-out |
+| `openssl` | AES-256 vault backup |
+| `ffmpeg` (PulseAudio/PipeWire input) | Voice dictation recording |
+
+**Optional engines (switch in Settings):** `omp` (Oh My Pi), `claude` (Claude Code), `codex` (OpenAI Codex).
+
+**Optional voice:** [`voxtype`](https://github.com/NousResearch/voxtype) with a local Whisper model.
+
+Non-Omarchy Hyprland setups work if the above binaries exist, but the widget's
+notifications and summons rely on Omarchy's shell helpers (`omarchy-shell`,
+`omarchy-notification-send`).
 
 ---
 

@@ -78,9 +78,8 @@ Panel {
   property bool screenContextEnabled: false
   property var lastCaptureInfo: null
 
-  // Sandbox Mode & Write Isolation state
+  // Sandbox Mode state
   property bool sandboxMode: true
-  property bool bypassSandboxForNextQuery: false
 
   // Desktop Notifications preferences
   property var notificationConfig: ({ enabled: true, on_complete: true, on_blocked: true, on_error: true })
@@ -226,7 +225,8 @@ Panel {
 
   function approveSandboxBypass(originalQuery) {
     var queryToSend = originalQuery || "I approve this operation. Please bypass the sandbox and execute the proposed file/system write actions."
-    root.bypassSandboxForNextQuery = true
+    // Bypass is passed explicitly as sendQuery's last arg — no shared flag,
+    // so an approve-click while busy can never latch onto a later prompt.
     root.sendQuery(queryToSend, "", false, false, true)
   }
 
@@ -260,7 +260,9 @@ Panel {
 
     if (!q.trim() && !fpath && !scr && !sit) return
 
-    var cmd = ["python3", root.scriptPath(), "ask", q]
+    // Flags first, then "--", then the raw query — query text can never be
+    // parsed as backend options (option injection).
+    var cmd = ["python3", root.scriptPath(), "ask"]
     if (fpath) {
       if (root.attachedFileIsImage) {
         cmd.push("--image")
@@ -275,10 +277,11 @@ Panel {
     if (sit) {
       cmd.push("--situation")
     }
-    if (bypassSandbox || root.bypassSandboxForNextQuery) {
+    if (bypassSandbox) {
       cmd.push("--bypass-sandbox")
-      root.bypassSandboxForNextQuery = false
     }
+    cmd.push("--")
+    cmd.push(q)
 
     askProc.command = cmd
     askProc.running = true
@@ -350,7 +353,7 @@ Panel {
 
   function copyText(text) {
     if (!text) return
-    copyProc.command = ["python3", root.scriptPath(), "copy", text]
+    copyProc.command = ["python3", root.scriptPath(), "copy", "--", text]
     copyProc.running = true
     if (root.currentView === "chat") {
       Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
@@ -364,15 +367,19 @@ Panel {
 
   function addMemoryNow(text, isUser) {
     if (!text || !text.trim()) return
-    var cmd = ["python3", root.scriptPath(), "add-memory", text]
+    var cmd = ["python3", root.scriptPath(), "add-memory"]
     if (isUser) cmd.push("--user")
+    cmd.push("--")
+    cmd.push(text)
     addMemProc.command = cmd
     addMemProc.running = true
   }
 
   function deleteMemoryNow(memId, isUser) {
-    var cmd = ["python3", root.scriptPath(), "delete-memory", String(memId)]
+    var cmd = ["python3", root.scriptPath(), "delete-memory"]
     if (isUser) cmd.push("--user")
+    cmd.push("--")
+    cmd.push(String(memId))
     delMemProc.command = cmd
     delMemProc.running = true
   }
@@ -2003,7 +2010,8 @@ Panel {
                     // Sandbox Permission Request Card
                     BorderSurface {
                       id: permCard
-                      visible: !isUser && Model.detectPermissionRequest(modelData.content).isPermission
+                      visible: !isUser && (modelData.sandbox_request === true
+                        || (modelData.sandbox_request === undefined && Model.detectPermissionRequest(modelData.content).isPermission))
                       width: parent.width
                       Layout.fillWidth: true
                       implicitHeight: permCol.implicitHeight + Style.space(16)
@@ -2190,9 +2198,10 @@ Panel {
           BorderSurface {
             id: pendingPermissionBanner
             visible: {
-              if (root.isProcessing || !root.historyMessages || root.historyMessages.length === 0) return false
-              var lastMsg = root.historyMessages[root.historyMessages.length - 1]
-              return lastMsg && lastMsg.role === "assistant" && Model.detectPermissionRequest(lastMsg.content).isPermission
+              var msgs = (root.historyData && root.historyData.messages) || []
+              if (root.isProcessing || msgs.length === 0) return false
+              var lastMsg = msgs[msgs.length - 1]
+              return lastMsg && lastMsg.role === "assistant" && lastMsg.sandbox_request === true
             }
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)
@@ -2692,7 +2701,7 @@ Panel {
                 spacing: Style.space(1)
 
                 Text {
-                  text: "Local AES-256 Memory Encryption Active"
+                  text: "Memory Vault (Obfuscation-Grade Backup)"
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -2700,7 +2709,7 @@ Panel {
                 }
 
                 Text {
-                  text: "Hardware-bound PBKDF2 vault • POSIX 0600 permissions (Owner-only access on this machine)"
+                  text: "AES-256 backup copy • Real protection: POSIX 0600/0700 owner-only permissions • Sources remain plaintext on disk"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
                   color: root.dim
@@ -3230,7 +3239,7 @@ Panel {
                 }
 
                 Text {
-                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Write Isolation: Direct writes (file modifications, deletions, package installations, config changes) are blocked unless you approve them in chat or unlock Sandbox Mode.\n• Interactive In-Chat Approvals: When Botty wants to apply a write, it shows what files will change and prompts for 1-click bypass approval."
+                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Write Guidance (best-effort): Botty is instructed to halt and ask before writes and shows an approval card. This is prompt-level guidance, not OS-level enforcement — treat it as a convenience, not a security boundary.\n• Interactive In-Chat Approvals: When Botty wants to apply a write, it shows what files will change and prompts for 1-click bypass approval."
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
                   color: root.foreground

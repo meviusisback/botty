@@ -208,7 +208,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
                 {
                     "name": "audio-restart",
                     "description": "Restart Pipewire audio subsystem",
-                    "instructions": "Run `systemctl --user restart pipewire pipewire-pulse`."
+                    "instructions": "Use the desktop audio settings to restart the audio service."
                 }
             ],
             "context_summary": "Discussed Omarchy audio and window management configurations."

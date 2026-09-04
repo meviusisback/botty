@@ -1174,7 +1174,7 @@ Panel {
     contentWidth: Style.space(560)
     readonly property real baseContentHeight: Style.space(680)
     readonly property real extraInputHeight: (root.currentView === "chat" && typeof promptInputContainer !== "undefined" && promptInputContainer)
-      ? Math.max(0, promptInputContainer.implicitHeight - Style.space(34))
+      ? Math.max(0, promptInputContainer.implicitHeight - Style.space(32))
       : 0
     contentHeight: Math.min(baseContentHeight + extraInputHeight, popup.availableCardHeight > 0 ? popup.availableCardHeight : Style.space(850))
 
@@ -2072,7 +2072,7 @@ Panel {
                             iconText: "󰄬"
                             text: "Approve & Bypass Sandbox"
                             selected: true
-                            implicitHeight: Style.space(26)
+                            implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             onClicked: {
                               root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
@@ -2082,7 +2082,7 @@ Panel {
                           Button {
                             iconText: "󰅖"
                             text: "Deny (Keep Sandboxed)"
-                            implicitHeight: Style.space(26)
+                            implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             onClicked: {
                               root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
@@ -2266,7 +2266,7 @@ Panel {
                   iconText: "󰄬"
                   text: "Approve & Run (Bypass)"
                   selected: true
-                  implicitHeight: Style.space(28)
+                  implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {
                     root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
@@ -2276,7 +2276,7 @@ Panel {
                 Button {
                   iconText: "󰅖"
                   text: "Deny (Keep Sandboxed)"
-                  implicitHeight: Style.space(28)
+                  implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {
                     root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
@@ -2371,8 +2371,8 @@ Panel {
               Button {
                 iconText: "󰅖"
                 tooltipText: "Remove context / attachment"
-                implicitWidth: Style.space(24)
-                implicitHeight: Style.space(24)
+                implicitWidth: Style.space(32)
+                implicitHeight: Style.space(32)
                 fontSize: Style.space(11)
                 onClicked: {
                   root.attachedFilePath = ""
@@ -2478,7 +2478,7 @@ Panel {
                 radius: Style.cornerRadius
                 color: Style.controlFill(promptInput.activeFocus, promptInput.hovered, root.foreground, root.accent)
                 borderSpec: Border.controlSpec(promptInput.activeFocus ? "focus" : (promptInput.hovered ? "hover-cursor" : "normal"), root.foreground, root.accent)
-                implicitHeight: Math.min(Math.max(promptInputFlickable.contentHeight + Style.space(6), Style.space(34)), Style.space(160))
+                implicitHeight: Math.min(Math.max(promptInputFlickable.contentHeight + Style.space(6), Style.space(32)), Style.space(160))
 
                 Flickable {
                   id: promptInputFlickable
@@ -2681,6 +2681,7 @@ Panel {
             Button {
               iconText: "󰑐"
               text: "Compact Memory"
+              implicitHeight: Style.space(32)
               onClicked: root.compactMemoryNow()
             }
           }
@@ -2737,6 +2738,7 @@ Panel {
 
             TextField {
               id: newMemInput
+              implicitHeight: Style.space(32)
               Layout.fillWidth: true
               placeholderText: "Teach Botty a fact to remember permanently…"
               onAccepted: {
@@ -2750,6 +2752,7 @@ Panel {
             Button {
               iconText: "󰄬"
               text: "Remember"
+              implicitHeight: Style.space(32)
               selected: true
               onClicked: {
                 if (newMemInput.text.trim()) {
@@ -2820,16 +2823,16 @@ Panel {
                     Button {
                       iconText: "󰆏"
                       tooltipText: "Copy memory"
-                      implicitWidth: Style.space(24)
-                      implicitHeight: Style.space(24)
+                      implicitWidth: Style.space(32)
+                      implicitHeight: Style.space(32)
                       onClicked: root.copyText(modelData.text)
                     }
 
                     Button {
                       iconText: "󰆴"
                       tooltipText: "Delete / cancel this memory"
-                      implicitWidth: Style.space(24)
-                      implicitHeight: Style.space(24)
+                      implicitWidth: Style.space(32)
+                      implicitHeight: Style.space(32)
                       onClicked: root.deleteMemoryNow(modelData.id, modelData.type === "user")
                     }
                   }
@@ -2957,7 +2960,7 @@ Panel {
               iconText: "󰘚"
               text: "Engine & Models"
               selected: settingsViewItem.settingsTab === "models"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: settingsViewItem.settingsTab = "models"
             }
@@ -2966,7 +2969,7 @@ Panel {
               iconText: "󰒃"
               text: "Security & Sandbox"
               selected: settingsViewItem.settingsTab === "sandbox"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: settingsViewItem.settingsTab = "sandbox"
             }
@@ -2975,7 +2978,7 @@ Panel {
               iconText: "󰂚"
               text: "Notifications"
               selected: settingsViewItem.settingsTab === "notifications"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: settingsViewItem.settingsTab = "notifications"
             }
@@ -3016,7 +3019,7 @@ Panel {
                     tooltipText: modelData.name + " (" + modelData.desc + ")"
                     fontSize: Style.space(11)
                     selected: modelData.id === (root.rawStatus.active_engine || "hermes")
-                    implicitHeight: Style.space(28)
+                    implicitHeight: Style.space(32)
                     onClicked: {
                       root.selectEngine(modelData.id)
                       modelsProc.command = ["python3", root.scriptPath(), "models", "--engine", modelData.id]
@@ -3054,7 +3057,7 @@ Panel {
                     text: modelData.name || modelData.id
                     fontSize: Style.space(11)
                     selected: modelData.id === (settingsViewItem.currentProviderObj ? settingsViewItem.currentProviderObj.id : "")
-                    implicitHeight: Style.space(28)
+                    implicitHeight: Style.space(32)
                     onClicked: {
                       root.selectedProviderId = modelData.id
                       root.modelSearchFilter = ""
@@ -3089,6 +3092,7 @@ Panel {
 
               TextField {
                 id: modelSearchInput
+                implicitHeight: Style.space(32)
                 Layout.fillWidth: true
                 placeholderText: "🔍 Search models under " + settingsViewItem.currentProviderObj.name + "…"
                 font.pixelSize: Style.font.body
@@ -3169,7 +3173,7 @@ Panel {
                         Button {
                           text: isCurrent ? "Active" : "Select"
                           selected: isCurrent
-                          implicitHeight: Style.space(26)
+                          implicitHeight: Style.space(32)
                           fontSize: Style.space(10)
                           onClicked: root.selectModel(modelData.id, root.selectedProviderId)
                         }
@@ -3241,7 +3245,7 @@ Panel {
                   Button {
                     text: root.sandboxMode ? "Disable (Unlock)" : "Enable (Lock)"
                     iconText: root.sandboxMode ? "󰒄" : "󰒃"
-                    implicitHeight: Style.space(28)
+                    implicitHeight: Style.space(32)
                     fontSize: Style.space(10)
                     selected: root.sandboxMode
                     onClicked: root.toggleSandboxMode()
@@ -3333,7 +3337,7 @@ Panel {
                   Button {
                     text: root.notificationConfig.enabled ? "Enabled" : "Disabled"
                     selected: root.notificationConfig.enabled
-                    implicitHeight: Style.space(28)
+                    implicitHeight: Style.space(32)
                     fontSize: Style.space(10)
                     onClicked: root.setNotificationPref("enabled", !root.notificationConfig.enabled)
                   }
@@ -3365,7 +3369,7 @@ Panel {
                   Button {
                     text: root.notificationConfig.on_complete ? "ON" : "OFF"
                     selected: root.notificationConfig.on_complete
-                    implicitHeight: Style.space(24)
+                    implicitHeight: Style.space(32)
                     fontSize: Style.space(9)
                     onClicked: root.setNotificationPref("on_complete", !root.notificationConfig.on_complete)
                   }
@@ -3387,7 +3391,7 @@ Panel {
                   Button {
                     text: root.notificationConfig.on_blocked ? "ON" : "OFF"
                     selected: root.notificationConfig.on_blocked
-                    implicitHeight: Style.space(24)
+                    implicitHeight: Style.space(32)
                     fontSize: Style.space(9)
                     onClicked: root.setNotificationPref("on_blocked", !root.notificationConfig.on_blocked)
                   }
@@ -3409,7 +3413,7 @@ Panel {
                   Button {
                     text: root.notificationConfig.on_error ? "ON" : "OFF"
                     selected: root.notificationConfig.on_error
-                    implicitHeight: Style.space(24)
+                    implicitHeight: Style.space(32)
                     fontSize: Style.space(9)
                     onClicked: root.setNotificationPref("on_error", !root.notificationConfig.on_error)
                   }
@@ -3424,7 +3428,7 @@ Panel {
                   Button {
                     iconText: "󰂚"
                     text: "Send Test Notification"
-                    implicitHeight: Style.space(26)
+                    implicitHeight: Style.space(32)
                     fontSize: Style.space(10)
                     onClicked: root.testSystemNotification("complete")
                   }
@@ -3474,7 +3478,7 @@ Panel {
             Button {
               iconText: "󰌑"
               text: "Back to Chat"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: { root.currentView = "chat" }
             }
@@ -3489,7 +3493,7 @@ Panel {
               iconText: "󰈙"
               text: "Hermes Trace"
               selected: logsViewItem.logTab === "hermes-trace"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: { logsViewItem.logTab = "hermes-trace" }
             }
@@ -3498,7 +3502,7 @@ Panel {
               iconText: "󰚩"
               text: "Agent Log"
               selected: logsViewItem.logTab === "hermes-agent"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: { logsViewItem.logTab = "hermes-agent" }
             }
@@ -3507,7 +3511,7 @@ Panel {
               iconText: "󰅚"
               text: "Errors Log"
               selected: logsViewItem.logTab === "hermes-errors"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: { logsViewItem.logTab = "hermes-errors" }
             }
@@ -3516,7 +3520,7 @@ Panel {
               iconText: "󰘦"
               text: "Botty Log"
               selected: logsViewItem.logTab === "botty-stream"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: { logsViewItem.logTab = "botty-stream" }
             }
@@ -3526,7 +3530,7 @@ Panel {
               iconText: "󰈙"
               text: "Inspected"
               selected: logsViewItem.logTab === "inspected"
-              implicitHeight: Style.space(26)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(10)
               onClicked: { logsViewItem.logTab = "inspected" }
             }
@@ -3536,8 +3540,8 @@ Panel {
             Button {
               iconText: "󰑐"
               tooltipText: "Refresh logs"
-              implicitWidth: Style.space(26)
-              implicitHeight: Style.space(26)
+              implicitWidth: Style.space(32)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(11)
               onClicked: root.fetchLogs()
             }
@@ -3545,8 +3549,8 @@ Panel {
             Button {
               iconText: "󰆏"
               tooltipText: "Copy active view to clipboard"
-              implicitWidth: Style.space(26)
-              implicitHeight: Style.space(26)
+              implicitWidth: Style.space(32)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(11)
               onClicked: {
                 var contentToCopy = ""
@@ -3568,8 +3572,8 @@ Panel {
             Button {
               iconText: "󰆴"
               tooltipText: "Clear botty.log"
-              implicitWidth: Style.space(26)
-              implicitHeight: Style.space(26)
+              implicitWidth: Style.space(32)
+              implicitHeight: Style.space(32)
               fontSize: Style.space(11)
               onClicked: root.clearLogsNow()
             }

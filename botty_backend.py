@@ -1372,18 +1372,20 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         cmd = ["omp", "-p", "--allow-home", f"--append-system-prompt={BOTTY_AGENT_DIRECTIVE}"]
         if selected_model:
             cmd.extend(["--model", selected_model])
-        cmd.append(final_prompt)
+        # "--" fences the prompt: engine CLIs must never parse dash-leading
+        # query text as their own flags.
+        cmd.extend(["--", final_prompt])
     elif engine == "claude":
         cmd = ["claude", "-p", "--append-system-prompt", BOTTY_AGENT_DIRECTIVE]
         if selected_model:
             cmd.extend(["--model", selected_model])
-        cmd.append(final_prompt)
+        cmd.extend(["--", final_prompt])
     elif engine == "codex":
         cmd = ["codex", "exec"]
         if selected_model:
             cmd.extend(["--model", selected_model])
         codex_prompt = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
-        cmd.append(codex_prompt)
+        cmd.extend(["--", codex_prompt])
     else:
         cmd = [
             "hermes",
@@ -2117,6 +2119,7 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
         "actions": [],
         "model": "",
         "engine": "",
+        "sandbox_request": False,
         "is_summary": True
     }
     history["messages"] = [summary_msg] + tail_messages

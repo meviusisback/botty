@@ -211,7 +211,7 @@ Panel {
 
   function attachFileNow(filepath) {
     if (!filepath) return
-    inspectProc.command = ["python3", root.scriptPath(), "inspect-file", filepath]
+    inspectProc.command = ["python3", root.scriptPath(), "inspect-file", "--", filepath]
     inspectProc.running = true
   }
 
@@ -1737,7 +1737,16 @@ Panel {
                           activeFocusOnPress: true
                           selectionColor: root.alpha(root.accent, 0.4)
                           selectedTextColor: root.foreground
-                          onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                          onLinkActivated: function(link) {
+                            // Only http(s) goes to the OS opener; any other
+                            // scheme (file://, custom handlers) is copied for
+                            // inspection instead of executed.
+                            if (/^https?:\/\//i.test(link)) {
+                              Qt.openUrlExternally(link)
+                            } else {
+                              root.copyText(link)
+                            }
+                          }
 
                           Keys.onPressed: function(event) {
                             if (event.matches(StandardKey.Copy) || ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C)) {
@@ -2011,7 +2020,7 @@ Panel {
                     BorderSurface {
                       id: permCard
                       visible: !isUser && (modelData.sandbox_request === true
-                        || (modelData.sandbox_request === undefined && Model.detectPermissionRequest(modelData.content).isPermission))
+                        || (modelData.sandbox_request == null && Model.detectPermissionRequest(modelData.content).isPermission))
                       width: parent.width
                       Layout.fillWidth: true
                       implicitHeight: permCol.implicitHeight + Style.space(16)
@@ -2201,7 +2210,8 @@ Panel {
               var msgs = (root.historyData && root.historyData.messages) || []
               if (root.isProcessing || msgs.length === 0) return false
               var lastMsg = msgs[msgs.length - 1]
-              return lastMsg && lastMsg.role === "assistant" && lastMsg.sandbox_request === true
+              return lastMsg && lastMsg.role === "assistant" && (lastMsg.sandbox_request === true
+                || (lastMsg.sandbox_request == null && Model.detectPermissionRequest(lastMsg.content).isPermission))
             }
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)

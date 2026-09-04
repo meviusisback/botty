@@ -222,8 +222,10 @@ def get_vault_security_info() -> Dict[str, Any]:
     return {
         "ok": True,
         "encryption_enabled": True,
-        "cipher": "AES-256-CBC (PBKDF2 10,000 iter)",
-        "key_derivation": "Hardware-Bound (Machine-ID + User UID)",
+        "cipher": "AES-256-CBC (PBKDF2 10,000 iter) — obfuscation-grade",
+        "key_derivation": "Machine-derived (uid + machine-id) — publicly derivable, NOT a security boundary",
+        "protection_model": "POSIX 0600 files / 0700 dirs (owner-only) — the real boundary",
+        "encryption_scope": "Redundant backup copy only; source memories/history remain plaintext on disk",
         "file_permissions": "POSIX 0600 / 0700 (Owner Only)",
         "vault_path": str(VAULT_FILE),
         "vault_size_bytes": vault_size,
@@ -1153,7 +1155,7 @@ def clear_history() -> Dict[str, Any]:
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
     return {"ok": True, "message": "History cleared and session reset"}
 
-def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None) -> None:
+def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None, sandbox_request: bool = False) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
 
@@ -1178,7 +1180,8 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
         "actions": actions or [],
         "model": model or "",
         "engine": engine or "",
-        "raw_output": raw_output or ""
+        "raw_output": raw_output or "",
+        "sandbox_request": bool(sandbox_request)
     }
     msgs.append(msg)
     history["messages"] = msgs
@@ -1369,18 +1372,20 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         cmd = ["omp", "-p", "--allow-home", f"--append-system-prompt={BOTTY_AGENT_DIRECTIVE}"]
         if selected_model:
             cmd.extend(["--model", selected_model])
-        cmd.append(final_prompt)
+        # "--" fences the prompt: engine CLIs must never parse dash-leading
+        # query text as their own flags.
+        cmd.extend(["--", final_prompt])
     elif engine == "claude":
         cmd = ["claude", "-p", "--append-system-prompt", BOTTY_AGENT_DIRECTIVE]
         if selected_model:
             cmd.extend(["--model", selected_model])
-        cmd.append(final_prompt)
+        cmd.extend(["--", final_prompt])
     elif engine == "codex":
         cmd = ["codex", "exec"]
         if selected_model:
             cmd.extend(["--model", selected_model])
         codex_prompt = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
-        cmd.append(codex_prompt)
+        cmd.extend(["--", codex_prompt])
     else:
         cmd = [
             "hermes",
@@ -1436,9 +1441,13 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
 
         raw_output_saved = redact_secrets(stdout_data)
         append_botty_log(f"RESPONSE [{engine}/{selected_model}] ({t_duration:.1f}s): {cleaned_response[:140]}...")
-        add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved)
 
+        # Detect the sandbox permission request BEFORE persisting, so the
+        # structured flag rides on the history message and the UI never has to
+        # infer approval state from model text.
         is_permission_required = "🔒 SANDBOX PERMISSION REQUIRED" in cleaned_response
+        add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved, sandbox_request=is_permission_required)
+
         if is_permission_required:
             set_status("idle", headline="Permission Required", last_query=query, last_answer=cleaned_response)
             send_system_notification("blocked", "Botty — Permission Required", "Botty needs your approval to bypass sandbox for writes.", urgency="critical")
@@ -2110,6 +2119,7 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
         "actions": [],
         "model": "",
         "engine": "",
+        "sandbox_request": False,
         "is_summary": True
     }
     history["messages"] = [summary_msg] + tail_messages

@@ -27,7 +27,7 @@
   - **Searchable Model Catalog**: Browse and switch among hundreds of models with real-time config synchronization.
 - 󰋚 **Continuous Learning, Memory Management & Encryption**:
   - **Single-Click Memory Deletion**: Delete and cancel stored facts directly from the `󰋚 Memories` tab.
-  - **Local AES-256 Memory Vault**: Hardware-bound PBKDF2 encrypted vault backup with owner-only `0600` POSIX permission isolation.
+  - **Local Memory Vault Backup**: AES-256 encrypted backup copy with an obfuscation-grade machine-derived key. The real protection is owner-only `0600`/`0700` POSIX permissions — source memories and chat history remain plaintext on disk; do not treat the vault as confidentiality.
 - 󰘦 **Desktop Automation Actions**: Runs terminal commands, manages files, and interacts with Hyprland and system apps.
 
 ---
@@ -85,6 +85,23 @@ JSON configuration file at `~/.local/share/botty/config.json`:
 The value is a positive number of seconds. Invalid or non-positive values use
 the 600-second default. Other Botty configuration keys may be kept alongside
 this setting.
+
+---
+
+## 🔐 Security Model
+
+**Sandbox Mode is best-effort prompt-level guidance, not a security boundary.**
+The underlying agent runs with tool-approval prompts bypassed (`--yolo`), so it
+can technically execute anything its engine allows. In Sandbox Mode Botty is
+*instructed* to halt before writes and show an approval card; in-chat approvals
+are advisory. Do not rely on this as containment against a compromised or
+prompt-injected agent.
+
+**Memory Vault is an obfuscation-grade backup, not confidentiality.** The vault
+key is derived from publicly readable machine identifiers, and the vault is a
+redundant copy — source memories and chat history stay plaintext on disk. The
+actual access control is owner-only POSIX permissions (`0600` files, `0700`
+dirs) under `~/.local/share/botty`.
 
 ---
 

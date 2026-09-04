@@ -78,9 +78,8 @@ Panel {
   property bool screenContextEnabled: false
   property var lastCaptureInfo: null
 
-  // Sandbox Mode & Write Isolation state
+  // Sandbox Mode state
   property bool sandboxMode: true
-  property bool bypassSandboxForNextQuery: false
 
   // Desktop Notifications preferences
   property var notificationConfig: ({ enabled: true, on_complete: true, on_blocked: true, on_error: true })
@@ -212,7 +211,7 @@ Panel {
 
   function attachFileNow(filepath) {
     if (!filepath) return
-    inspectProc.command = ["python3", root.scriptPath(), "inspect-file", filepath]
+    inspectProc.command = ["python3", root.scriptPath(), "inspect-file", "--", filepath]
     inspectProc.running = true
   }
 
@@ -226,7 +225,8 @@ Panel {
 
   function approveSandboxBypass(originalQuery) {
     var queryToSend = originalQuery || "I approve this operation. Please bypass the sandbox and execute the proposed file/system write actions."
-    root.bypassSandboxForNextQuery = true
+    // Bypass is passed explicitly as sendQuery's last arg — no shared flag,
+    // so an approve-click while busy can never latch onto a later prompt.
     root.sendQuery(queryToSend, "", false, false, true)
   }
 
@@ -260,7 +260,9 @@ Panel {
 
     if (!q.trim() && !fpath && !scr && !sit) return
 
-    var cmd = ["python3", root.scriptPath(), "ask", q]
+    // Flags first, then "--", then the raw query — query text can never be
+    // parsed as backend options (option injection).
+    var cmd = ["python3", root.scriptPath(), "ask"]
     if (fpath) {
       if (root.attachedFileIsImage) {
         cmd.push("--image")
@@ -275,10 +277,11 @@ Panel {
     if (sit) {
       cmd.push("--situation")
     }
-    if (bypassSandbox || root.bypassSandboxForNextQuery) {
+    if (bypassSandbox) {
       cmd.push("--bypass-sandbox")
-      root.bypassSandboxForNextQuery = false
     }
+    cmd.push("--")
+    cmd.push(q)
 
     askProc.command = cmd
     askProc.running = true
@@ -350,7 +353,7 @@ Panel {
 
   function copyText(text) {
     if (!text) return
-    copyProc.command = ["python3", root.scriptPath(), "copy", text]
+    copyProc.command = ["python3", root.scriptPath(), "copy", "--", text]
     copyProc.running = true
     if (root.currentView === "chat") {
       Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
@@ -364,15 +367,19 @@ Panel {
 
   function addMemoryNow(text, isUser) {
     if (!text || !text.trim()) return
-    var cmd = ["python3", root.scriptPath(), "add-memory", text]
+    var cmd = ["python3", root.scriptPath(), "add-memory"]
     if (isUser) cmd.push("--user")
+    cmd.push("--")
+    cmd.push(text)
     addMemProc.command = cmd
     addMemProc.running = true
   }
 
   function deleteMemoryNow(memId, isUser) {
-    var cmd = ["python3", root.scriptPath(), "delete-memory", String(memId)]
+    var cmd = ["python3", root.scriptPath(), "delete-memory"]
     if (isUser) cmd.push("--user")
+    cmd.push("--")
+    cmd.push(String(memId))
     delMemProc.command = cmd
     delMemProc.running = true
   }
@@ -432,21 +439,70 @@ Panel {
       })
     }
   }
-  // Periodic status poll
-  Timer {
-    interval: {
-      if (root.opened) return 1000
-      if (root.rawStatus.state === "working") return 1200
-      return root.refreshIntervalSec * 1000
+  readonly property string bottyDataDir: (Quickshell.env("HOME") || "/home/alberto") + "/.local/share/botty"
+
+  FileView {
+    id: statusFileView
+    path: root.bottyDataDir + "/status.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var data = JSON.parse(text() || "{}")
+        if (data && data.ok) {
+          root.rawStatus = data
+          if (data.sandbox_mode !== undefined) {
+            root.sandboxMode = data.sandbox_mode
+          }
+          if (data.notifications) {
+            root.notificationConfig = data.notifications
+          }
+        }
+      } catch (e) {}
     }
-    running: true
+  }
+
+  FileView {
+    id: historyFileView
+    path: root.bottyDataDir + "/history.json"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var data = JSON.parse(text() || "{}")
+        if (data) {
+          var msgs = data.messages || []
+          var newCount = msgs.length
+          var shouldScroll = (newCount > root.lastMessageCount)
+          root.lastMessageCount = newCount
+          root.historyData = data
+          if (root.opened) {
+            root.unreadCount = 0
+            root.lastReadMessageCount = newCount
+          } else {
+            if (newCount > root.lastReadMessageCount) {
+              root.unreadCount = newCount - root.lastReadMessageCount
+            }
+          }
+          if (shouldScroll) {
+            root.scrollChatToEnd()
+          }
+        }
+      } catch (e) {}
+    }
+  }
+
+  // Periodic status poll: runs ONLY while the agent is actively working
+  // to avoid waking the CPU continuously when idle.
+  Timer {
+    interval: 1500
+    running: (root.rawStatus && root.rawStatus.state === "working") || askProc.running
     repeat: true
-    triggeredOnStart: true
+    triggeredOnStart: false
     onTriggered: {
       root.fetchStatus()
-      if (root.opened && root.currentView === "chat") {
-        root.fetchHistory()
-      }
     }
   }
 
@@ -1116,10 +1172,16 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: Style.space(560)
-    contentHeight: Style.space(680)
+    readonly property real baseContentHeight: Style.space(680)
+    readonly property real extraInputHeight: (root.currentView === "chat" && typeof promptInputContainer !== "undefined" && promptInputContainer)
+      ? Math.max(0, promptInputContainer.implicitHeight - Style.space(34))
+      : 0
+    contentHeight: Math.min(baseContentHeight + extraInputHeight, popup.availableCardHeight > 0 ? popup.availableCardHeight : Style.space(850))
 
     onOpenChanged: {
       if (open) {
+        statusFileView.reload()
+        historyFileView.reload()
         root.fetchStatus()
         root.fetchHistory()
         root.fetchModels()
@@ -1672,10 +1734,69 @@ Panel {
                           selectByMouse: true
                           mouseSelectionMode: TextEdit.SelectCharacters
                           cursorVisible: false
-                          activeFocusOnPress: false
+                          activeFocusOnPress: true
                           selectionColor: root.alpha(root.accent, 0.4)
                           selectedTextColor: root.foreground
-                          onLinkActivated: function(link) { Qt.openUrlExternally(link) }
+                          onLinkActivated: function(link) {
+                            // Only http(s) goes to the OS opener; any other
+                            // scheme (file://, custom handlers) is copied for
+                            // inspection instead of executed.
+                            if (/^https?:\/\//i.test(link)) {
+                              Qt.openUrlExternally(link)
+                            } else {
+                              root.copyText(link)
+                            }
+                          }
+
+                          Keys.onPressed: function(event) {
+                            if (event.matches(StandardKey.Copy) || ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C)) {
+                              if (selectedText.length > 0) {
+                                copy()
+                                root.copyText(selectedText)
+                                event.accepted = true
+                                return
+                              }
+                            }
+                            if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                              if (typeof moveCursorSelection === "function") moveCursorSelection(0)
+                              else select(0, cursorPosition)
+                              event.accepted = true
+                              return
+                            }
+                            if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                              if (typeof moveCursorSelection === "function") moveCursorSelection(text.length)
+                              else select(cursorPosition, text.length)
+                              event.accepted = true
+                              return
+                            }
+                            if (event.key === Qt.Key_Escape) {
+                              root.close()
+                              event.accepted = true
+                              return
+                            }
+                            if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
+                              promptInput.forceActiveFocus()
+                              promptInput.text = promptInput.text + event.text
+                              event.accepted = true
+                              return
+                            }
+                          }
+
+                          MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.RightButton
+                            cursorShape: Qt.IBeamCursor
+                            onClicked: function(mouse) {
+                              if (mouse.button === Qt.RightButton) {
+                                if (textBlock.selectedText && textBlock.selectedText.length > 0) {
+                                  textBlock.copy()
+                                  root.copyText(textBlock.selectedText)
+                                } else {
+                                  root.copyText(textBlock.text)
+                                }
+                              }
+                            }
+                          }
                         }
 
                         BorderSurface {
@@ -1715,6 +1836,7 @@ Panel {
                             }
 
                             TextEdit {
+                              id: codeBlock
                               text: modelData.code || ""
                               textFormat: TextEdit.PlainText
                               font.family: "JetBrainsMono Nerd Font"
@@ -1726,9 +1848,59 @@ Panel {
                               selectByMouse: true
                               mouseSelectionMode: TextEdit.SelectCharacters
                               cursorVisible: false
-                              activeFocusOnPress: false
+                              activeFocusOnPress: true
                               selectionColor: root.alpha(root.accent, 0.4)
                               selectedTextColor: root.foreground
+
+                              Keys.onPressed: function(event) {
+                                if (event.matches(StandardKey.Copy) || ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C)) {
+                                  if (selectedText.length > 0) {
+                                    copy()
+                                    root.copyText(selectedText)
+                                    event.accepted = true
+                                    return
+                                  }
+                                }
+                                if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                                  if (typeof moveCursorSelection === "function") moveCursorSelection(0)
+                                  else select(0, cursorPosition)
+                                  event.accepted = true
+                                  return
+                                }
+                                if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                                  if (typeof moveCursorSelection === "function") moveCursorSelection(text.length)
+                                  else select(cursorPosition, text.length)
+                                  event.accepted = true
+                                  return
+                                }
+                                if (event.key === Qt.Key_Escape) {
+                                  root.close()
+                                  event.accepted = true
+                                  return
+                                }
+                                if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
+                                  promptInput.forceActiveFocus()
+                                  promptInput.text = promptInput.text + event.text
+                                  event.accepted = true
+                                  return
+                                }
+                              }
+
+                              MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.RightButton
+                                cursorShape: Qt.IBeamCursor
+                                onClicked: function(mouse) {
+                                  if (mouse.button === Qt.RightButton) {
+                                    if (codeBlock.selectedText && codeBlock.selectedText.length > 0) {
+                                      codeBlock.copy()
+                                      root.copyText(codeBlock.selectedText)
+                                    } else {
+                                      root.copyText(codeBlock.text)
+                                    }
+                                  }
+                                }
+                              }
                             }
                           }
                         }
@@ -1737,6 +1909,7 @@ Panel {
 
                     // Fallback Text if blocks is empty or failed to render (Selectable with Mouse)
                     TextEdit {
+                      id: fallbackTextBlock
                       visible: blocks.length === 0
                       text: (modelData.content && modelData.content.trim().length > 0) ? modelData.content : (isUser ? "(empty message)" : "✓ Done.")
                       textFormat: TextEdit.PlainText
@@ -1750,9 +1923,59 @@ Panel {
                       selectByMouse: true
                       mouseSelectionMode: TextEdit.SelectCharacters
                       cursorVisible: false
-                      activeFocusOnPress: false
+                      activeFocusOnPress: true
                       selectionColor: root.alpha(root.accent, 0.4)
                       selectedTextColor: root.foreground
+
+                      Keys.onPressed: function(event) {
+                        if (event.matches(StandardKey.Copy) || ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C)) {
+                          if (selectedText.length > 0) {
+                            copy()
+                            root.copyText(selectedText)
+                            event.accepted = true
+                            return
+                          }
+                        }
+                        if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                          if (typeof moveCursorSelection === "function") moveCursorSelection(0)
+                          else select(0, cursorPosition)
+                          event.accepted = true
+                          return
+                        }
+                        if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                          if (typeof moveCursorSelection === "function") moveCursorSelection(text.length)
+                          else select(cursorPosition, text.length)
+                          event.accepted = true
+                          return
+                        }
+                        if (event.key === Qt.Key_Escape) {
+                          root.close()
+                          event.accepted = true
+                          return
+                        }
+                        if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
+                          promptInput.forceActiveFocus()
+                          promptInput.text = promptInput.text + event.text
+                          event.accepted = true
+                          return
+                        }
+                      }
+
+                      MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.RightButton
+                        cursorShape: Qt.IBeamCursor
+                        onClicked: function(mouse) {
+                          if (mouse.button === Qt.RightButton) {
+                            if (fallbackTextBlock.selectedText && fallbackTextBlock.selectedText.length > 0) {
+                              fallbackTextBlock.copy()
+                              root.copyText(fallbackTextBlock.selectedText)
+                            } else {
+                              root.copyText(fallbackTextBlock.text)
+                            }
+                          }
+                        }
+                      }
                     }
 
                     // Action Receipts
@@ -1796,7 +2019,8 @@ Panel {
                     // Sandbox Permission Request Card
                     BorderSurface {
                       id: permCard
-                      visible: !isUser && Model.detectPermissionRequest(modelData.content).isPermission
+                      visible: !isUser && (modelData.sandbox_request === true
+                        || (modelData.sandbox_request == null && Model.detectPermissionRequest(modelData.content).isPermission))
                       width: parent.width
                       Layout.fillWidth: true
                       implicitHeight: permCol.implicitHeight + Style.space(16)
@@ -1983,9 +2207,11 @@ Panel {
           BorderSurface {
             id: pendingPermissionBanner
             visible: {
-              if (root.isProcessing || !root.historyMessages || root.historyMessages.length === 0) return false
-              var lastMsg = root.historyMessages[root.historyMessages.length - 1]
-              return lastMsg && lastMsg.role === "assistant" && Model.detectPermissionRequest(lastMsg.content).isPermission
+              var msgs = (root.historyData && root.historyData.messages) || []
+              if (root.isProcessing || msgs.length === 0) return false
+              var lastMsg = msgs[msgs.length - 1]
+              return lastMsg && lastMsg.role === "assistant" && (lastMsg.sandbox_request === true
+                || (lastMsg.sandbox_request == null && Model.detectPermissionRequest(lastMsg.content).isPermission))
             }
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)
@@ -2178,8 +2404,9 @@ Panel {
                 enabled: !root.isProcessing
                 iconText: "󰐕"
                 tooltipText: "Attach file, document, code, or image (Right-click: paste clipboard image)"
-                implicitHeight: promptInput.implicitHeight
-                implicitWidth: promptInput.implicitHeight
+                implicitHeight: Style.space(32)
+                implicitWidth: Style.space(32)
+                Layout.alignment: Qt.AlignBottom
                 fontSize: Style.space(14)
                 onClicked: if (!pickFileProc.running) pickFileProc.running = true
                 onRightClicked: root.attachClipboardImage()
@@ -2192,8 +2419,9 @@ Panel {
                 iconText: "󰘦"
                 tooltipText: root.situationContextEnabled ? "Situation Context Active (Click to remove)" : "Desktop Situation Context (Active window, directory, git repo, open tools) [Super + Shift + A]"
                 selected: root.situationContextEnabled
-                implicitHeight: promptInput.implicitHeight
-                implicitWidth: promptInput.implicitHeight
+                implicitHeight: Style.space(32)
+                implicitWidth: Style.space(32)
+                Layout.alignment: Qt.AlignBottom
                 fontSize: Style.space(14)
                 onClicked: {
                   if (!root.situationContextEnabled) {
@@ -2212,8 +2440,9 @@ Panel {
                 iconText: "󰄀"
                 tooltipText: root.screenContextEnabled ? "Visual Screenshot Active (Click to remove)" : "Capture Visual Screenshot for Image Analysis (Right-click: paste clipboard image)"
                 selected: root.screenContextEnabled
-                implicitHeight: promptInput.implicitHeight
-                implicitWidth: promptInput.implicitHeight
+                implicitHeight: Style.space(32)
+                implicitWidth: Style.space(32)
+                Layout.alignment: Qt.AlignBottom
                 fontSize: Style.space(14)
                 onClicked: {
                   if (!root.screenContextEnabled) {
@@ -2234,41 +2463,159 @@ Panel {
                 iconText: root.sandboxMode ? "󰒃" : "󰒄"
                 tooltipText: root.sandboxMode ? "Sandboxed Write Protection: ON (Protected from direct writes — click to unlock)" : "Sandboxed Write Protection: OFF (Unrestricted workstation writes — click to lock)"
                 selected: root.sandboxMode
-                implicitHeight: promptInput.implicitHeight
-                implicitWidth: promptInput.implicitHeight
+                implicitHeight: Style.space(32)
+                implicitWidth: Style.space(32)
+                Layout.alignment: Qt.AlignBottom
                 fontSize: Style.space(14)
                 onClicked: root.toggleSandboxMode()
               }
 
-              // 4. Text Input
-              TextField {
-                id: promptInput
-                focus: true
+              // 4. Multiline Expanding Text Input
+              BorderSurface {
+                id: promptInputContainer
                 Layout.fillWidth: true
-                placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic to transcribe)" : (root.isProcessing ? "Botty is thinking… (you can type your next prompt)" : "Ask Botty or command a desktop action… (Enter to send)")
-                font.pixelSize: Style.font.body
-                onAccepted: {
-                  if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled)) {
-                    root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled, root.situationContextEnabled)
-                  }
-                  promptInput.forceActiveFocus()
-                }
+                Layout.alignment: Qt.AlignBottom
+                radius: Style.cornerRadius
+                color: Style.controlFill(promptInput.activeFocus, promptInput.hovered, root.foreground, root.accent)
+                borderSpec: Border.controlSpec(promptInput.activeFocus ? "focus" : (promptInput.hovered ? "hover-cursor" : "normal"), root.foreground, root.accent)
+                implicitHeight: Math.min(Math.max(promptInputFlickable.contentHeight + Style.space(6), Style.space(34)), Style.space(160))
 
-                Keys.onUpPressed: function(event) {
-                  root.scrollChat(-1)
-                  event.accepted = true
-                }
-                Keys.onDownPressed: function(event) {
-                  root.scrollChat(1)
-                  event.accepted = true
-                }
-                Keys.onPressed: function(event) {
-                  if (event.key === Qt.Key_PageUp) {
-                    root.scrollChat(-4)
-                    event.accepted = true
-                  } else if (event.key === Qt.Key_PageDown) {
-                    root.scrollChat(4)
-                    event.accepted = true
+                Flickable {
+                  id: promptInputFlickable
+                  anchors.fill: parent
+                  anchors.topMargin: Style.space(2)
+                  anchors.bottomMargin: Style.space(2)
+                  anchors.leftMargin: Style.space(4)
+                  anchors.rightMargin: Style.space(4)
+                  clip: true
+                  contentWidth: width
+                  contentHeight: promptInput.implicitHeight
+                  boundsBehavior: Flickable.StopAtBounds
+
+                  ScrollBar.vertical: ScrollBar {
+                    policy: promptInput.lineCount > 4 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                    active: true
+                  }
+
+                  TextArea.flickable: TextArea {
+                    id: promptInput
+                    focus: true
+                    width: promptInputFlickable.width
+                    wrapMode: TextEdit.Wrap
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    color: root.foreground
+                    selectionColor: Style.selectionFillFor(root.foreground, root.accent)
+                    selectedTextColor: root.foreground
+                    placeholderTextColor: Qt.darker(root.foreground, 1.6)
+                    placeholderText: root.isRecordingVoice ? "🎙️ Listening… speak now (click mic to transcribe)" : (root.isProcessing ? "Botty is thinking… (you can type your next prompt)" : "Ask Botty or command a desktop action… (Enter to send, Shift+Enter for newline)")
+                    selectByMouse: true
+                    mouseSelectionMode: TextEdit.SelectCharacters
+                    leftPadding: Style.spacing.controlPaddingX
+                    rightPadding: Style.spacing.controlPaddingX
+                    topPadding: Style.spacing.inputPaddingY
+                    bottomPadding: Style.spacing.inputPaddingY
+                    background: null
+
+                    Keys.onReturnPressed: function(event) {
+                      if (event.modifiers & Qt.ShiftModifier) {
+                        event.accepted = false
+                      } else {
+                        if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled)) {
+                          root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled, root.situationContextEnabled)
+                        }
+                        event.accepted = true
+                      }
+                    }
+
+                    Keys.onEnterPressed: function(event) {
+                      if (event.modifiers & Qt.ShiftModifier) {
+                        event.accepted = false
+                      } else {
+                        if (!root.isProcessing && (text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled)) {
+                          root.sendQuery(text, root.attachedFilePath, root.screenContextEnabled, root.situationContextEnabled)
+                        }
+                        event.accepted = true
+                      }
+                    }
+
+                    Keys.onPressed: function(event) {
+                      // SUPER + SHIFT + UP: select all previous text (cursor to start)
+                      if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                        if (typeof moveCursorSelection === "function") {
+                          moveCursorSelection(0)
+                        } else {
+                          select(0, cursorPosition)
+                        }
+                        event.accepted = true
+                        return
+                      }
+
+                      // SUPER + SHIFT + DOWN: select till end of text (cursor to end)
+                      if ((event.modifiers & Qt.MetaModifier) && (event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                        if (typeof moveCursorSelection === "function") {
+                          moveCursorSelection(text.length)
+                        } else {
+                          select(cursorPosition, text.length)
+                        }
+                        event.accepted = true
+                        return
+                      }
+
+                      // SUPER + UP (without shift): jump cursor to start
+                      if ((event.modifiers & Qt.MetaModifier) && !(event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Up) {
+                        cursorPosition = 0
+                        deselect()
+                        event.accepted = true
+                        return
+                      }
+
+                      // SUPER + DOWN (without shift): jump cursor to end
+                      if ((event.modifiers & Qt.MetaModifier) && !(event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Down) {
+                        cursorPosition = text.length
+                        deselect()
+                        event.accepted = true
+                        return
+                      }
+
+                      // PageUp / PageDown scrolls chat
+                      if (event.key === Qt.Key_PageUp) {
+                        root.scrollChat(-4)
+                        event.accepted = true
+                        return
+                      }
+                      if (event.key === Qt.Key_PageDown) {
+                        root.scrollChat(4)
+                        event.accepted = true
+                        return
+                      }
+
+                      // Ctrl+Up / Ctrl+Down scrolls chat from input
+                      if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Up) {
+                        root.scrollChat(-1)
+                        event.accepted = true
+                        return
+                      }
+                      if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_Down) {
+                        root.scrollChat(1)
+                        event.accepted = true
+                        return
+                      }
+
+                      // Plain Up/Down when input is empty scrolls chat
+                      if (!event.modifiers && promptInput.text.length === 0) {
+                        if (event.key === Qt.Key_Up) {
+                          root.scrollChat(-1)
+                          event.accepted = true
+                          return
+                        }
+                        if (event.key === Qt.Key_Down) {
+                          root.scrollChat(1)
+                          event.accepted = true
+                          return
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -2281,8 +2628,9 @@ Panel {
                 tooltipText: root.isRecordingVoice ? "Stop recording & transcribe" : "Voice Dictation (Click to speak)"
                 selected: root.isRecordingVoice
                 opacity: root.isRecordingVoice ? root.voicePulseOpacity : 1.0
-                implicitHeight: promptInput.implicitHeight
-                implicitWidth: promptInput.implicitHeight
+                implicitHeight: Style.space(32)
+                implicitWidth: Style.space(32)
+                Layout.alignment: Qt.AlignBottom
                 onClicked: root.toggleVoiceDictation()
               }
 
@@ -2292,7 +2640,8 @@ Panel {
                 text: "Send"
                 enabled: !root.isProcessing
                 selected: true
-                implicitHeight: promptInput.implicitHeight
+                implicitHeight: Style.space(32)
+                Layout.alignment: Qt.AlignBottom
                 onClicked: {
                   if (!root.isProcessing && (promptInput.text.trim().length > 0 || root.attachedFilePath.length > 0 || root.screenContextEnabled || root.situationContextEnabled)) {
                     root.sendQuery(promptInput.text, root.attachedFilePath, root.screenContextEnabled, root.situationContextEnabled)
@@ -2362,7 +2711,7 @@ Panel {
                 spacing: Style.space(1)
 
                 Text {
-                  text: "Local AES-256 Memory Encryption Active"
+                  text: "Memory Vault (Obfuscation-Grade Backup)"
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -2370,7 +2719,7 @@ Panel {
                 }
 
                 Text {
-                  text: "Hardware-bound PBKDF2 vault • POSIX 0600 permissions (Owner-only access on this machine)"
+                  text: "AES-256 backup copy • Real protection: POSIX 0600/0700 owner-only permissions • Sources remain plaintext on disk"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
                   color: root.dim
@@ -2900,7 +3249,7 @@ Panel {
                 }
 
                 Text {
-                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Write Isolation: Direct writes (file modifications, deletions, package installations, config changes) are blocked unless you approve them in chat or unlock Sandbox Mode.\n• Interactive In-Chat Approvals: When Botty wants to apply a write, it shows what files will change and prompts for 1-click bypass approval."
+                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Write Guidance (best-effort): Botty is instructed to halt and ask before writes and shows an approval card. This is prompt-level guidance, not OS-level enforcement — treat it as a convenience, not a security boundary.\n• Interactive In-Chat Approvals: When Botty wants to apply a write, it shows what files will change and prompts for 1-click bypass approval."
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
                   color: root.foreground

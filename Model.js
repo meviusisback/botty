@@ -66,7 +66,18 @@ function stripReasoning(text) {
 }
 
 /**
- * Sanitizes unescaped XML/HTML tags in text so Qt Quick Markdown parser doesn't drop/swallow text.
+ * Sanitizes message text for safe rendering by Qt Quick's MarkdownText.
+ *
+ * Security policy (marketplace review F5):
+ * - NO raw HTML passes through: every `<...>` tag (including `<a>` and `<img>`,
+ *   which the old allowlist kept) is escaped to literal text. Raw `<img>` would
+ *   make MarkdownText fetch remote images on display (tracking/exfiltration
+ *   beacon); raw `<a href=...>` could carry javascript:/file: handlers.
+ * - Markdown image syntax is stripped: inline `![alt](url)` and reference-style
+ *   `![alt][ref]` both load remote images on render and are removed. Ordinary
+ *   links `[text](url)` stay — they fire only on explicit user click, and
+ *   Panel.qml's onLinkActivated allows http(s) schemes only.
+ * Escaping keeps stray angle-bracket text visible instead of dropping it.
  */
 function sanitizeTextForMarkdown(text) {
   if (!text) return ""
@@ -79,17 +90,16 @@ function sanitizeTextForMarkdown(text) {
     return "__INLINE_CODE_" + (inlineCodes.length - 1) + "__"
   })
 
-  // Escape XML/HTML-like tags that are NOT standard markdown/HTML tags or URLs
-  var allowedTags = /^(?:a|b|i|em|strong|code|pre|p|br|hr|ul|ol|li|blockquote|h[1-6]|img)(?:\s+[^>]*)?$/i
+  // Strip markdown images: inline ![alt](url) and reference ![alt][ref].
+  // (No /s flag needed: [^)] and [^\]] already match newlines.)
+  t = t.replace(/!\[([^\]]*)\]\(([^)]*)\)/g, "[$1 — image removed]")
+  t = t.replace(/!\[([^\]]*)\]\[([^\]]*)\]/g, "[$1 — image removed]")
+  // Reference definitions `[id]: <url>` that remain are inert: with every
+  // ![alt][id] form stripped above, no image node can reference them. They stay
+  // so legitimate reference-style text links `[text][id]` keep working.
+
+  // Escape ALL XML/HTML-like tags to literal text. No tag is allowed through.
   t = t.replace(/<([^>\n]+)>/g, function(match, tagContent) {
-    var trimmed = tagContent.trim()
-    if (/^https?:\/\/|^mailto:/i.test(trimmed)) {
-      return match
-    }
-    var tagName = trimmed.replace(/^\//, "").split(/\s+/)[0]
-    if (allowedTags.test(tagName)) {
-      return match
-    }
     return "&lt;" + tagContent + "&gt;"
   })
 

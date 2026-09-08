@@ -159,12 +159,46 @@ notifications and summons rely on Omarchy's shell helpers (`omarchy-shell`,
 
 ## 🔐 Security Model
 
-**Sandbox Mode is best-effort prompt-level guidance, not a security boundary.**
-The underlying agent runs with tool-approval prompts bypassed (`--yolo`), so it
-can technically execute anything its engine allows. In Sandbox Mode Botty is
-*instructed* to halt before writes and show an approval card; in-chat approvals
-are advisory. Do not rely on this as containment against a compromised or
-prompt-injected agent.
+**Sandbox Mode (Hermes engine) is technically enforced, with one explicit
+human-approved execution window.** Sandboxed runs launch `hermes` WITHOUT
+`--yolo`, so Hermes's own approval gate applies: single-query (`-Q`) runs
+default to *deny* for dangerous commands (`approvals.single_query_mode`), which
+technically blocks writes and state-changing commands regardless of what
+attached files, screens, or window text say. Botty surfaces a warning if your
+`botty` profile config weakens this (`single_query_mode: approve`,
+`approvals.mode: off`, or a broad allowlist) — enforcement depends on that
+config.
+
+When a task needs writes, the sandboxed agent proposes concrete actions and
+Botty shows an approval card. Clicking **Approve** runs ONE follow-up that may
+carry `--yolo`, and its prompt is the human-approved proposal itself — the
+original query and any attachment/screen content are not re-inlined into that
+privileged run. This window is a single explicit trust decision: the model may
+still see earlier turns of the conversation via `--continue`, so treat it as
+"one approved execution", not as a boundary against a malicious file.
+
+**Learning is proposal-gated.** Compaction never writes model-derived memories
+or skills directly: output is schema-validated and staged as proposals that you
+approve or reject one by one in the Memories tab. Nothing becomes a persistent
+instruction without your review.
+
+**No sensitive content in process arguments.** Prompts, attachments, and
+conversation history are passed to engines via stdin or owner-only files under
+`~/.local/share/botty` (0600/0700) — never in `argv`, where other processes
+could read them. Notification payloads are fixed copy, not answer text.
+
+**Agent output is bounded.** Subprocess output is streamed with hard caps, runs
+are killed by process group on timeout (no orphaned children), log reads tail
+from the end of the file, and database reads are limited. Rendered agent text
+is sanitized: raw HTML and markdown images are stripped, so a crafted answer
+cannot trigger remote-image requests; links require an explicit click and are
+http(s)-only.
+
+**Non-Hermes engines (omp/claude/codex) and other caveats:** these engines run
+with their own permission models; Botty's sandbox directive is advisory there,
+not engine-enforced. Process-group kills do not reach grandchildren that
+detach into their own session. Log files grow on disk; only the read side is
+capped.
 
 **Memory Vault is an obfuscation-grade backup, not confidentiality.** The vault
 key is derived from publicly readable machine identifiers, and the vault is a

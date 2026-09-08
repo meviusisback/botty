@@ -60,6 +60,13 @@ Panel {
 
   property var memoriesData: []
   property var skillsData: []
+  // Staged learning proposals (model-derived memories/skills from compaction)
+  // awaiting explicit per-entry user review (security: never auto-persist
+  // model output as instructions).
+  property var proposalsData: []
+  property int pendingProposals: 0
+  // Hermes engine approval-gate state ("enforced" | "weakened: ..." | "off").
+  property string hermesEnforcement: "enforced"
   property var vaultSecurity: ({ encryption_enabled: true, cipher: "AES-256-CBC (PBKDF2)" })
 
   property string currentView: "chat" // "chat" | "memories" | "settings" | "logs"
@@ -175,6 +182,21 @@ Panel {
     if (!vaultProc.running) {
       vaultProc.running = true
     }
+    fetchProposals()
+  }
+
+  function fetchProposals() {
+    if (proposalsProc.running) return
+    proposalsProc.command = ["python3", root.scriptPath(), "proposals"]
+    proposalsProc.running = true
+  }
+
+  function reviewProposal(propId, approve) {
+    var cmd = ["python3", root.scriptPath(), approve ? "proposal-apply" : "proposal-reject"]
+    cmd.push("--")
+    cmd.push(String(propId))
+    reviewPropProc.command = cmd
+    reviewPropProc.running = true
   }
 
   function fetchSkills() {
@@ -540,6 +562,12 @@ Panel {
             }
             if (data.notifications) {
               root.notificationConfig = data.notifications
+            }
+            if (data.pending_proposals !== undefined) {
+              root.pendingProposals = data.pending_proposals
+            }
+            if (data.hermes_enforcement !== undefined) {
+              root.hermesEnforcement = data.hermes_enforcement
             }
           }
         } catch (e) {}
@@ -911,6 +939,38 @@ Panel {
 
   Process {
     id: delMemProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.fetchStatus()
+        root.fetchMemories()
+      }
+    }
+  }
+
+  Process {
+    id: proposalsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            var pending = []
+            var all = data.proposals || []
+            for (var i = 0; i < all.length; i++) {
+              if (all[i].status === "pending") pending.push(all[i])
+            }
+            root.proposalsData = all
+            root.pendingProposals = pending.length
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Process {
+    id: reviewPropProc
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1336,10 +1396,20 @@ Panel {
 
           Button {
             iconText: "󰋚"
-            tooltipText: "Memories & Skills"
+            tooltipText: (root.pendingProposals > 0 ? ("Memories & Skills — " + root.pendingProposals + " proposal(s) awaiting review") : "Memories & Skills")
             selected: root.currentView === "memories"
             implicitWidth: Style.space(32)
             implicitHeight: Style.space(32)
+            // Badge dot when proposals await review
+            Rectangle {
+              visible: root.pendingProposals > 0
+              anchors.top: parent.top
+              anchors.right: parent.right
+              width: Style.space(9)
+              height: Style.space(9)
+              radius: width / 2
+              color: "#F59E0B"
+            }
             onClicked: {
               root.currentView = "memories"
               root.fetchMemories()
@@ -2054,7 +2124,7 @@ Panel {
                         }
 
                         Text {
-                          text: "The agent halted write operations because Sandbox Mode is active. Approve to bypass sandbox and execute the proposed changes."
+                          text: "Writes are technically blocked while Sandbox Mode is active. Approving executes ONLY the proposed changes listed above — the agent may not take new actions."
                           textFormat: Text.PlainText
                           font.family: root.fontFamily
                           font.pixelSize: Style.space(10)
@@ -2461,7 +2531,11 @@ Panel {
                 id: sandboxBtn
                 enabled: !root.isProcessing
                 iconText: root.sandboxMode ? "󰒃" : "󰒄"
-                tooltipText: root.sandboxMode ? "Sandboxed Write Protection: ON (Protected from direct writes — click to unlock)" : "Sandboxed Write Protection: OFF (Unrestricted workstation writes — click to lock)"
+                tooltipText: root.sandboxMode
+                  ? (root.hermesEnforcement === "enforced"
+                      ? "Sandbox: ACTIVE — writes technically denied until you approve (Hermes approval gate)"
+                      : "Sandbox: ACTIVE but NOT enforced — your Hermes profile config weakens it (" + root.hermesEnforcement + ")")
+                  : "Sandbox: OFF (unrestricted writes — click to enable)"
                 selected: root.sandboxMode
                 implicitHeight: Style.space(32)
                 implicitWidth: Style.space(32)
@@ -2683,6 +2757,126 @@ Panel {
               text: "Compact Memory"
               implicitHeight: Style.space(32)
               onClicked: root.compactMemoryNow()
+            }
+          }
+
+          // ⚠ Untrusted model-derived learning proposals — explicit review required.
+          // Compaction stages distilled memories/skills here; nothing is written to
+          // the live memory/skill stores until the user approves each entry.
+          Item {
+            visible: root.pendingProposals > 0
+            Layout.fillWidth: true
+            Layout.preferredHeight: proposalsHeader.implicitHeight + Style.space(8)
+            BorderSurface {
+              id: proposalsHeader
+              anchors.fill: parent
+              radius: Style.space(6)
+              color: root.alpha("#F59E0B", 0.12)
+              borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.4), "#F59E0B")
+              RowLayout {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(6)
+                spacing: Style.space(8)
+                Text { text: "⚠"; font.pixelSize: Style.space(13); color: "#F59E0B" }
+                Text {
+                  text: "Learning Proposals Awaiting Review (" + root.pendingProposals + ")"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  color: "#F59E0B"
+                  Layout.fillWidth: true
+                }
+                Text {
+                  text: "AI-generated — verify before approving"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(9)
+                  color: root.dim
+                }
+              }
+            }
+          }
+
+          ScrollView {
+            visible: root.pendingProposals > 0
+            Layout.fillWidth: true
+            implicitHeight: Math.min(root.pendingProposals * Style.space(64) + Style.space(8), Style.space(220))
+            clip: true
+            ListView {
+              id: proposalsList
+              model: root.proposalsData
+              spacing: Style.space(4)
+              delegate: Item {
+                visible: modelData.status === "pending"
+                width: proposalsList.width
+                implicitHeight: propCard.implicitHeight + Style.space(2)
+                BorderSurface {
+                  id: propCard
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  implicitHeight: propCol.implicitHeight + Style.space(10)
+                  radius: Style.space(6)
+                  color: root.alpha(root.foreground, 0.05)
+                  borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.35), "#F59E0B")
+                  ColumnLayout {
+                    id: propCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(6)
+                    spacing: Style.space(4)
+                    Text {
+                      text: {
+                        if (modelData.kind === "skill") return "󰘦 Proposed Skill: " + (modelData.name || "")
+                        return (modelData.is_user_fact ? "󰋚 Proposed Memory (user): " : "🐼 Proposed Memory: ")
+                      }
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.space(10)
+                      font.bold: true
+                      color: "#F59E0B"
+                      Layout.fillWidth: true
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      // Proposals are UNTRUSTED model output: plain text only, never
+                      // MarkdownText/RichText (display-time injection vector).
+                      text: modelData.kind === "skill"
+                            ? (modelData.description || "")
+                            : (modelData.text || "")
+                      textFormat: Text.PlainText
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.space(10)
+                      color: root.foreground
+                      wrapMode: Text.Wrap
+                      Layout.fillWidth: true
+                      maximumLineCount: 2
+                      elide: Text.ElideRight
+                    }
+                    RowLayout {
+                      Layout.fillWidth: true
+                      spacing: Style.space(6)
+                      Item { Layout.fillWidth: true }
+                      Button {
+                        iconText: "󰅖"
+                        text: "Reject"
+                        implicitHeight: Style.space(24)
+                        fontSize: Style.space(9)
+                        onClicked: root.reviewProposal(modelData.id, false)
+                      }
+                      Button {
+                        iconText: "󰄬"
+                        text: "Approve"
+                        selected: true
+                        implicitHeight: Style.space(24)
+                        fontSize: Style.space(9)
+                        onClicked: root.reviewProposal(modelData.id, true)
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
 
@@ -3233,10 +3427,14 @@ Panel {
                     }
 
                     Text {
-                      text: root.sandboxMode ? "Write actions require confirmation. Full read permissions active." : "Agent can directly modify files & execute workstation commands."
+                      text: root.sandboxMode
+                        ? (root.hermesEnforcement === "enforced"
+                            ? "Hermes engine: writes technically denied until you approve. Full read access active."
+                            : "WARNING: sandbox NOT enforced — your Hermes profile config weakens it (" + root.hermesEnforcement + ")")
+                        : "Agent can directly modify files & execute workstation commands."
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
-                      color: root.dim
+                      color: root.sandboxMode && root.hermesEnforcement !== "enforced" ? "#F59E0B" : root.dim
                       wrapMode: Text.Wrap
                       Layout.fillWidth: true
                     }
@@ -3263,7 +3461,7 @@ Panel {
                 }
 
                 Text {
-                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Write Guidance (best-effort): Botty is instructed to halt and ask before writes and shows an approval card. This is prompt-level guidance, not OS-level enforcement — treat it as a convenience, not a security boundary.\n• Interactive In-Chat Approvals: When Botty wants to apply a write, it shows what files will change and prompts for 1-click bypass approval."
+                  text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Technically Enforced Sandbox (Hermes engine): Sandboxed runs launch Hermes WITHOUT --yolo, so its single-query approval gate (default: deny for dangerous commands) technically blocks writes and state changes regardless of prompt content. Botty warns you if your Hermes profile config weakens this.\n• Approval Card: When a task needs writes, the agent proposes concrete actions and Botty shows an approval card. Approving executes ONE follow-up whose prompt is the human-approved proposal itself — the original query and attachment/screen content are not re-inlined into that privileged run.\n• Non-Hermes engines (omp/claude/codex) run under their own permission models — the sandbox directive is advisory there, not engine-enforced."
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
                   color: root.foreground

@@ -65,6 +65,7 @@ Panel {
   // model output as instructions).
   property var proposalsData: []
   property int pendingProposals: 0
+  property int approvedProposals: 0
   // Hermes engine approval-gate state ("enforced" | "weakened: ..." | "off").
   property string hermesEnforcement: "enforced"
   property var vaultSecurity: ({ encryption_enabled: true, cipher: "AES-256-CBC (PBKDF2)" })
@@ -566,6 +567,9 @@ Panel {
             if (data.pending_proposals !== undefined) {
               root.pendingProposals = data.pending_proposals
             }
+            if (data.approved_proposals !== undefined) {
+              root.approvedProposals = data.approved_proposals
+            }
             if (data.hermes_enforcement !== undefined) {
               root.hermesEnforcement = data.hermes_enforcement
             }
@@ -957,12 +961,15 @@ Panel {
           var data = JSON.parse(text || "{}")
           if (data && data.ok) {
             var pending = []
+            var approved = []
             var all = data.proposals || []
             for (var i = 0; i < all.length; i++) {
               if (all[i].status === "pending") pending.push(all[i])
+              else if (all[i].status === "approved") approved.push(all[i])
             }
             root.proposalsData = all
             root.pendingProposals = pending.length
+            root.approvedProposals = approved.length
           }
         } catch (e) {}
       }
@@ -1396,19 +1403,25 @@ Panel {
 
           Button {
             iconText: "󰋚"
-            tooltipText: (root.pendingProposals > 0 ? ("Memories & Skills — " + root.pendingProposals + " proposal(s) awaiting review") : "Memories & Skills")
+            tooltipText: (() => {
+              var parts = []
+              if (root.pendingProposals > 0) parts.push(root.pendingProposals + " pending")
+              if (root.approvedProposals > 0) parts.push(root.approvedProposals + " approved")
+              if (parts.length > 0) return "Memories & Skills — " + parts.join(", ")
+              return "Memories & Skills"
+            })()
             selected: root.currentView === "memories"
             implicitWidth: Style.space(32)
             implicitHeight: Style.space(32)
-            // Badge dot when proposals await review
+            // Badge dot when proposals await review or have been approved
             Rectangle {
-              visible: root.pendingProposals > 0
+              visible: root.pendingProposals > 0 || root.approvedProposals > 0
               anchors.top: parent.top
               anchors.right: parent.right
               width: Style.space(9)
               height: Style.space(9)
               radius: width / 2
-              color: "#F59E0B"
+              color: root.pendingProposals > 0 ? "#F59E0B" : "#4CAF50"
             }
             onClicked: {
               root.currentView = "memories"
@@ -2763,33 +2776,42 @@ Panel {
           // ⚠ Untrusted model-derived learning proposals — explicit review required.
           // Compaction stages distilled memories/skills here; nothing is written to
           // the live memory/skill stores until the user approves each entry.
+          // Approved proposals are stored in APPROVED_STAGING_DIR (outside Hermes search roots).
+          // User can copy approved content to live sites if desired.
           Item {
-            visible: root.pendingProposals > 0
+            visible: root.pendingProposals > 0 || root.approvedProposals > 0
             Layout.fillWidth: true
             Layout.preferredHeight: proposalsHeader.implicitHeight + Style.space(8)
             BorderSurface {
               id: proposalsHeader
               anchors.fill: parent
               radius: Style.space(6)
-              color: root.alpha("#F59E0B", 0.12)
-              borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.4), "#F59E0B")
+              color: root.pendingProposals > 0 ? root.alpha("#F59E0B", 0.12) : root.alpha("#4CAF50", 0.12)
+              borderSpec: root.pendingProposals > 0
+                ? Border.controlSpec("normal", root.alpha("#F59E0B", 0.4), "#F59E0B")
+                : Border.controlSpec("normal", root.alpha("#4CAF50", 0.4), "#4CAF50")
               RowLayout {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
                 anchors.margins: Style.space(6)
                 spacing: Style.space(8)
-                Text { text: "⚠"; font.pixelSize: Style.space(13); color: "#F59E0B" }
+                Text { text: root.pendingProposals > 0 ? "⚠" : "✅"; font.pixelSize: Style.space(13); color: root.pendingProposals > 0 ? "#F59E0B" : "#4CAF50" }
                 Text {
-                  text: "Learning Proposals Awaiting Review (" + root.pendingProposals + ")"
+                  text: {
+                    var parts = []
+                    if (root.pendingProposals > 0) parts.push("Pending: " + root.pendingProposals)
+                    if (root.approvedProposals > 0) parts.push("Approved: " + root.approvedProposals)
+                    return "Learning Proposals (" + parts.join(", ") + ")"
+                  }
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
-                  color: "#F59E0B"
+                  color: root.pendingProposals > 0 ? "#F59E0B" : "#4CAF50"
                   Layout.fillWidth: true
                 }
                 Text {
-                  text: "AI-generated — verify before approving"
+                  text: root.pendingProposals > 0 ? "AI-generated — verify before approving" : "Approved — inert, copy to install"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(9)
                   color: root.dim
@@ -2798,17 +2820,17 @@ Panel {
             }
           }
 
-          ScrollView {
-            visible: root.pendingProposals > 0
+         ScrollView {
+            visible: root.pendingProposals > 0 || root.approvedProposals > 0
             Layout.fillWidth: true
-            implicitHeight: Math.min(root.pendingProposals * Style.space(64) + Style.space(8), Style.space(220))
+            implicitHeight: Math.min((root.pendingProposals + root.approvedProposals) * Style.space(64) + Style.space(8), Style.space(220))
             clip: true
             ListView {
               id: proposalsList
               model: root.proposalsData
               spacing: Style.space(4)
               delegate: Item {
-                visible: modelData.status === "pending"
+                visible: modelData.status === "pending" || modelData.status === "approved"
                 width: proposalsList.width
                 implicitHeight: propCard.implicitHeight + Style.space(2)
                 BorderSurface {
@@ -2818,7 +2840,9 @@ Panel {
                   implicitHeight: propCol.implicitHeight + Style.space(10)
                   radius: Style.space(6)
                   color: root.alpha(root.foreground, 0.05)
-                  borderSpec: Border.controlSpec("normal", root.alpha("#F59E0B", 0.35), "#F59E0B")
+                  borderSpec: modelData.status === "approved"
+                    ? Border.controlSpec("normal", root.alpha("#4CAF50", 0.35), "#4CAF50")
+                    : Border.controlSpec("normal", root.alpha("#F59E0B", 0.35), "#F59E0B")
                   ColumnLayout {
                     id: propCol
                     anchors.left: parent.left
@@ -2828,6 +2852,10 @@ Panel {
                     spacing: Style.space(4)
                     Text {
                       text: {
+                        if (modelData.status === "approved") {
+                          if (modelData.kind === "skill") return "✅ Approved Skill: " + (modelData.name || "")
+                          return (modelData.is_user_fact ? "✅ Approved Memory (user): " : "✅ Approved Memory: ")
+                        }
                         if (modelData.kind === "skill") return "󰘦 Proposed Skill: " + (modelData.name || "")
                         return (modelData.is_user_fact ? "󰋚 Proposed Memory (user): " : "🐼 Proposed Memory: ")
                       }
@@ -2835,7 +2863,7 @@ Panel {
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
                       font.bold: true
-                      color: "#F59E0B"
+                      color: modelData.status === "approved" ? "#4CAF50" : "#F59E0B"
                       Layout.fillWidth: true
                       elide: Text.ElideRight
                     }
@@ -2858,20 +2886,41 @@ Panel {
                       Layout.fillWidth: true
                       spacing: Style.space(6)
                       Item { Layout.fillWidth: true }
-                      Button {
-                        iconText: "󰅖"
-                        text: "Reject"
-                        implicitHeight: Style.space(24)
-                        fontSize: Style.space(9)
-                        onClicked: root.reviewProposal(modelData.id, false)
-                      }
-                      Button {
-                        iconText: "󰄬"
-                        text: "Approve"
-                        selected: true
-                        implicitHeight: Style.space(24)
-                        fontSize: Style.space(9)
-                        onClicked: root.reviewProposal(modelData.id, true)
+                      if (modelData.status === "pending") {
+                        Button {
+                          iconText: "󰅖"
+                          text: "Reject"
+                          implicitHeight: Style.space(24)
+                          fontSize: Style.space(9)
+                          onClicked: root.reviewProposal(modelData.id, false)
+                        }
+                        Button {
+                          iconText: "󰄬"
+                          text: "Approve"
+                          selected: true
+                          implicitHeight: Style.space(24)
+                          fontSize: Style.space(9)
+                          onClicked: root.reviewProposal(modelData.id, true)
+                        }
+                      } else if (modelData.status === "approved") {
+                        Text {
+                          text: "Saved to staging (outside Hermes)"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.space(8)
+                          color: "#4CAF50"
+                        }
+                        Button {
+                          iconText: "󰆏"
+                          text: "Copy"
+                          implicitHeight: Style.space(24)
+                          fontSize: Style.space(9)
+                          onClicked: {
+                            var content = modelData.kind === "skill"
+                                  ? (modelData.description + "\n\n" + (modelData.instructions || ""))
+                                  : (modelData.text || "");
+                            root.copyText(content);
+                          }
+                        }
                       }
                     }
                   }

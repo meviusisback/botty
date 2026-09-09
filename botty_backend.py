@@ -51,11 +51,19 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(SCREENSHOT_DIR, 0o700)
 
 HERMES_DIR = Path.home() / ".hermes"
-HERMES_BOTTY_DIR = HERMES_DIR / "profiles" / "botty"
+HERMES_BOTTY_DIR = HERMES_DIR / "profiles" / "botti"
 HERMES_CONFIG_FILE = HERMES_BOTTY_DIR / "config.yaml"
 HERMES_MEMORY_DIR = HERMES_BOTTY_DIR / "memories"
 HERMES_SKILLS_DIR = HERMES_BOTTY_DIR / "skills"
 HERMES_STATE_DB = HERMES_BOTTY_DIR / "state.db"
+
+# Approved proposals staging directory — outside Hermes search roots.
+# Model-derived approved content lives here; nothing in this directory
+# is loaded as a Hermes agent instruction. The user can manually install
+# approved content by copying from here to HERMES_MEMORY_DIR / HERMES_SKILLS_DIR.
+APPROVED_STAGING_DIR = BOTTY_DATA_DIR / "approved_proposals"
+APPROVED_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+os.chmod(APPROVED_STAGING_DIR, 0o700)
 
 DEFAULT_AUTO_COMPACT_THRESHOLD = 14
 DEFAULT_COMPACT_PRESERVE_TAIL = 4
@@ -869,8 +877,11 @@ def get_status() -> Dict[str, Any]:
     try:
         pending = [p for p in _load_proposals_list() if p.get("status") == "pending"]
         status["pending_proposals"] = len(pending)
+        approved = [p for p in _load_proposals_list() if p.get("status") == "approved"]
+        status["approved_proposals"] = len(approved)
     except Exception:
         status["pending_proposals"] = 0
+        status["approved_proposals"] = 0
     status["sandbox_mode"] = get_sandbox_mode()
     status["hermes_enforcement"] = hermes_approval_enforcement().get("effective", "enforced")
     
@@ -2339,10 +2350,73 @@ description: "{description.strip()}"
         return {"ok": False, "error": f"Failed to create skill: {str(e)}"}
 
 # ── Learning proposals (compaction output staged for explicit user review) ──────
-# Model-derived memories/skills never write to USER.md / MEMORY.md / skills/
-# directly: compaction stages them here and the user approves or rejects each
-# entry (strict bounded schema). This closes the prompt-injection persistence
-# vector where distilled content became persistent agent instructions unseen.
+# Model-derived memories/skills are NEVER written to USER.md / MEMORY.md / skills/
+# directly. Compaction stages them here; the user approves or rejects each entry
+# (strict bounded schema). Approved proposals are saved to the staging directory
+# outside Hermes search roots (APPROVED_STAGING_DIR). This closes the prompt-injection
+# persistence vector where distilled content became persistent agent instructions unseen.
+
+def _write_approved_memory(text: str, is_user_fact: bool = False) -> Dict[str, Any]:
+    """Write approved memory to the staging directory (outside Hermes search roots).
+
+    This function does NOT write to USER.md / MEMORY.md (HERMES_MEMORY_DIR).
+    The approved content is inert and cannot be loaded by Hermes as agent instructions.
+    """
+    text = text.strip()
+    if not text:
+        return {"ok": False, "error": "Empty memory text."}
+
+    type_label = "user" if is_user_fact else "system"
+    target_file = APPROVED_STAGING_DIR / f"memories_{type_label}.md"
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        content = ""
+        if target_file.exists():
+            content = target_file.read_text(encoding="utf-8").strip()
+
+        if content:
+            new_content = f"{content}\n§\n{text}\n"
+        else:
+            new_content = f"{text}\n"
+
+        target_file.write_text(new_content, encoding="utf-8")
+        secure_file_permissions(target_file)
+        return {"ok": True, "message": "Memory saved to staging (not live)."}
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to save approved memory: {str(e)}"}
+
+
+def _write_approved_skill(name: str, description: str, instructions: str) -> Dict[str, Any]:
+    """Write approved skill to the staging directory (outside Hermes search roots).
+
+    This function does NOT write to HERMES_SKILLS_DIR.
+    The approved content is inert and cannot be loaded by Hermes as agent instructions.
+    """
+    clean_name = re.sub(r"[^a-zA-Z0-9_-]", "-", name.strip().lower())
+    if not clean_name:
+        return {"ok": False, "error": "Invalid skill name."}
+
+    skill_dir = APPROVED_STAGING_DIR / "skills" / clean_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+
+    skill_file = skill_dir / "SKILL.md"
+    body = f"""---
+name: {clean_name}
+description: "{description.strip()}"
+---
+
+# {clean_name.replace('-', ' ').title()}
+
+{instructions.strip()}
+"""
+
+    try:
+        skill_file.write_text(body, encoding="utf-8")
+        secure_file_permissions(skill_file)
+        return {"ok": True, "name": clean_name, "path": str(skill_dir)}
+    except Exception as e:
+        return {"ok": False, "error": f"Failed to create approved skill: {str(e)}"}
 
 MAX_PROPOSAL_MEMORY_CHARS = 600
 MAX_PROPOSAL_SKILL_DESC_CHARS = 200
@@ -2387,7 +2461,9 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
     """Schema-validate + stage distilled memories/skills for user review.
 
     Returns counts of staged entries per kind. Nothing is written to the live
-    memory/skill stores here — apply_proposal does that on explicit approval.
+    memory/skill stores or the approved staging directory here — apply_proposal
+    does that on explicit approval (writing to APPROVED_STAGING_DIR, not
+    HERMES_MEMORY_DIR / HERMES_SKILLS_DIR).
     """
     user_mems = distilled_data.get("user_memories", []) or []
     sys_mems = distilled_data.get("system_memories", []) or []
@@ -2478,21 +2554,25 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
     return {"user_memories": staged_user, "system_memories": staged_sys, "skills": staged_skill}
 
 def apply_proposal(proposal_id: str) -> Dict[str, Any]:
-    """Apply ONE reviewed proposal to the live memory/skill store."""
+    """Apply ONE reviewed proposal to the staging directory (inert, not live).
+
+    Model-derived content is written to APPROVED_STAGING_DIR, not to HERMES_MEMORY_DIR
+    or HERMES_SKILLS_DIR (the live agent instruction files). This prevents prompt injection
+    persistence while still letting the user review, approve, and manually install content."""
     proposals = _load_proposals_list()
     for p in proposals:
         if str(p.get("id", "")) == str(proposal_id) and p.get("status") == "pending":
             if p.get("kind") == "memory":
-                res = add_memory(str(p.get("text", "")), is_user_fact=bool(p.get("is_user_fact")))
+                res = _write_approved_memory(str(p.get("text", "")), is_user_fact=bool(p.get("is_user_fact")))
             elif p.get("kind") == "skill":
-                res = create_skill(str(p.get("name", "")), str(p.get("description", "")), str(p.get("instructions", "")))
+                res = _write_approved_skill(str(p.get("name", "")), str(p.get("description", "")), str(p.get("instructions", "")))
             else:
                 return {"ok": False, "error": "Unknown proposal kind."}
             if res.get("ok"):
-                p["status"] = "applied"
-                p["applied_at"] = int(time.time())
+                p["status"] = "approved"
+                p["approved_at"] = int(time.time())
                 _save_proposals_list(proposals)
-                return {"ok": True, "applied": p["id"], "kind": p["kind"]}
+                return {"ok": True, "approved": p["id"], "kind": p["kind"]}
             return res
     return {"ok": False, "error": f"Proposal not found or already reviewed: {proposal_id}"}
 

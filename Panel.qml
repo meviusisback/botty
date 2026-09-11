@@ -855,10 +855,21 @@ Panel {
             root.modelsCatalog = data
             root.rawStatus.active_model = data.active_model
             root.rawStatus.active_provider = data.active_provider
-            if (data.active_provider) {
-              root.selectedProviderId = data.active_provider
-            } else if (data.providers && data.providers.length > 0) {
-              root.selectedProviderId = data.providers[0].id
+            // Preserve the user's provider tab: only initialise or repair
+            // selectedProviderId, never clobber it on background refreshes.
+            // Otherwise browsing any provider snaps back to the active one
+            // ("redirects to the OpenCode Go page") and selection feels broken.
+            var providers = data.providers || []
+            var stillExists = false
+            for (var i = 0; i < providers.length; i++) {
+              if (providers[i].id === root.selectedProviderId) { stillExists = true; break }
+            }
+            if (!root.selectedProviderId || !stillExists) {
+              if (data.active_provider && providers.some(function(p) { return p.id === data.active_provider })) {
+                root.selectedProviderId = data.active_provider
+              } else if (providers.length > 0) {
+                root.selectedProviderId = providers[0].id
+              }
             }
           }
         } catch (e) {}
@@ -871,6 +882,18 @@ Panel {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        try {
+          var data = JSON.parse(text || "{}")
+          if (data && data.ok) {
+            // Apply immediately so the UI reflects the switch without
+            // waiting for the fetch round-trip.
+            if (data.model) root.rawStatus.active_model = data.model
+            if (data.provider) {
+              root.rawStatus.active_provider = data.provider
+              root.selectedProviderId = data.provider
+            }
+          }
+        } catch (e) {}
         root.fetchStatus()
         root.fetchModels()
       }
@@ -2886,40 +2909,41 @@ Panel {
                       Layout.fillWidth: true
                       spacing: Style.space(6)
                       Item { Layout.fillWidth: true }
-                      if (modelData.status === "pending") {
-                        Button {
-                          iconText: "󰅖"
-                          text: "Reject"
-                          implicitHeight: Style.space(24)
-                          fontSize: Style.space(9)
-                          onClicked: root.reviewProposal(modelData.id, false)
-                        }
-                        Button {
-                          iconText: "󰄬"
-                          text: "Approve"
-                          selected: true
-                          implicitHeight: Style.space(24)
-                          fontSize: Style.space(9)
-                          onClicked: root.reviewProposal(modelData.id, true)
-                        }
-                      } else if (modelData.status === "approved") {
-                        Text {
-                          text: "Saved to staging (outside Hermes)"
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.space(8)
-                          color: "#4CAF50"
-                        }
-                        Button {
-                          iconText: "󰆏"
-                          text: "Copy"
-                          implicitHeight: Style.space(24)
-                          fontSize: Style.space(9)
-                          onClicked: {
-                            var content = modelData.kind === "skill"
-                                  ? (modelData.description + "\n\n" + (modelData.instructions || ""))
-                                  : (modelData.text || "");
-                            root.copyText(content);
-                          }
+                      Button {
+                        visible: modelData.status === "pending"
+                        iconText: "󰅖"
+                        text: "Reject"
+                        implicitHeight: Style.space(24)
+                        fontSize: Style.space(9)
+                        onClicked: root.reviewProposal(modelData.id, false)
+                      }
+                      Button {
+                        visible: modelData.status === "pending"
+                        iconText: "󰄬"
+                        text: "Approve"
+                        selected: true
+                        implicitHeight: Style.space(24)
+                        fontSize: Style.space(9)
+                        onClicked: root.reviewProposal(modelData.id, true)
+                      }
+                      Text {
+                        visible: modelData.status === "approved"
+                        text: "Saved to staging (outside Hermes)"
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.space(8)
+                        color: "#4CAF50"
+                      }
+                      Button {
+                        visible: modelData.status === "approved"
+                        iconText: "󰆏"
+                        text: "Copy"
+                        implicitHeight: Style.space(24)
+                        fontSize: Style.space(9)
+                        onClicked: {
+                          var content = modelData.kind === "skill"
+                                ? (modelData.description + "\n\n" + (modelData.instructions || ""))
+                                : (modelData.text || "");
+                          root.copyText(content);
                         }
                       }
                     }
@@ -3356,7 +3380,7 @@ Panel {
                   delegate: Item {
                     width: modelsList.width
                     implicitHeight: modelCard.implicitHeight + Style.space(4)
-                    readonly property bool isCurrent: modelData.id === root.rawStatus.active_model
+                    readonly property bool isCurrent: modelData.id === root.rawStatus.active_model && root.selectedProviderId === root.rawStatus.active_provider
 
                     BorderSurface {
                       id: modelCard

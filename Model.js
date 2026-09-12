@@ -432,10 +432,19 @@ function formatSituationSummary(sitData) {
 /**
  * Detects if an assistant message contains a Sandbox Permission Request.
  */
+function stripFencedCode(text) {
+  return String(text || "").replace(/```[\s\S]*?(?:```|$)/g, "")
+}
+
 function detectPermissionRequest(text) {
   if (!text) return { isPermission: false, title: "", details: "" }
-  var t = String(text)
-  var hasHeader = t.includes("🔒 SANDBOX PERMISSION REQUIRED") || t.includes("SANDBOX PERMISSION REQUIRED")
+  // Mirror backend _strip_fenced_code plus quote/comment stripping, and
+  // require the padlock form: looser matching here minted approval UX from
+  // reflected untrusted text on legacy/hand-crafted history entries.
+  var t = stripFencedCode(String(text))
+  t = t.replace(/<!--[\s\S]*?-->/g, "")
+  t = t.split("\n").filter(function(l) { return !/^\s{0,3}>/.test(l); }).join("\n")
+  var hasHeader = t.includes("🔒 SANDBOX PERMISSION REQUIRED")
   if (!hasHeader) return { isPermission: false, title: "", details: "" }
 
   var lines = t.split("\n")

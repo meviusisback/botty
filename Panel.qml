@@ -99,6 +99,61 @@ Panel {
   // Auto-scroll pinning state
   property bool autoScrollPinned: true
 
+  // Compact history window: only the recent slice renders. Paging grows
+  // the window; show-all renders everything until collapsed again.
+  property int chatVisibleCount: 10
+  property bool chatShowAll: false
+
+  function chatTotalMessages() {
+    return (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
+  }
+
+  function chatHiddenCount() {
+    if (root.chatShowAll) return 0
+    return Math.max(0, root.chatTotalMessages() - root.chatVisibleCount)
+  }
+
+  function chatVisibleMessages() {
+    var msgs = (root.historyData && root.historyData.messages) ? root.historyData.messages : []
+    if (root.chatShowAll || root.chatVisibleCount >= msgs.length) return msgs
+    return msgs.slice(msgs.length - root.chatVisibleCount)
+  }
+
+  function chatHoldPosition(changeFn) {
+    if (!chatFlick) { changeFn(); return }
+    var oldH = chatFlick.contentHeight
+    var oldY = chatFlick.contentY
+    root.autoScrollPinned = false
+    changeFn()
+    Qt.callLater(function() {
+      if (chatFlick) {
+        chatFlick.contentY = Math.max(0, oldY + (chatFlick.contentHeight - oldH))
+      }
+    })
+  }
+
+  function chatShowMore() {
+    root.chatShowAll = false
+    var total = root.chatTotalMessages()
+    var next = Math.min(total, root.chatVisibleCount + 20)
+    if (next <= root.chatVisibleCount) return
+    root.chatHoldPosition(function() { root.chatVisibleCount = next })
+  }
+
+  function chatShowAllFn() {
+    var total = root.chatTotalMessages()
+    root.chatHoldPosition(function() {
+      root.chatShowAll = true
+      root.chatVisibleCount = total
+    })
+  }
+
+  function chatCollapseRecent() {
+    root.chatShowAll = false
+    root.chatVisibleCount = 10
+    root.scrollChatToEnd()
+  }
+
   // Voice dictation state
   property bool isRecordingVoice: false
   property bool isTranscribingVoice: false
@@ -111,46 +166,34 @@ Panel {
     return Qt.resolvedUrl("botty_backend.py").toString().replace(/^file:\/\//, "")
   }
 
+  function chatMaxY() {
+    if (!chatFlick) return 0
+    return Math.max(0, chatFlick.contentHeight - chatFlick.height)
+  }
+
   function scrollChat(delta) {
-    if (!chatListView) return
+    if (!chatFlick) return
     var step = Style.space(70)
-    var currentY = chatListView.contentY
-    var minY = chatListView.originY
-    var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
-    var targetY = Math.max(minY, Math.min(maxY, currentY + delta * step))
-    chatListView.contentY = targetY
-    chatListView.returnToBounds()
+    var maxY = root.chatMaxY()
+    var targetY = Math.max(0, Math.min(maxY, chatFlick.contentY + delta * step))
+    chatFlick.contentY = targetY
+    chatFlick.returnToBounds()
     root.autoScrollPinned = (targetY >= maxY - Style.space(10))
   }
 
+  // Exact scroll to the bottom. chatCol measures for real (no ListView
+  // height estimates), so bottom is exact math. One immediate set + one
+  // deferred set one frame later for a layout that just finished.
   function scrollChatToEnd() {
-    if (!chatListView) return
+    if (!chatFlick) return
     root.autoScrollPinned = true
-    chatListView.positionViewAtEnd()
+    chatFlick.contentY = root.chatMaxY()
+    chatFlick.returnToBounds()
     Qt.callLater(function() {
-      if (chatListView && root.autoScrollPinned) {
-        chatListView.positionViewAtEnd()
-        var minY = chatListView.originY
-        var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
-        chatListView.contentY = maxY
-        chatListView.returnToBounds()
+      if (chatFlick && root.autoScrollPinned) {
+        chatFlick.contentY = root.chatMaxY()
       }
     })
-    scrollStabilizeTimer.restart()
-  }
-
-  Timer {
-    id: scrollStabilizeTimer
-    interval: 80
-    repeat: false
-    onTriggered: {
-      if (chatListView && root.autoScrollPinned) {
-        chatListView.positionViewAtEnd()
-        var minY = chatListView.originY
-        var maxY = Math.max(minY, minY + chatListView.contentHeight - chatListView.height)
-        chatListView.contentY = maxY
-      }
-    }
   }
 
   function fetchStatus() {
@@ -517,8 +560,12 @@ Panel {
     }
   }
 
-  // Periodic status poll: runs ONLY while the agent is actively working
-  // to avoid waking the CPU continuously when idle.
+  // Periodic polls: run ONLY while the agent is actively working
+  // to avoid waking the CPU continuously when idle. History is polled
+  // alongside status so the just-sent user message appears (and the view
+  // follows to the very bottom while pinned) instead of only arriving
+  // with the final answer. fetchHistory() no-ops while a fetch is in
+  // flight, so this is cheap.
   Timer {
     interval: 1500
     running: (root.rawStatus && root.rawStatus.state === "working") || askProc.running
@@ -526,6 +573,7 @@ Panel {
     triggeredOnStart: false
     onTriggered: {
       root.fetchStatus()
+      root.fetchHistory()
     }
   }
 
@@ -1507,11 +1555,11 @@ Panel {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            ListView {
-              id: chatListView
+            Flickable {
+              id: chatFlick
               anchors.fill: parent
-              model: (root.historyData && root.historyData.messages) ? root.historyData.messages : []
-              spacing: Style.space(10)
+              contentWidth: width
+              contentHeight: chatCol.height
               clip: true
               boundsBehavior: Flickable.StopAtBounds
               flickableDirection: Flickable.VerticalFlick
@@ -1522,16 +1570,19 @@ Panel {
                 active: true
               }
 
-              onCountChanged: {
-                root.scrollChatToEnd()
+              // Follow the tail while pinned: safe here because setting
+              // contentY cannot change contentHeight in a plain Flickable
+              // (the old ListView estimation feedback loop is gone).
+              // Covers new messages AND streaming growth of the last one.
+              onContentHeightChanged: {
+                if (root.autoScrollPinned && !dragging) {
+                  contentY = Math.max(0, contentHeight - height)
+                }
               }
 
-              onContentHeightChanged: {
-                if (root.autoScrollPinned) {
-                  positionViewAtEnd()
-                  var minY = originY
-                  var maxY = Math.max(minY, minY + contentHeight - height)
-                  contentY = maxY
+              onContentYChanged: {
+                if (dragging || flicking) {
+                  root.autoScrollPinned = atYEnd
                 }
               }
 
@@ -1580,9 +1631,120 @@ Panel {
                   return
                 }
               }
-              delegate: Item {
-                id: msgDelegate
-                width: chatListView.width
+              Column {
+                id: chatCol
+                width: chatFlick.width
+                spacing: Style.space(10)
+
+                // Compact history header: paging controls for older messages.
+                BorderSurface {
+                  visible: root.chatTotalMessages() > 10
+                  width: chatCol.width
+                  implicitHeight: historyHeadCol.implicitHeight + Style.space(16)
+                  radius: Style.space(8)
+                  color: root.alpha(root.foreground, 0.04)
+                  borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.12), root.accent)
+
+                  ColumnLayout {
+                    id: historyHeadCol
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    anchors.margins: Style.space(8)
+                    spacing: Style.space(6)
+
+                    Text {
+                      visible: root.chatHiddenCount() > 0
+                      text: root.chatHiddenCount() + " older messages"
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      color: root.muted
+                    }
+
+                    RowLayout {
+                      spacing: Style.space(6)
+
+                      BorderSurface {
+                        visible: root.chatHiddenCount() > 0
+                        implicitWidth: pillMoreText.implicitWidth + Style.space(16)
+                        implicitHeight: Style.space(22)
+                        radius: Style.space(11)
+                        color: pillMoreMouse.containsMouse ? root.accent : root.alpha(root.accent, 0.12)
+                        borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.4), root.accent)
+                        Text {
+                          id: pillMoreText
+                          anchors.centerIn: parent
+                          text: "+ Show 20 more"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.space(10)
+                          color: pillMoreMouse.containsMouse ? Color.background : root.foreground
+                        }
+                        MouseArea {
+                          id: pillMoreMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.chatShowMore()
+                        }
+                      }
+
+                      BorderSurface {
+                        visible: root.chatHiddenCount() > 0
+                        implicitWidth: pillAllText.implicitWidth + Style.space(16)
+                        implicitHeight: Style.space(22)
+                        radius: Style.space(11)
+                        color: pillAllMouse.containsMouse ? root.accent : root.alpha(root.accent, 0.12)
+                        borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.4), root.accent)
+                        Text {
+                          id: pillAllText
+                          anchors.centerIn: parent
+                          text: "Show all"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.space(10)
+                          color: pillAllMouse.containsMouse ? Color.background : root.foreground
+                        }
+                        MouseArea {
+                          id: pillAllMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.chatShowAllFn()
+                        }
+                      }
+
+                      BorderSurface {
+                        visible: root.chatHiddenCount() === 0 && root.chatTotalMessages() > 10
+                        implicitWidth: pillCollapseText.implicitWidth + Style.space(16)
+                        implicitHeight: Style.space(22)
+                        radius: Style.space(11)
+                        color: pillCollapseMouse.containsMouse ? root.accent : root.alpha(root.foreground, 0.12)
+                        borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.25), root.accent)
+                        Text {
+                          id: pillCollapseText
+                          anchors.centerIn: parent
+                          text: "Collapse to recent"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.space(10)
+                          color: pillCollapseMouse.containsMouse ? Color.background : root.foreground
+                        }
+                        MouseArea {
+                          id: pillCollapseMouse
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.chatCollapseRecent()
+                        }
+                      }
+                    }
+                  }
+                }
+
+                Repeater {
+                  id: chatRepeater
+                  model: root.chatVisibleMessages()
+                  delegate: Item {
+                  id: msgDelegate
+                  width: chatCol.width
                 implicitHeight: msgCard.implicitHeight + Style.space(4)
 
                 readonly property bool isUser: modelData.role === "user"
@@ -2234,13 +2396,15 @@ Panel {
                     }
                   }
                 }
+                }
               }
+            }
             }
 
             // Floating scroll to bottom button
             BorderSurface {
               id: scrollToBottomBtn
-              visible: chatListView.count > 0 && !chatListView.atYEnd
+              visible: chatRepeater.count > 0 && !chatFlick.atYEnd
               anchors.right: parent.right
               anchors.bottom: parent.bottom
               anchors.margins: Style.space(12)
@@ -2266,7 +2430,7 @@ Panel {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                  chatListView.positionViewAtEnd()
+                  root.scrollChatToEnd()
                   if (promptInput) promptInput.forceActiveFocus()
                 }
               }

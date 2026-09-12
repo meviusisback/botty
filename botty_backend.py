@@ -1885,6 +1885,15 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         if run.get("returncode") != 0 and not cleaned_response:
             err_msg = (stderr_data or "").strip() or f"Agent process exited with code {run.get('returncode')}"
             err_msg = cap_text(err_msg, 2000)
+            
+            # Check for OpenCode session error - provide helpful guidance
+            if "MissingSessionID" in err_msg or "x-opencode-session" in err_msg:
+                err_msg = (
+                    "OpenCode Go provider error: Missing session ID. "
+                    "This provider requires session headers that may not be supported by the current engine. "
+                    "Try switching to a different provider (OpenRouter, Ollama, etc.) in Settings."
+                )
+            
             set_status("error", headline="Error", last_error=err_msg)
             append_botty_log(f"ERROR [{engine}/{selected_model}] (Code {run.get('returncode')}): {err_msg}")
             add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine, raw_output=redact_secrets(cap_text(stderr_data or stdout_data, RAW_OUTPUT_PERSIST_CHARS)))
@@ -2764,6 +2773,15 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
 
         run = run_bounded_process(cmd, timeout_s=90, stdin_text=stdin_text, max_output_chars=AGENT_OUTPUT_CAP_CHARS)
         raw_llm_out = (run.get("stdout") or "").strip()
+        
+        # Check for OpenCode session error - this is a known compatibility issue
+        # when the opencode-go provider requires a session header that Hermes doesn't provide
+        stderr_data = (run.get("stderr") or "").strip()
+        if "MissingSessionID" in raw_llm_out or "MissingSessionID" in stderr_data:
+            append_botty_log(f"DISTILL WARNING: OpenCode Go provider MissingSessionID error. Provider may need session header.")
+            # Don't fail completely - use fallback summary
+            raw_llm_out = ""
+        
         if run.get("ok") and run.get("returncode") == 0 and raw_llm_out:
             json_match = re.search(r"\{[\s\S]*\}", raw_llm_out)
             if json_match:

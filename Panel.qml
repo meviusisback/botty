@@ -98,6 +98,65 @@ Panel {
 
   // Auto-scroll pinning state
   property bool autoScrollPinned: true
+  // Monotonic history revision: poll responses older than the newest seen
+  // state are ignored so a late pre-compaction response can't resurrect
+  // pruned content in the view (M2/L3). FileView (live file state) always wins.
+  property int historyRev: 0
+
+  // Compact history window: only the recent slice renders. Paging grows
+  // the window; show-all renders everything until collapsed again.
+  property int chatVisibleCount: 10
+  property bool chatShowAll: false
+
+  function chatTotalMessages() {
+    return (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
+  }
+
+  function chatHiddenCount() {
+    if (root.chatShowAll) return 0
+    return Math.max(0, root.chatTotalMessages() - root.chatVisibleCount)
+  }
+
+  function chatVisibleMessages() {
+    var msgs = (root.historyData && root.historyData.messages) ? root.historyData.messages : []
+    if (root.chatShowAll || root.chatVisibleCount >= msgs.length) return msgs
+    return msgs.slice(msgs.length - root.chatVisibleCount)
+  }
+
+  function chatHoldPosition(changeFn) {
+    if (!chatFlick) { changeFn(); return }
+    var oldH = chatFlick.contentHeight
+    var oldY = chatFlick.contentY
+    root.autoScrollPinned = false
+    changeFn()
+    Qt.callLater(function() {
+      if (chatFlick) {
+        chatFlick.contentY = Math.max(0, oldY + (chatFlick.contentHeight - oldH))
+      }
+    })
+  }
+
+  function chatShowMore() {
+    root.chatShowAll = false
+    var total = root.chatTotalMessages()
+    var next = Math.min(total, root.chatVisibleCount + 20)
+    if (next <= root.chatVisibleCount) return
+    root.chatHoldPosition(function() { root.chatVisibleCount = next })
+  }
+
+  function chatShowAllFn() {
+    var total = root.chatTotalMessages()
+    root.chatHoldPosition(function() {
+      root.chatShowAll = true
+      root.chatVisibleCount = total
+    })
+  }
+
+  function chatCollapseRecent() {
+    root.chatShowAll = false
+    root.chatVisibleCount = 10
+    root.scrollChatToEnd()
+  }
 
   // Compact history window: only the recent slice renders. Paging grows
   // the window; show-all renders everything until collapsed again.
@@ -431,10 +490,11 @@ Panel {
     compactProc.running = true
   }
 
-  function addMemoryNow(text, isUser) {
+  function addMemoryNow(text, isUser, fromModel) {
     if (!text || !text.trim()) return
     var cmd = ["python3", root.scriptPath(), "add-memory"]
     if (isUser) cmd.push("--user")
+    if (fromModel) cmd.push("--from-model")
     cmd.push("--")
     cmd.push(text)
     addMemProc.command = cmd
@@ -544,6 +604,7 @@ Panel {
           var shouldScroll = (newCount > root.lastMessageCount)
           root.lastMessageCount = newCount
           root.historyData = data
+          root.historyRev = (data.rev || 0)
           if (root.opened) {
             root.unreadCount = 0
             root.lastReadMessageCount = newCount
@@ -636,11 +697,14 @@ Panel {
         try {
           var data = JSON.parse(text || "{}")
           if (data && data.ok && data.history) {
+            var rrev = data.history.rev || 0
+            if (rrev < root.historyRev) return
             var msgs = data.history.messages || []
             var newCount = msgs.length
             var shouldScroll = (newCount > root.lastMessageCount)
             root.lastMessageCount = newCount
             root.historyData = data.history
+            root.historyRev = rrev
             if (root.opened) {
               root.unreadCount = 0
               root.lastReadMessageCount = newCount
@@ -1054,6 +1118,7 @@ Panel {
       onStreamFinished: {
         root.fetchStatus()
         root.fetchMemories()
+        root.fetchHistory()
       }
     }
   }
@@ -1081,6 +1146,7 @@ Panel {
       onStreamFinished: {
         root.fetchStatus()
         root.fetchMemories()
+        root.fetchHistory()
       }
     }
   }
@@ -2322,7 +2388,7 @@ Panel {
                         }
 
                         Text {
-                          text: "Writes are technically blocked while Sandbox Mode is active. Approving executes ONLY the proposed changes listed above — the agent may not take new actions."
+                          text: "Writes are technically blocked while Sandbox Mode is active. Approving executes ONLY the proposed changes listed above — the agent may not take new actions. Verify every listed path and command yourself before approving."
                           textFormat: Text.PlainText
                           font.family: root.fontFamily
                           font.pixelSize: Style.space(10)
@@ -2389,9 +2455,10 @@ Panel {
                       Button {
                         iconText: "󰋚"
                         text: "Save Fact"
+                        tooltipText: "Stage this answer excerpt as a memory proposal for review"
                         fontSize: Style.space(10)
                         implicitHeight: Style.space(22)
-                        onClicked: root.addMemoryNow(modelData.content, false)
+                        onClicked: root.addMemoryNow(modelData.content, false, true)
                       }
                     }
                   }
@@ -2519,7 +2586,7 @@ Panel {
                   }
 
                   Text {
-                    text: "Botty halted file/system writes. Choose an action below:"
+                    text: "Botty halted file/system writes. Choose an action below. Verify every proposed path and command before approving."
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
                     color: root.foreground

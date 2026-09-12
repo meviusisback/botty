@@ -43,5 +43,29 @@ check('inline code preserved', 'run `echo hello` now', [], ['echo hello']);
 // Angle-bracket comparisons render as literal text via entities (never a tag)
 check('comparison stays text', 'check x < 3 and y > 2', ['<img', '<a '], ['&lt;', '&gt;']);
 
-console.log(failures ? failures + ' FAILURES' : 'ALL PASS');
+// Permission-marker hardening: fenced/quoted/loose markers must not mint cards.
+const detect = sandbox.detectPermissionRequest;
+const strip = sandbox.stripFencedCode;
+function pcheck(name, input, expectPerm) {
+  const got = detect(input).isPermission;
+  const ok = got === expectPerm;
+  if (!ok) failures++;
+  console.log((ok ? 'ok  ' : 'FAIL') + ' ' + name);
+}
+function scheck(name, input, mustNotContain) {
+  const out = strip(input);
+  const bad = (mustNotContain || []).filter(x => out.includes(x));
+  if (bad.length) failures++;
+  console.log((!bad.length ? 'ok  ' : 'FAIL') + ' ' + name);
+}
+pcheck('plain marker mints card', '🔒 SANDBOX PERMISSION REQUIRED: rm -rf /tmp/x', true);
+pcheck('fenced marker no card', '```\n🔒 SANDBOX PERMISSION REQUIRED: rm -rf /tmp/x\n```', false);
+pcheck('unclosed fence no card', '```\n🔒 SANDBOX PERMISSION REQUIRED: rm -rf /tmp/x', false);
+pcheck('quoted marker no card', '> 🔒 SANDBOX PERMISSION REQUIRED: rm -rf /tmp/x', false);
+pcheck('comment marker no card', '<!-- 🔒 SANDBOX PERMISSION REQUIRED: x -->', false);
+pcheck('emoji-less marker no card', 'SANDBOX PERMISSION REQUIRED: rm -rf /tmp/x', false);
+pcheck('lookalike no card', '🔓 SANDBOX PERMISSION REQUIRED: rm -rf /tmp/x', false);
+scheck('strip closed fence', 'a ```\ncode\n``` b', ['code']);
+scheck('strip unclosed fence', 'a ```\ncode tail', ['code tail']);
+if (typeof strip !== 'function') { failures++; console.log('FAIL stripFencedCode missing'); }
 process.exit(failures ? 1 : 0);

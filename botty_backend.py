@@ -20,6 +20,13 @@ import argparse
 import mimetypes
 import hashlib
 import socket
+import fcntl
+import uuid
+import tempfile
+import functools
+import threading
+import stat
+import errno
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -39,6 +46,109 @@ HISTORY_ARCHIVE_FILE = BOTTY_DATA_DIR / "history_archive.jsonl"
 CONTEXT_BRIDGE_FILE = BOTTY_DATA_DIR / "context_bridge.txt"
 VAULT_FILE = BOTTY_DATA_DIR / "vault.enc"
 LOCK_FILE = BOTTY_DATA_DIR / "running.pid"
+HISTORY_LOCK_FILE = BOTTY_DATA_DIR / ".history.lock"
+
+_lock_state = threading.local()
+_history_rlock = threading.RLock()
+
+
+def _exclusive_file_lock():
+    """Open + LOCK_EX the history lock (blocking, crash-safe: the kernel
+    releases flock on process death). Also holds the process-wide RLock so
+    manual users get the same ordering as @_synchronized (RLock then flock).
+    Returns the handle; caller must use _release_file_lock."""
+    BOTTY_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _history_rlock.acquire()
+    try:
+        fh = open(HISTORY_LOCK_FILE, "a+b")
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        return fh
+    except Exception:
+        _history_rlock.release()
+        raise
+
+
+def _release_file_lock(fh) -> None:
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        try:
+            fh.close()
+        finally:
+            _history_rlock.release()
+
+
+def _synchronized(fn):
+    """Serialize read-modify-write JSON mutations across concurrent backend
+    processes (ask appends, compaction prune, clear, proposals save). Re-entrant
+    within a thread so nested writers (e.g. clear_history -> set_status) cannot
+    deadlock on fcntl locks."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if getattr(_lock_state, "held", False):
+            return fn(*args, **kwargs)
+        # Process-wide RLock first: Linux flock() is process-associated, so
+        # same-process threads would otherwise serialize only by blocking on
+        # independently-opened descriptions. The thread-local flag keeps
+        # nested writers (clear_history -> set_status) re-entrant.
+        with _history_rlock:
+            fh = _exclusive_file_lock()
+            _lock_state.held = True
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _lock_state.held = False
+                _release_file_lock(fh)
+    return wrapper
+
+
+def _ask_live() -> bool:
+    """True if an ask run is currently live (PID file + process alive).
+    Stale PID files are cleaned, mirroring ask()/get_status() semantics.
+    Only ENOENT/ESRCH/ValueError mean stale; EPERM means a live foreign-uid
+    process, which counts as live."""
+    try:
+        if not LOCK_FILE.exists():
+            return False
+        pid = int(LOCK_FILE.read_text().strip())
+        try:
+            os.kill(pid, 0)
+        except OSError as e:
+            if e.errno == errno.EPERM:
+                return True
+            raise
+        return True
+    except (ValueError, OSError):
+        try:
+            LOCK_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+
+
+def _acquire_ask_lock() -> bool:
+    """Atomically claim the live-ask slot via O_EXCL. True if we own it.
+    A stale PID file is reaped once and creation retried a single time, so
+    two concurrent ask() invocations cannot both go live (F4)."""
+    for _ in range(2):
+        try:
+            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, str(os.getpid()).encode())
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            if _ask_live():
+                return False
+    return False
+
+
+def _bump_history_rev(history: Dict[str, Any]) -> int:
+    """Monotonic revision so UI poll responses can reject stale overwrites."""
+    rev = int(history.get("rev", 0) or 0) + 1
+    history["rev"] = rev
+    return rev
 BOTTY_LOG_FILE = BOTTY_DATA_DIR / "botty.log"
 # Staged learning proposals: model-derived memories/skills produced by compaction.
 # Never written to USER.md/MEMORY.md/skills/ until the user explicitly approves each
@@ -101,7 +211,28 @@ REDACTION_PATTERNS = [
     (re.compile(r"\b(xai-[a-zA-Z0-9_-]{8})[a-zA-Z0-9_-]{12,}\b"), r"\1…[REDACTED]"),
     (re.compile(r"(Bearer\s+)[a-zA-Z0-9._~+/-]{16,}", re.IGNORECASE), r"\1[REDACTED]"),
     (re.compile(r"(api[_-]?key\s*[:=]\s*['\"]?)[a-zA-Z0-9._~+/-]{16,}", re.IGNORECASE), r"\1[REDACTED]"),
+    # Security (T6): additional high-value token shapes.
+    (re.compile(r"\b((?:gho|ghu|ghs|ghr)_[a-zA-Z0-9]{8})[a-zA-Z0-9]{12,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(github_pat_[a-zA-Z0-9]{4})[a-zA-Z0-9_]{16,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(glpat-[a-zA-Z0-9]{4})[a-zA-Z0-9_-]{12,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(AKIA[0-9A-Z]{4})[0-9A-Z]{12}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b((?:sk-ant|sk-proj)-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]{12,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(AIza[0-9A-Za-z_-]{4})[0-9A-Za-z_-]{31}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(xox[bpas]-[a-zA-Z0-9-]{4})[a-zA-Z0-9-]{12,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]{0,4096}?-----END [A-Z0-9 ]*PRIVATE KEY-----"), "[PRIVATE KEY REDACTED]"),
+    (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{10,})\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b"), r"\1…[REDACTED]"),
 ]
+
+def _strip_fenced_code(text: str) -> str:
+    """Remove ``` fenced blocks for marker matching (A2).
+
+    Attacker-controlled screen/file/window text is frequently echoed by the
+    model inside quotes or fences; matching the permission marker only outside
+    fences raises the cost of reflection spoofing. Legitimate model requests
+    are plain prose and still match. Unclosed openers strip to EOF (an odd
+    lone fence would otherwise flip in/out parity for the rest of the text)."""
+    return re.sub(r"```[\s\S]*?(?:```|$)", "", text or "")
+
 
 def redact_secrets(text: str) -> str:
     if not text:
@@ -371,15 +502,21 @@ def load_json_file(path: Path, default: Any) -> Any:
         return default
 
 def save_json_file(path: Path, data: Any) -> None:
-    tmp_path = path.with_suffix(".tmp")
+    # Security (M2): unique tmp per writer so concurrent saves cannot stomp a
+    # shared .tmp file; atomic replace keeps readers off torn documents.
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    tmp_path = Path(tmp_name)
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.chmod(tmp_path, 0o600)
         tmp_path.replace(path)
     except Exception as e:
-        if tmp_path.exists():
-            tmp_path.unlink()
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
         raise e
 
 # ── Out-of-Process File Picker ─────────────────────────────────────────────────
@@ -481,11 +618,70 @@ def get_vault_security_info() -> Dict[str, Any]:
 # ── File Attachment & Context Inspection ───────────────────────────────────────
 
 def inspect_file(filepath: str) -> Dict[str, Any]:
+    # Security (T1/T2): lstat the UNRESOLVED path first — resolve() below
+    # would silently follow symlinks, so the link check must happen here.
+    try:
+        if stat.S_ISLNK(os.lstat(os.path.expanduser(filepath)).st_mode):
+            return {"ok": False, "error": f"Refusing to read symlink: {filepath}. Attach the target file directly."}
+    except OSError:
+        pass
     p = Path(filepath).expanduser().resolve()
     if not p.exists():
         return {"ok": False, "error": f"File not found: {filepath}"}
 
-    size_bytes = p.stat().st_size
+    # Security (M1): never ingest credential material. resolve() above already
+    # defeats ../ and symlink escape; this denylist blocks the obvious secret
+    # stores even when the path arrives via picker or a local IPC sender.
+    # Denied content would otherwise flow into prompts (third-party providers),
+    # history.json, and logs. Paste a redacted snippet instead.
+    _SENSITIVE_DIRS = {".ssh", ".gnupg"}
+    # Security (T3): home-relative credential-dir prefixes (tuple match).
+    _SENSITIVE_DIR_PREFIXES = (
+        (".aws",), (".azure",), (".kube",), (".docker",),
+        (".password-store",), (".config", "gcloud"),
+        (".local", "share", "keyrings"), (".mozilla",),
+    )
+    _SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx",
+                             ".ppk", ".ovpn", ".age", ".vault", ".env")
+    _SENSITIVE_NAMES = {".env", "credentials.json", "secrets.json", "id_rsa",
+                        "id_ed25519", "id_ecdsa", "id_dsa", ".netrc", "_netrc",
+                        ".git-credentials", ".npmrc", ".pypirc"}
+    _SENSITIVE_SUBSTRINGS = ("secret", "credential", "passwd", "private")
+    try:
+        home_parts = Path.home().resolve().parts
+        rel = p.parts[len(home_parts):] if p.parts[:len(home_parts)] == home_parts else ()
+    except Exception:
+        rel = ()
+    if rel:
+        if rel[0] in _SENSITIVE_DIRS:
+            return {"ok": False, "error": f"Refusing to read credential store path: {filepath}. Paste a redacted snippet instead."}
+        if any(rel[:len(pre)] == pre for pre in _SENSITIVE_DIR_PREFIXES):
+            return {"ok": False, "error": f"Refusing to read credential store path: {filepath}. Paste a redacted snippet instead."}
+    if str(p).startswith(("/etc/ssh/", "/etc/ssl/private/")):
+        return {"ok": False, "error": f"Refusing to read system credential path: {filepath}."}
+    if p in (Path("/etc/shadow"), Path("/etc/gshadow")):
+        return {"ok": False, "error": f"Refusing to read system credential file: {filepath}."}
+    lname = p.name.lower()
+    if p.suffix.lower() in _SENSITIVE_SUFFIXES or p.name in _SENSITIVE_NAMES \
+            or p.name.endswith(".env") or ".env." in p.name \
+            or any(s in lname for s in _SENSITIVE_SUBSTRINGS):
+        return {"ok": False, "error": f"Refusing to read likely-credential file: {filepath}. Paste a redacted snippet instead."}
+
+    # Security (T1/T2): lstat first (no-follow): refuse links and non-regular
+    # files (FIFO/socket/device open would hang), enforce a size cap. open()
+    # uses O_NOFOLLOW|O_NONBLOCK so a swapped-in link/FIFO cannot hang or
+    # escape; fstat re-verifies after open (closes the resolve-to-read race).
+    try:
+        lst = os.lstat(str(p))
+    except OSError:
+        return {"ok": False, "error": f"Cannot access file: {filepath}"}
+    if stat.S_ISLNK(lst.st_mode):
+        return {"ok": False, "error": f"Refusing to read symlink: {filepath}. Attach the target file directly."}
+    if not stat.S_ISREG(lst.st_mode):
+        return {"ok": False, "error": f"Refusing to read non-regular file: {filepath}."}
+    if lst.st_size > 5 * 1024 * 1024:
+        return {"ok": False, "error": f"File too large ({lst.st_size} bytes, cap 5 MB): {filepath}."}
+    size_bytes = lst.st_size
     size_str = f"{size_bytes} B"
     if size_bytes > 1024 * 1024:
         size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
@@ -519,10 +715,37 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
 
     text_content = ""
     if category == "code" or mime.startswith("text/"):
+        # Security (T1/T2): every fd path is closed; read/decode failures
+        # fail closed (refuse) instead of attaching silent-empty metadata.
+        fd = -1
         try:
-            text_content = p.read_text(encoding="utf-8", errors="replace")[:120000]
-        except Exception:
-            pass
+            fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode):
+                return {"ok": False, "error": f"Refusing to read non-regular file: {filepath}."}
+            size_bytes = fst.st_size
+            if size_bytes > 1024 * 1024:
+                size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+            elif size_bytes > 1024:
+                size_str = f"{size_bytes / 1024:.1f} KB"
+            else:
+                size_str = f"{size_bytes} B"
+            with os.fdopen(fd, "rb") as f:
+                fd = -1
+                raw = f.read(120001)
+            text_content = raw.decode("utf-8", errors="replace")[:120000]
+            # Security (T3): content sniff as defense-in-depth for innocuous
+            # names carrying key material.
+            if "-----BEGIN " in text_content and "PRIVATE KEY-----" in text_content:
+                return {"ok": False, "error": f"File looks like a private key: {filepath}. Paste a redacted snippet instead."}
+        except OSError as e:
+            return {"ok": False, "error": f"Cannot read file: {filepath} ({e.strerror or 'I/O error'})."}
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     return {
         "ok": True,
@@ -619,13 +842,24 @@ def hermes_approval_enforcement() -> Dict[str, Any]:
     return result
 
 def get_sandbox_status() -> Dict[str, Any]:
-    """Sandbox state including whether the Hermes engine technically enforces it."""
+    """Sandbox state including whether the Hermes engine technically enforces it.
+
+    sandbox_technically_enforced is True only for Hermes: the omp/claude/codex
+    engine branches build identical commands regardless of sandbox mode, so
+    ask() refuses sandboxed runs on those engines (see H2 gate in ask()).
+    """
     mode = get_sandbox_mode()
     enforcement = hermes_approval_enforcement() if mode else {"effective": "off"}
+    try:
+        active_engine = get_active_engine()
+    except Exception:
+        active_engine = "unknown"
     return {
         "ok": True,
         "sandbox_mode": mode,
         "hermes_enforcement": enforcement.get("effective", "unknown"),
+        "active_engine": active_engine,
+        "sandbox_technically_enforced": bool(mode) and active_engine == "hermes" and enforcement.get("effective") == "enforced",
     }
 
 def set_sandbox_mode(enabled: bool) -> Dict[str, Any]:
@@ -657,8 +891,6 @@ def set_notification_config(enabled: Optional[bool] = None, on_complete: Optiona
     cfg["notifications"] = notif
     save_config(cfg)
     return {"ok": True, "notifications": notif}
-
-import threading
 
 def send_system_notification(event_type: str, title: str, message: str, urgency: str = "normal") -> bool:
     """Dispatches an interactive desktop notification with buttons and automatic Botty app redirects."""
@@ -928,6 +1160,7 @@ def get_active_model_for_engine(engine: Optional[str] = None) -> Dict[str, str]:
     
     return {"model": "default", "provider": "auto"}
 
+@_synchronized
 def get_status() -> Dict[str, Any]:
     active_eng = get_active_engine()
     active_m = get_active_model_for_engine(active_eng)
@@ -965,33 +1198,31 @@ def get_status() -> Dict[str, Any]:
     status["hermes_enforcement"] = hermes_approval_enforcement().get("effective", "enforced")
     
     if LOCK_FILE.exists():
-        try:
-            pid = int(LOCK_FILE.read_text().strip())
-            os.kill(pid, 0)
+        # Single liveness helper for all call sites (F6): EPERM counts live.
+        if _ask_live():
             status["state"] = "working"
             status["has_active_work"] = True
             status["headline"] = "Thinking…"
-        except (ValueError, OSError):
-            LOCK_FILE.unlink(missing_ok=True)
-            if status.get("state") == "working":
-                status["state"] = "idle"
-                status["has_active_work"] = False
-                status["headline"] = "Ready"
-                save_json_file(STATUS_FILE, status)
+        elif status.get("state") == "working":
+            status["state"] = "idle"
+            status["has_active_work"] = False
+            status["headline"] = "Ready"
+            save_json_file(STATUS_FILE, status)
     return status
 
+@_synchronized
 def set_status(state: str, headline: str = "", last_query: str = "", last_answer: str = "", last_error: str = "") -> None:
     current = get_status()
     current["state"] = state
     current["has_active_work"] = (state == "working")
     if headline:
-        current["headline"] = headline
+        current["headline"] = redact_secrets(headline)
     if last_query:
-        current["last_query"] = last_query
+        current["last_query"] = redact_secrets(last_query)
     if last_answer:
-        current["last_answer"] = last_answer
+        current["last_answer"] = redact_secrets(last_answer)
     if last_error:
-        current["last_error"] = last_error
+        current["last_error"] = redact_secrets(last_error)
     current["timestamp"] = int(time.time())
     active_eng = get_active_engine()
     active_m = get_active_model_for_engine(active_eng)
@@ -1025,7 +1256,10 @@ def count_skills() -> int:
     return count
 
 def append_botty_log(entry: str) -> None:
+    # Security (L2): logs carry pasted queries and agent output; redact secret
+    # patterns on every write (idempotent on ordinary text).
     try:
+        entry = redact_secrets(entry)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         with open(BOTTY_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {entry}\n")
@@ -1300,11 +1534,11 @@ def get_targeted_situation_context() -> Dict[str, Any]:
     primary_cwd = ""
     primary_git: Dict[str, Any] = {}
     primary_app = active_win.get("class", "") or "Desktop"
-    primary_title = active_win.get("title", "")
+    primary_title = redact_secrets(active_win.get("title", ""))
 
     for c in visible:
         cls = c.get("class", "")
-        title = c.get("title", "")
+        title = redact_secrets(c.get("title", ""))
         pid = c.get("pid")
         is_active = (c.get("address") == active_addr) or (pid and pid == active_win.get("pid"))
         
@@ -1337,6 +1571,9 @@ def get_targeted_situation_context() -> Dict[str, Any]:
                             break
                     cwd = os.readlink(f"/proc/{cur_pid}/cwd")
                     cmd = Path(f"/proc/{cur_pid}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+                    # Security (T10): cmdlines routinely carry secrets (CLI flags).
+                    # Redact before this flows into prompts/history.
+                    cmd = redact_secrets(cmd)
                 except Exception:
                     pass
             
@@ -1387,7 +1624,8 @@ def get_targeted_situation_context() -> Dict[str, Any]:
             sel_text = r_sel.stdout.strip()
             if len(sel_text) > 400:
                 sel_text = sel_text[:400] + "… [truncated]"
-            selection = sel_text
+            # Security (T1 gap): selections routinely hold pasted secrets.
+            selection = redact_secrets(sel_text)
     except Exception:
         pass
 
@@ -1541,16 +1779,24 @@ def get_history() -> Dict[str, Any]:
     history = load_json_file(HISTORY_FILE, default_history)
     return {"ok": True, "history": history}
 
+@_synchronized
 def clear_history() -> Dict[str, Any]:
+    # Security (M2): never wipe history under a live ask — the in-flight
+    # answer would resurrect the cleared session on completion.
+    if _ask_live():
+        return {"ok": False, "error": "Botty is processing a request. Wait for the answer, then clear."}
+    old_rev = int(load_json_file(HISTORY_FILE, {}).get("rev", 0) or 0)
     history = {
         "session_id": "botty-widget",
-        "messages": []
+        "messages": [],
+        "rev": old_rev + 1
     }
     save_json_file(HISTORY_FILE, history)
     reset_hermes_session("botty-widget")
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
     return {"ok": True, "message": "History cleared and session reset"}
 
+@_synchronized
 def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None, sandbox_request: bool = False) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
@@ -1568,7 +1814,7 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
                 return
 
     msg = {
-        "id": f"msg_{int(time.time()*1000)}_{len(msgs)}",
+        "id": f"msg_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}",
         "role": role,
         "content": safe_content,
         "timestamp": int(time.time()),
@@ -1581,22 +1827,17 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     }
     msgs.append(msg)
     history["messages"] = msgs
+    _bump_history_rev(history)
     save_json_file(HISTORY_FILE, history)
 
 def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False) -> Dict[str, Any]:
     if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
         return {"ok": False, "error": "Empty query and no attachment or context provided."}
 
-    if LOCK_FILE.exists():
-        try:
-            pid = int(LOCK_FILE.read_text().strip())
-            os.kill(pid, 0)
-            return {"ok": False, "error": "Botty is already processing a request."}
-        except (ValueError, OSError):
-            LOCK_FILE.unlink(missing_ok=True)
+    if not _acquire_ask_lock():
+        return {"ok": False, "error": "Botty is already processing a request."}
 
     set_status("working", headline="Botty is thinking…", last_query=query)
-    LOCK_FILE.write_text(str(os.getpid()))
 
     captured_context: Optional[Dict[str, Any]] = None
     situation_data: Optional[Dict[str, Any]] = None
@@ -1796,9 +2037,27 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     active_m = get_active_model_for_engine(engine)
     selected_model = model or active_m.get("model", "")
 
+    # Security (H2): the sandbox is technically enforced ONLY by the Hermes
+    # engine's approval gate (default-deny single-query mode). The omp/claude/
+    # codex branches below build identical commands regardless of
+    # is_sandboxed, so running them "sandboxed" would silently execute
+    # writes the UI claims are gated. Refuse instead of implying protection.
+    if is_sandboxed and engine != "hermes":
+        err_msg = (
+            f"Sandboxed mode is technically enforced only on the Hermes engine, "
+            f"but the active engine is '{engine}'. Switch to Hermes in Settings, "
+            f"or approve a bypass run to proceed unrestricted."
+        )
+        set_status("error", headline="Sandboxed engine not supported", last_error=err_msg)
+        append_botty_log(f"REFUSED [{engine}] sandboxed ask: non-Hermes engine has no approval gate")
+        add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine)
+        LOCK_FILE.unlink(missing_ok=True)
+        return {"ok": False, "error": err_msg}
+
     query_tmp = BOTTY_DATA_DIR / "current_query.txt"
     hermes_prompt = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
     query_tmp.write_text(hermes_prompt, encoding="utf-8")
+    secure_file_permissions(query_tmp)
 
     t_start = time.perf_counter()
     append_botty_log(f"QUERY [{engine}/{selected_model}] (Sandbox: {is_sandboxed}): {user_query}")
@@ -1868,6 +2127,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         append_botty_log(f"ERROR [{engine}/{selected_model}]: {err}")
         add_history_message("assistant", f"⚠️ Error: {err}", model=selected_model, engine=engine, raw_output=err)
         send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
+        # Security (P0): this early return predates the try/finally below —
+        # release the lock or the next ask wedges on "already processing".
+        LOCK_FILE.unlink(missing_ok=True)
         return {"ok": False, "error": err}
 
     stdout_data = run.get("stdout", "")
@@ -1918,7 +2180,15 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         # Detect the sandbox permission request BEFORE persisting, so the
         # structured flag rides on the history message and the UI never has to
         # infer approval state from model text.
-        is_permission_required = "🔒 SANDBOX PERMISSION REQUIRED" in cleaned_response
+        # Security (A2): match outside fenced code so reflected untrusted text
+        # quoted in fences cannot mint the approval UX. Blockquote and HTML
+        # comment lines are dropped (not unquoted — unquoting would normalize
+        # them back into a match). Plain-prose model requests still match;
+        # the user approval click remains the control.
+        _nomark = _strip_fenced_code(cleaned_response)
+        _nomark = re.sub(r"<!--[\s\S]*?-->", "", _nomark)
+        _nomark = "\n".join(l for l in _nomark.split("\n") if not re.match(r"\s{0,3}>", l))
+        is_permission_required = "🔒 SANDBOX PERMISSION REQUIRED" in _nomark
         add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved, sandbox_request=is_permission_required)
 
         if is_permission_required:
@@ -2333,9 +2603,29 @@ def get_memories() -> Dict[str, Any]:
 
     return {"ok": True, "memories": memories, "count": len(memories)}
 
-def add_memory(text: str, is_user_fact: bool = False) -> Dict[str, Any]:
+def add_memory(text: str, is_user_fact: bool = False, from_model: bool = False) -> Dict[str, Any]:
     if not text.strip():
         return {"ok": False, "error": "Empty memory text."}
+
+    # Security (H1/A3): model-derived facts are untrusted input. They must never
+    # be written straight to live memory (trusted context for future runs) —
+    # stage them as pending proposals for explicit user review instead.
+    # from_model stages regardless of is_user_fact (user facts route to
+    # user_memories). User-typed facts (from_model=False) keep direct write.
+    if from_model:
+        clean = text.strip()
+        if len(clean) > MAX_PROPOSAL_MEMORY_CHARS:
+            err = f"Fact too long for review staging ({len(clean)} > {MAX_PROPOSAL_MEMORY_CHARS} chars). Save a shorter excerpt."
+            set_status(get_status().get("state", "idle"), headline="Fact not staged", last_error=err)
+            return {"ok": False, "error": err}
+        kind_key = "user_memories" if is_user_fact else "system_memories"
+        staged = stage_learning_proposals({kind_key: [clean]})
+        if staged.get(kind_key, 0) == 1:
+            set_status(get_status().get("state", "idle"), headline="Fact staged for review")
+            return {"ok": True, "message": "Fact staged for review in Memories."}
+        err = "Fact already saved or already pending review."
+        set_status(get_status().get("state", "idle"), headline="Fact not staged", last_error=err)
+        return {"ok": False, "error": err}
     
     target_file = (HERMES_MEMORY_DIR / "USER.md") if is_user_fact else (HERMES_MEMORY_DIR / "MEMORY.md")
     target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2536,10 +2826,12 @@ def get_proposals() -> Dict[str, Any]:
 def _load_proposals_list() -> List[Dict[str, Any]]:
     return load_json_file(PROPOSALS_FILE, {"proposals": []}).get("proposals", [])
 
+@_synchronized
 def _save_proposals_list(proposals: List[Dict[str, Any]]) -> None:
     save_json_file(PROPOSALS_FILE, {"proposals": proposals})
     secure_file_permissions(PROPOSALS_FILE)
 
+@_synchronized
 def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
     """Schema-validate + stage distilled memories/skills for user review.
 
@@ -2554,12 +2846,16 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
 
     staged_user = staged_sys = staged_skill = 0
     existing = _load_proposals_list()
-    seen_texts = {str(p.get("text", "")).strip().lower() for p in existing if p.get("kind") == "memory" and p.get("is_user_fact") is not None and p.get("status") == "pending"}
+    seen_texts = {str(p.get("text", "")).strip().lower() for p in existing if p.get("kind") == "memory" and p.get("is_user_fact") is True and p.get("status") == "pending"}
     seen_sys_texts = {str(p.get("text", "")).strip().lower() for p in existing if p.get("kind") == "memory" and p.get("is_user_fact") is False and p.get("status") == "pending"}
     seen_skill_names = {str(p.get("name", "")).lower() for p in existing if p.get("kind") == "skill" and p.get("status") == "pending"}
 
     # Live stores: skip facts already persisted (nothing to propose).
-    live_mems = {m.get("text", "").strip().lower() for m in get_memories().get("memories", [])}
+    # Split by store kind so a system fact never suppresses an identical
+    # user fact and vice versa (T11).
+    _live = get_memories().get("memories", [])
+    live_user_mems = {m.get("text", "").strip().lower() for m in _live if m.get("type") == "user"}
+    live_sys_mems = {m.get("text", "").strip().lower() for m in _live if m.get("type") == "system"}
 
     for um in user_mems:
         entry = {"text": str(um).strip(), "is_user_fact": True}
@@ -2567,12 +2863,12 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
         if err or not entry["text"]:
             continue
         key = entry["text"].lower()
-        if key in live_mems or key in seen_texts:
+        if key in live_user_mems or key in seen_texts:
             continue
         seen_texts.add(key)
         staged_user += 1
         existing.append({
-            "id": f"prop_{int(time.time()*1000)}_{staged_user}_{staged_sys}_{staged_skill}",
+            "id": f"prop_{int(time.time()*1000)}_{staged_user}_{staged_sys}_{staged_skill}_{uuid.uuid4().hex[:6]}",
             "kind": "memory", "status": "pending", "created_at": int(time.time()),
             **entry
         })
@@ -2583,12 +2879,12 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
         if err or not entry["text"]:
             continue
         key = entry["text"].lower()
-        if key in live_mems or key in seen_sys_texts:
+        if key in live_sys_mems or key in seen_sys_texts:
             continue
         seen_sys_texts.add(key)
         staged_sys += 1
         existing.append({
-            "id": f"prop_{int(time.time()*1000)}_{staged_user}_{staged_sys}_{staged_skill}",
+            "id": f"prop_{int(time.time()*1000)}_{staged_user}_{staged_sys}_{staged_skill}_{uuid.uuid4().hex[:6]}",
             "kind": "memory", "status": "pending", "created_at": int(time.time()),
             **entry
         })
@@ -2614,7 +2910,7 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
             seen_skill_names.add(entry["name"].lower())
             staged_skill += 1
             existing.append({
-                "id": f"prop_{int(time.time()*1000)}_{staged_user}_{staged_sys}_{staged_skill}",
+                "id": f"prop_{int(time.time()*1000)}_{staged_user}_{staged_sys}_{staged_skill}_{uuid.uuid4().hex[:6]}",
                 "kind": "skill", "status": "pending", "created_at": int(time.time()),
                 **entry
             })
@@ -2636,6 +2932,7 @@ def stage_learning_proposals(distilled_data: Dict[str, Any]) -> Dict[str, int]:
 
     return {"user_memories": staged_user, "system_memories": staged_sys, "skills": staged_skill}
 
+@_synchronized
 def apply_proposal(proposal_id: str) -> Dict[str, Any]:
     """Apply ONE reviewed proposal to the staging directory (inert, not live).
 
@@ -2645,9 +2942,15 @@ def apply_proposal(proposal_id: str) -> Dict[str, Any]:
     proposals = _load_proposals_list()
     for p in proposals:
         if str(p.get("id", "")) == str(proposal_id) and p.get("status") == "pending":
+            # Security (A4): re-validate — staged content is untrusted until
+            # approval, and the pending file is writable outside this flow.
             if p.get("kind") == "memory":
+                if _validate_proposal_schema("memory", {"text": p.get("text", "")}):
+                    return {"ok": False, "error": "Staged entry fails schema validation."}
                 res = _write_approved_memory(str(p.get("text", "")), is_user_fact=bool(p.get("is_user_fact")))
             elif p.get("kind") == "skill":
+                if _validate_proposal_schema("skill", {"name": p.get("name", ""), "description": p.get("description", ""), "instructions": p.get("instructions", "")}):
+                    return {"ok": False, "error": "Staged entry fails schema validation."}
                 res = _write_approved_skill(str(p.get("name", "")), str(p.get("description", "")), str(p.get("instructions", "")))
             else:
                 return {"ok": False, "error": "Unknown proposal kind."}
@@ -2659,6 +2962,7 @@ def apply_proposal(proposal_id: str) -> Dict[str, Any]:
             return res
     return {"ok": False, "error": f"Proposal not found or already reviewed: {proposal_id}"}
 
+@_synchronized
 def reject_proposal(proposal_id: str) -> Dict[str, Any]:
     """Reject/discard ONE proposal."""
     proposals = _load_proposals_list()
@@ -2677,6 +2981,10 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
     and replaces pruned history in history.json with a concise context summary + protected tail.
     Also resets the Hermes SQLite session so the next turn starts with 0 stale context tokens.
     """
+    # Security (M2): never prune history under a live ask — the in-flight
+    # answer's stale snapshot would resurrect pruned turns on completion.
+    if _ask_live():
+        return {"ok": False, "error": "Botty is processing a request. Wait for the answer, then compact."}
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
     
@@ -2736,6 +3044,13 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
     )
 
     engine = get_active_engine()
+    # Security (H2b): same gate as ask() — distillation spawns a fully capable
+    # agent, and the omp/claude/codex branches have no approval gate. While
+    # sandboxed, force Hermes (approval-gated); if Hermes is unavailable the
+    # existing fallback-summary path below handles the failure gracefully.
+    if get_sandbox_mode() and engine != "hermes":
+        append_botty_log(f"DISTILL engine override [{engine}->hermes]: sandboxed non-Hermes engine has no approval gate")
+        engine = "hermes"
     distilled_data = None
     raw_llm_out = ""
 
@@ -2832,7 +3147,7 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
 
     # 4. Construct synthetic summary message and prune history.json
     summary_msg = {
-        "id": f"msg_summary_{int(time.time()*1000)}",
+        "id": f"msg_summary_{int(time.time()*1000)}_{uuid.uuid4().hex[:8]}",
         "role": "system",
         "content": f"📌 [Context Compacted]: {summary_text}",
         "timestamp": int(time.time()),
@@ -2843,8 +3158,25 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
         "sandbox_request": False,
         "is_summary": True
     }
-    history["messages"] = [summary_msg] + tail_messages
-    save_json_file(HISTORY_FILE, history)
+    # Security (M2/F5): re-read + validate INSIDE the held lock so no append
+    # can land between validation and save. Exact-match rule (length AND last
+    # id, either direction) also closes the empty-tail bypass: any concurrent
+    # change alters length or last id.
+    _fh = _exclusive_file_lock()
+    try:
+        fresh = load_json_file(HISTORY_FILE, {"messages": []})
+        fresh_msgs = fresh.get("messages", [])
+        snap_last = msgs[-1].get("id") if msgs else None
+        fresh_last = fresh_msgs[-1].get("id") if fresh_msgs else None
+        if len(fresh_msgs) != len(msgs) or snap_last != fresh_last:
+            return {"ok": False, "error": "History changed during compaction (messages arrived or pruned). Retry compaction."}
+        history["messages"] = [summary_msg] + tail_messages
+        # Rev is max+1 over the FRESH file (not the stale snapshot) so
+        # concurrent appends cannot duplicate it.
+        history["rev"] = int(fresh.get("rev", 0) or 0) + 1
+        save_json_file(HISTORY_FILE, history)
+    finally:
+        _release_file_lock(_fh)
 
     # 4b. Write the continuity bridge so the model keeps this context across the
     # Hermes session reset below. Without this, the next turn loads a fresh, empty
@@ -2989,7 +3321,7 @@ def main():
     subparsers.add_parser("memories", help="List memories")
 
     subparsers.add_parser("proposals", help="List staged learning proposals (memories/skills awaiting review)")
-    apply_p = subparsers.add_parser("proposal-apply", help="Approve ONE staged proposal (writes it to live memory/skill store)")
+    apply_p = subparsers.add_parser("proposal-apply", help="Approve ONE staged proposal (writes it to the inert approved-staging dir, never live stores)")
     apply_p.add_argument("id", help="Proposal ID")
     rej_p = subparsers.add_parser("proposal-reject", help="Reject ONE staged proposal")
     rej_p.add_argument("id", help="Proposal ID")
@@ -2997,6 +3329,7 @@ def main():
     add_m = subparsers.add_parser("add-memory", help="Add persistent memory")
     add_m.add_argument("text", help="Memory content")
     add_m.add_argument("--user", dest="user", action="store_true", help="Store as user fact in USER.md")
+    add_m.add_argument("--from-model", dest="from_model", action="store_true", help="Model-derived fact: stage as pending proposal for review instead of writing live memory")
 
     del_m = subparsers.add_parser("delete-memory", help="Delete a persistent memory")
     del_m.add_argument("id", help="Memory ID or index")
@@ -3092,7 +3425,7 @@ def main():
     elif args.command == "proposal-reject":
         print(json.dumps(reject_proposal(args.id), ensure_ascii=False))
     elif args.command == "add-memory":
-        print(json.dumps(add_memory(args.text, is_user_fact=args.user), ensure_ascii=False))
+        print(json.dumps(add_memory(args.text, is_user_fact=args.user, from_model=args.from_model), ensure_ascii=False))
     elif args.command == "delete-memory":
         print(json.dumps(delete_memory(args.id, is_user_fact=args.user), ensure_ascii=False))
     elif args.command == "compact":

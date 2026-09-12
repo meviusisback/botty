@@ -51,7 +51,7 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(SCREENSHOT_DIR, 0o700)
 
 HERMES_DIR = Path.home() / ".hermes"
-HERMES_BOTTY_DIR = HERMES_DIR / "profiles" / "botti"
+HERMES_BOTTY_DIR = HERMES_DIR / "profiles" / "botty"
 HERMES_CONFIG_FILE = HERMES_BOTTY_DIR / "config.yaml"
 HERMES_MEMORY_DIR = HERMES_BOTTY_DIR / "memories"
 HERMES_SKILLS_DIR = HERMES_BOTTY_DIR / "skills"
@@ -809,26 +809,105 @@ def get_agent_engines() -> Dict[str, Any]:
         "engines": engines
     }
 
+def _parse_hermes_model_block(content: str) -> tuple:
+    """Parse default/provider from the top-level `model:` block, any key order."""
+    model = None
+    provider = None
+    lines = content.splitlines()
+    model_idx = None
+    model_indent = 0
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*model\s*:\s*(?:#.*)?$", line):
+            model_idx = i
+            model_indent = len(line) - len(line.lstrip())
+            break
+    if model_idx is None:
+        return None, None
+    for line in lines[model_idx + 1:]:
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= model_indent and re.match(r"^\s*\w[\w-]*\s*:.*$", line):
+            break
+        stripped = line.strip()
+        m = re.match(r"^default\s*:\s*(.+?)\s*(?:#.*)?$", stripped)
+        if m:
+            model = m.group(1).strip().strip("'\"")
+            continue
+        m = re.match(r"^provider\s*:\s*(.+?)\s*(?:#.*)?$", stripped)
+        if m:
+            provider = m.group(1).strip().strip("'\"")
+            continue
+    return model, provider
+
+
+def _update_hermes_config_model(content: str, model_id: str, provider_id: str) -> str:
+    """Update (or create) default/provider inside the `model:` block, any key order."""
+    lines = content.splitlines()
+    model_idx = None
+    model_indent = 0
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*model\s*:\s*(?:#.*)?$", line):
+            model_idx = i
+            model_indent = len(line) - len(line.lstrip())
+            break
+    if model_idx is None:
+        lines.append("model:")
+        lines.append(f"  default: {model_id}")
+        lines.append(f"  provider: {provider_id}")
+        return "\n".join(lines) + "\n"
+    base_indent = " " * (model_indent + 2)
+    found_default = False
+    found_provider = False
+    end_idx = len(lines)
+    for j in range(model_idx + 1, len(lines)):
+        line = lines[j]
+        if not line.strip() or line.strip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent <= model_indent and re.match(r"^\s*\w[\w-]*\s*:.*$", line):
+            end_idx = j
+            break
+    for j in range(model_idx + 1, end_idx):
+        stripped = lines[j].strip()
+        if re.match(r"^default\s*:.*$", stripped):
+            indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+            comment = ""
+            lines[j] = f"{indent}default: {model_id}{comment}"
+            found_default = True
+        elif re.match(r"^provider\s*:.*$", stripped):
+            indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+            lines[j] = f"{indent}provider: {provider_id}"
+            found_provider = True
+    inserts = []
+    if not found_default:
+        inserts.append(f"{base_indent}default: {model_id}")
+    if not found_provider:
+        inserts.append(f"{base_indent}provider: {provider_id}")
+    if inserts:
+        lines[end_idx:end_idx] = inserts
+    return "\n".join(lines) + ("\n" if content.endswith("\n") or True else "")
+
+
 def get_active_model_for_engine(engine: Optional[str] = None) -> Dict[str, str]:
     eng = engine or get_active_engine()
     cfg = load_json_file(CONFIG_FILE, {})
     engine_models = cfg.get("engine_models", {})
 
     if eng == "hermes":
+        fallback = engine_models.get("hermes", {"model": "ox-alpha-free", "provider": "opencode-go"})
         if not HERMES_CONFIG_FILE.exists():
-            return {"model": "ox-alpha-free", "provider": "opencode-go"}
+            return {"model": fallback.get("model", "ox-alpha-free"), "provider": fallback.get("provider", "opencode-go")}
         try:
             with open(HERMES_CONFIG_FILE, "r", encoding="utf-8") as f:
                 content = f.read()
-            model_match = re.search(r"model:\s*\n\s*default:\s*([^\n]+)", content)
-            provider_match = re.search(r"model:\s*\n(?:[^\n]+\n)*?\s*provider:\s*([^\n]+)", content)
-            model = model_match.group(1).strip() if model_match else "ox-alpha-free"
-            provider = provider_match.group(1).strip() if provider_match else "opencode-go"
-            model = model.strip("'\"")
-            provider = provider.strip("'\"")
-            return {"model": model, "provider": provider}
+            model, provider = _parse_hermes_model_block(content)
+            return {
+                "model": model or fallback.get("model", "ox-alpha-free"),
+                "provider": provider or fallback.get("provider", "opencode-go"),
+            }
         except Exception:
-            return {"model": "ox-alpha-free", "provider": "opencode-go"}
+            return {"model": fallback.get("model", "ox-alpha-free"), "provider": fallback.get("provider", "opencode-go")}
     elif eng == "omp":
         # Check ~/.omp/agent/config.yml directly for ground truth
         if OMP_CONFIG_FILE.exists():
@@ -1806,6 +1885,15 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         if run.get("returncode") != 0 and not cleaned_response:
             err_msg = (stderr_data or "").strip() or f"Agent process exited with code {run.get('returncode')}"
             err_msg = cap_text(err_msg, 2000)
+            
+            # Check for OpenCode session error - provide helpful guidance
+            if "MissingSessionID" in err_msg or "x-opencode-session" in err_msg:
+                err_msg = (
+                    "OpenCode Go provider error: Missing session ID. "
+                    "This provider requires session headers that may not be supported by the current engine. "
+                    "Try switching to a different provider (OpenRouter, Ollama, etc.) in Settings."
+                )
+            
             set_status("error", headline="Error", last_error=err_msg)
             append_botty_log(f"ERROR [{engine}/{selected_model}] (Code {run.get('returncode')}): {err_msg}")
             add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine, raw_output=redact_secrets(cap_text(stderr_data or stdout_data, RAW_OUTPUT_PERSIST_CHARS)))
@@ -2137,16 +2225,7 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
         if HERMES_CONFIG_FILE.exists():
             try:
                 content = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
-                new_content = re.sub(
-                    r"(model:\s*\n\s*default:\s*)[^\n]+",
-                    rf"\g<1>{model_id}",
-                    content
-                )
-                new_content = re.sub(
-                    r"(model:\s*\n(?:[^\n]+\n)*?\s*provider:\s*)[^\n]+",
-                    rf"\g<1>{provider_id}",
-                    new_content
-                )
+                new_content = _update_hermes_config_model(content, model_id, provider_id)
                 HERMES_CONFIG_FILE.write_text(new_content, encoding="utf-8")
             except Exception as e:
                 return {"ok": False, "error": f"Failed to set Hermes model: {str(e)}"}
@@ -2154,8 +2233,12 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
         if OMP_CONFIG_FILE.exists():
             try:
                 content = OMP_CONFIG_FILE.read_text(encoding="utf-8")
-                new_content = re.sub(r"(default:\s*)[^\n]+", rf"\g<1>{model_id}", content)
-                OMP_CONFIG_FILE.write_text(new_content, encoding="utf-8")
+                # Only touch a `default:` line that carries a model id (has `/`
+                # or is non-empty), anchored to line start to avoid clobbering
+                # unrelated `default` keys elsewhere in the file.
+                new_content, n = re.subn(r"(?m)^(\s*default\s*:\s*)\S[^\n]*", rf"\g<1>{model_id}", content, count=1)
+                if n:
+                    OMP_CONFIG_FILE.write_text(new_content, encoding="utf-8")
             except Exception as e:
                 return {"ok": False, "error": f"Failed to set OMP model: {str(e)}"}
 
@@ -2690,6 +2773,15 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
 
         run = run_bounded_process(cmd, timeout_s=90, stdin_text=stdin_text, max_output_chars=AGENT_OUTPUT_CAP_CHARS)
         raw_llm_out = (run.get("stdout") or "").strip()
+        
+        # Check for OpenCode session error - this is a known compatibility issue
+        # when the opencode-go provider requires a session header that Hermes doesn't provide
+        stderr_data = (run.get("stderr") or "").strip()
+        if "MissingSessionID" in raw_llm_out or "MissingSessionID" in stderr_data:
+            append_botty_log(f"DISTILL WARNING: OpenCode Go provider MissingSessionID error. Provider may need session header.")
+            # Don't fail completely - use fallback summary
+            raw_llm_out = ""
+        
         if run.get("ok") and run.get("returncode") == 0 and raw_llm_out:
             json_match = re.search(r"\{[\s\S]*\}", raw_llm_out)
             if json_match:

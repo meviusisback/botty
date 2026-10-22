@@ -43,10 +43,16 @@ after the ask lock is released, as a detached child (`botty_backend.py compact`
 `test_security.py` called `distill_and_compact_session()` without isolating
 `HERMES_STATE_DB`, so running the test suite renamed the user's real
 `botty-widget` session to `archived-botty-widget-*` (the widget then looks like
-it lost its chat history). `test_compaction.py` appended its compaction logs to
-the real `botty.log`. Both now isolate `HERMES_STATE_DB`, `HERMES_SKILLS_DIR`
-and `BOTTY_LOG_FILE`; verified: title and log line count unchanged across a
-full suite run.
+it lost its chat history). It also called `clear_history()` with the real bridge
+path (deleting it) and rebuilt the real `vault.enc` from the temp fixtures
+(71 KB -> 1 KB), while `test_compaction.py` appended its compaction logs to the
+real `botty.log`.
+
+All three test files now isolate `HERMES_STATE_DB`, `HERMES_SKILLS_DIR`,
+`HERMES_MEMORY_DIR`, `BOTTY_LOG_FILE`, `CONTEXT_BRIDGE_FILE`, `VAULT_FILE` and
+`APPROVED_STAGING_DIR`. Verified with a sha256 + line-count fingerprint of the
+live data dir, the vault, the bridge, the staging dir and the session table taken
+before and after a full suite run: identical.
 
 `test_context_preamble.py` (new, 16 tests) covers preamble detection, prompt
 composition, the mode line, the auto-compaction trigger and bridge cleanup on

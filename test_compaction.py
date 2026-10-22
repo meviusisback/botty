@@ -60,6 +60,8 @@ class TestCompactionAndDistillation(unittest.TestCase):
         self.orig_proposals_file = botty_backend.PROPOSALS_FILE
         self.orig_context_bridge_file = botty_backend.CONTEXT_BRIDGE_FILE
         self.orig_log_file = botty_backend.BOTTY_LOG_FILE
+        self.orig_vault_file = botty_backend.VAULT_FILE
+        self.orig_staging_dir = botty_backend.APPROVED_STAGING_DIR
 
         botty_backend.BOTTY_DATA_DIR = self.data_dir
         botty_backend.HISTORY_FILE = self.history_file
@@ -72,8 +74,12 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.HERMES_STATE_DB = self.hermes_state_db
         botty_backend.PROPOSALS_FILE = self.proposals_file
         botty_backend.CONTEXT_BRIDGE_FILE = self.context_bridge_file
-        # Compaction logging must not append to the user's real botty.log.
+        # Compaction logging must not append to the user's real botty.log, and the
+        # vault / staging dir must not be rebuilt from test fixtures.
         botty_backend.BOTTY_LOG_FILE = self.data_dir / "botty.log"
+        botty_backend.VAULT_FILE = self.data_dir / "vault.enc"
+        botty_backend.APPROVED_STAGING_DIR = self.data_dir / "approved_proposals"
+        botty_backend.APPROVED_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
         # Initialize mock SQLite state.db with sessions table
         con = sqlite3.connect(str(self.hermes_state_db))
@@ -97,6 +103,8 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.PROPOSALS_FILE = self.orig_proposals_file
         botty_backend.CONTEXT_BRIDGE_FILE = self.orig_context_bridge_file
         botty_backend.BOTTY_LOG_FILE = self.orig_log_file
+        botty_backend.VAULT_FILE = self.orig_vault_file
+        botty_backend.APPROVED_STAGING_DIR = self.orig_staging_dir
         self.test_dir.cleanup()
 
     def test_threshold_config(self):

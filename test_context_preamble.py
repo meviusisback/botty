@@ -34,7 +34,8 @@ class TestContextPreamble(unittest.TestCase):
         for name in ("BOTTY_DATA_DIR", "HISTORY_FILE", "HISTORY_ARCHIVE_FILE",
                      "CONFIG_FILE", "STATUS_FILE", "LOCK_FILE", "HISTORY_LOCK_FILE",
                      "HERMES_MEMORY_DIR", "PROPOSALS_FILE", "BOTTY_LOG_FILE",
-                     "CONTEXT_BRIDGE_FILE", "HERMES_STATE_DB", "HERMES_CONFIG_FILE"):
+                     "CONTEXT_BRIDGE_FILE", "HERMES_STATE_DB", "HERMES_CONFIG_FILE",
+                     "VAULT_FILE", "APPROVED_STAGING_DIR"):
             self.orig[name] = getattr(botty_backend, name)
         botty_backend.BOTTY_DATA_DIR = self.data_dir
         botty_backend.HISTORY_FILE = self.data_dir / "history.json"
@@ -49,6 +50,9 @@ class TestContextPreamble(unittest.TestCase):
         botty_backend.CONTEXT_BRIDGE_FILE = self.data_dir / "context_bridge.txt"
         botty_backend.HERMES_STATE_DB = self.state_db
         botty_backend.HERMES_CONFIG_FILE = self.data_dir / "hermes_config.yaml"
+        botty_backend.VAULT_FILE = self.data_dir / "vault.enc"
+        botty_backend.APPROVED_STAGING_DIR = self.data_dir / "approved_proposals"
+        botty_backend.APPROVED_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         for name, val in self.orig.items():

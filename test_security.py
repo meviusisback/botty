@@ -27,7 +27,8 @@ class TestSecurityHardening(unittest.TestCase):
         for name in ("BOTTY_DATA_DIR", "HISTORY_FILE", "HISTORY_ARCHIVE_FILE",
                      "CONFIG_FILE", "STATUS_FILE", "LOCK_FILE", "HISTORY_LOCK_FILE",
                      "HERMES_MEMORY_DIR", "HERMES_SKILLS_DIR", "HERMES_STATE_DB",
-                     "PROPOSALS_FILE", "BOTTY_LOG_FILE"):
+                     "PROPOSALS_FILE", "BOTTY_LOG_FILE", "CONTEXT_BRIDGE_FILE",
+                     "VAULT_FILE", "APPROVED_STAGING_DIR"):
             self.orig[name] = getattr(botty_backend, name)
         botty_backend.BOTTY_DATA_DIR = self.data_dir
         botty_backend.HISTORY_FILE = self.data_dir / "history.json"
@@ -38,13 +39,18 @@ class TestSecurityHardening(unittest.TestCase):
         botty_backend.HISTORY_LOCK_FILE = self.data_dir / ".history.lock"
         botty_backend.HERMES_MEMORY_DIR = self.hermes_mem_dir
         botty_backend.HERMES_SKILLS_DIR = Path(self.test_dir.name) / "skills"
-        # Without these two the suite reaches into the LIVE botty profile: the
-        # compaction tests call reset_hermes_session(), which renames the user's
-        # real 'botty-widget' session to archived-*, silently detaching the
-        # widget from its own chat history.
+        # Without these the suite reaches into the LIVE botty profile: the
+        # compaction tests call reset_hermes_session() (renames the user's real
+        # 'botty-widget' session to archived-*), clear_history() deletes the real
+        # context bridge, and update_encrypted_vault() overwrites the real
+        # vault.enc with whatever the temp fixtures contain.
         botty_backend.HERMES_STATE_DB = Path(self.test_dir.name) / "state.db"
         botty_backend.PROPOSALS_FILE = self.data_dir / "pending_proposals.json"
         botty_backend.BOTTY_LOG_FILE = self.data_dir / "botty.log"
+        botty_backend.CONTEXT_BRIDGE_FILE = self.data_dir / "context_bridge.txt"
+        botty_backend.VAULT_FILE = self.data_dir / "vault.enc"
+        botty_backend.APPROVED_STAGING_DIR = self.data_dir / "approved_proposals"
+        botty_backend.APPROVED_STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         for name, val in self.orig.items():

@@ -74,6 +74,47 @@ Verified with a real `hermes` run: answered turn 2 from a different working
 directory (the condition that triggers the restore) and the notice no longer
 reaches the saved answer.
 
+### 5. Fix round after the security review (3 reviewers, 2 blocking verdicts)
+
+The first review round rejected the change. What it found, and what changed:
+
+1. **The detached child hijacked the shared status** (blocking). `distill_and_compact_session()`
+   set `state="working"` / "Distilling memory & compacting…", which the widget reads as "an ask
+   is in flight": it blocks the input field and shows "Botty thinking…" for the whole
+   distillation. → The child now runs `compact --background` and touches neither the status nor
+   `last_answer`.
+2. **No compaction-level mutex** (blocking): the auto-spawn, the UI button and a manual
+   `compact` could all run at once, each burning a full agent call, and — worse — the archive
+   append ran BEFORE the history re-validation, so a losing compactor still appended its
+   messages (probe: 3 concurrent runs archived 12 messages 36 times). → `COMPACT_LOCK_FILE`
+   (`compacting.pid`, O_EXCL + PID liveness) is claimed before any LLM work and released in a
+   `finally`; the archive append now happens inside the validated lock region, and proposal
+   staging after the commit (flock is not re-entrant, staging takes it itself).
+3. **The preamble check was fail-OPEN under Hermes' own compression** (blocking): Hermes
+   compresses a long session in place (`active = 0` soft archive) and builds the live prompt
+   from `active = 1` rows, so a marker in an archived row would suppress the directive forever.
+   → `_session_messages_filter()` probes the schema and adds `COALESCE(active,1)=1` /
+   `COALESCE(compacted,0)=0`; the read is `mode=ro` with a 1 s timeout on the answer path.
+4. **Silent child + no backoff**: the parent logged "started" before the child did anything and
+   the child's output went to /dev/null. → the child's stdout/stderr go to `compaction.log`,
+   every abort path logs a `COMPACTION REFUSED/ABORTED/DEFERRED` line, and a 600 s cooldown
+   (overridden when the history grew) stops a repeatedly failing run from calling the model
+   every turn.
+5. **Session reset could detach a live ask**: `_ask_live()` was checked once, ~90 s before the
+   rename. → the bridge write and `reset_hermes_session()` are skipped (and logged) if an ask
+   went live during the distillation.
+6. Cheap ones also in: the mode line now says it supersedes any earlier MODE/sandbox
+   instruction; the bridge summary/tail are capped (2000 / 6000 chars); all three suites isolate
+   `COMPACT_LOCK_FILE`, `COMPACTION_*`, `HISTORY_LOCK_FILE`, `VOICE_PID_FILE`, `SCREENSHOT_DIR`
+   (a fingerprint of the live dir is byte-identical across a run).
+
+Declined: the "bridge is re-injected unfenced" finding is contradicted by the code — `ask()`
+already wraps it in a `[UNTRUSTED DATA — reference only…]` fence (only the cap was missing).
+
+Guard sweep: 8 mutations (mutex, both status skips, `active` filter, abort-before-side-effects,
+`--background` in the child argv, cooldown, notice stripping) — **8/8 CAUGHT** by a named test.
+
+
 ## 2026-09-12 update: ALL scroll changes REVERTED
 
 After 4 rounds of scroll patches the widget flickered constantly even idle —

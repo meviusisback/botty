@@ -62,6 +62,12 @@ class TestCompactionAndDistillation(unittest.TestCase):
         self.orig_log_file = botty_backend.BOTTY_LOG_FILE
         self.orig_vault_file = botty_backend.VAULT_FILE
         self.orig_staging_dir = botty_backend.APPROVED_STAGING_DIR
+        self.orig_history_lock = botty_backend.HISTORY_LOCK_FILE
+        self.orig_compact_lock = botty_backend.COMPACT_LOCK_FILE
+        self.orig_compaction_log = botty_backend.COMPACTION_LOG_FILE
+        self.orig_compaction_state = botty_backend.COMPACTION_STATE_FILE
+        self.orig_voice_pid = botty_backend.VOICE_PID_FILE
+        self.orig_screenshot_dir = botty_backend.SCREENSHOT_DIR
 
         botty_backend.BOTTY_DATA_DIR = self.data_dir
         botty_backend.HISTORY_FILE = self.history_file
@@ -80,6 +86,14 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.VAULT_FILE = self.data_dir / "vault.enc"
         botty_backend.APPROVED_STAGING_DIR = self.data_dir / "approved_proposals"
         botty_backend.APPROVED_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        # Without these the suite flocks the user's live .history.lock and could
+        # serialize a test run against a real ask.
+        botty_backend.HISTORY_LOCK_FILE = self.data_dir / ".history.lock"
+        botty_backend.COMPACT_LOCK_FILE = self.data_dir / "compacting.pid"
+        botty_backend.COMPACTION_LOG_FILE = self.data_dir / "compaction.log"
+        botty_backend.COMPACTION_STATE_FILE = self.data_dir / "compaction_state.json"
+        botty_backend.VOICE_PID_FILE = self.data_dir / "voice.pid"
+        botty_backend.SCREENSHOT_DIR = self.data_dir / "captures"
 
         # Initialize mock SQLite state.db with sessions table
         con = sqlite3.connect(str(self.hermes_state_db))
@@ -105,6 +119,12 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.BOTTY_LOG_FILE = self.orig_log_file
         botty_backend.VAULT_FILE = self.orig_vault_file
         botty_backend.APPROVED_STAGING_DIR = self.orig_staging_dir
+        botty_backend.HISTORY_LOCK_FILE = self.orig_history_lock
+        botty_backend.COMPACT_LOCK_FILE = self.orig_compact_lock
+        botty_backend.COMPACTION_LOG_FILE = self.orig_compaction_log
+        botty_backend.COMPACTION_STATE_FILE = self.orig_compaction_state
+        botty_backend.VOICE_PID_FILE = self.orig_voice_pid
+        botty_backend.SCREENSHOT_DIR = self.orig_screenshot_dir
         self.test_dir.cleanup()
 
     def test_threshold_config(self):

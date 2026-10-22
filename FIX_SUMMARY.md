@@ -58,6 +58,22 @@ before and after a full suite run: identical.
 composition, the mode line, the auto-compaction trigger and bridge cleanup on
 Clear.
 
+### 4. Every reply started with `↪ restored workspace dir: …` ✅ FIXED
+
+`hermes chat --continue` restores the resumed session's recorded working
+directory and prints `↪ restored workspace dir: <path>` on stdout. Botty treats
+stdout as the answer, so that CLI notice became the first line of every reply in
+the widget and of every entry in `history.json`.
+
+Fix: `strip_cli_notices()` runs inside `strip_reasoning()` (the single funnel for
+response text) and drops exactly that marker line — anchored to
+`restored workspace dir:` so arrows used as prose survive. Stored messages were
+cleaned in place (7 of 64, backup kept); nothing else changed.
+
+Verified with a real `hermes` run: answered turn 2 from a different working
+directory (the condition that triggers the restore) and the notice no longer
+reaches the saved answer.
+
 ## 2026-09-12 update: ALL scroll changes REVERTED
 
 After 4 rounds of scroll patches the widget flickered constantly even idle —

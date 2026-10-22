@@ -486,6 +486,23 @@ def run_bounded_process(
         result["error"] = f"Process error: {str(e)}"
         return result
 
+# Anchored to the CLI's own marker so legitimate arrow glyphs in an answer survive.
+_CLI_NOTICE_RES = re.compile(r"^[ \t]*↪[ \t]*restored workspace dir:[^\n]*\n?", re.MULTILINE)
+
+
+def strip_cli_notices(text: str) -> str:
+    """Drop notice lines that the AGENT CLI prints, not the model.
+
+    `hermes chat --continue` announces the workspace it restores at the start of
+    every run ("↪ restored workspace dir: …"). Botty captures the CLI's stdout as
+    the answer, so without this the widget shows that line as the first line of
+    every reply — it is process chatter, never part of the response.
+    """
+    if not text:
+        return text
+    return _CLI_NOTICE_RES.sub("", text)
+
+
 def strip_reasoning(text: str) -> str:
     """Removes thinking / chain-of-thought blocks to return only concise, actionable answers."""
     if not text:
@@ -494,12 +511,13 @@ def strip_reasoning(text: str) -> str:
     # Strip ANSI escape sequences
     t = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", t)
     t = re.sub(r"<thought>.*?(?:</thought>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
-    t = re.sub(r"<think>.*?(?:</think>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = re.sub(r" thinking.*?(?:</think>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"<reasoning>.*?(?:</reasoning>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"<antThinking>.*?(?:</antThinking>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"<scratchpad>.*?(?:</scratchpad>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"<reflection>.*?(?:</reflection>|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
     t = re.sub(r"^(?:Thinking Process|Thought|Reasoning):\s*.*?(?=\n\n|\n[A-Z]|$)", "", t, flags=re.DOTALL | re.IGNORECASE)
+    t = strip_cli_notices(t)
     return t.strip()
 
 def load_json_file(path: Path, default: Any) -> Any:

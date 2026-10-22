@@ -1848,6 +1848,17 @@ def _session_messages_filter(cur) -> str:
     return (" AND " + " AND ".join(parts)) if parts else ""
 
 
+def _session_order_clause(cur) -> str:
+    """Pick the ordering column Hermes actually has (schema differs between builds:
+    `last_activity_at` exists in the current one, older ones only have `started_at`).
+    A missing column would raise and silently disable the whole optimisation."""
+    try:
+        cols = {row[1] for row in cur.execute("PRAGMA table_info(sessions)").fetchall()}
+    except Exception:
+        return "started_at"
+    return "COALESCE(last_activity_at, started_at)" if "last_activity_at" in cols else "started_at"
+
+
 def hermes_session_has_preamble(session_name: str = HERMES_SESSION_NAME, lookback: int = 60) -> bool:
     """True when the live Hermes session already carries Botty's static preamble.
 
@@ -1870,9 +1881,11 @@ def hermes_session_has_preamble(session_name: str = HERMES_SESSION_NAME, lookbac
         con = sqlite3.connect(f"file:{HERMES_STATE_DB}?mode=ro", uri=True, timeout=1.0)
         try:
             cur = con.cursor()
+            where_extra = _session_messages_filter(cur)
+            order_clause = _session_order_clause(cur)
             row = cur.execute(
                 "SELECT id FROM sessions WHERE title = ? OR id = ? "
-                "ORDER BY COALESCE(last_activity_at, started_at) DESC LIMIT 1",
+                f"ORDER BY {order_clause} DESC LIMIT 1",
                 (session_name, session_name),
             ).fetchone()
             if not row:
@@ -2415,7 +2428,10 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             return {"ok": False, "error": err_msg}
 
         if not cleaned_response:
-            raw_stripped = (stdout_data or "").strip()
+            # The raw fallback must be cleaned too: the CLI's own notice lines are
+            # exactly what can survive when everything else was stripped, and they
+            # must never reach the answer (that would resurrect the bug we just fixed).
+            raw_stripped = strip_cli_notices(stdout_data or "").strip()
             cleaned_response = raw_stripped if raw_stripped else "✓ Done."
         actions = []
         for line in (stdout_data or "").splitlines():

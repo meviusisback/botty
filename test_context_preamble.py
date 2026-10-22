@@ -20,6 +20,8 @@ from unittest import mock
 
 import botty_backend
 
+NOTICE = "↪ restored workspace dir: /home/alberto/.hermes/profiles/botty"
+
 
 class TestContextPreamble(unittest.TestCase):
     def setUp(self):
@@ -69,18 +71,25 @@ class TestContextPreamble(unittest.TestCase):
 
     # --- helpers ---
 
-    def _make_state_db(self, user_messages, title="botty-widget", active_flags=None):
+    def _make_state_db(self, user_messages, title="botty-widget", active_flags=None,
+                       with_last_activity=True):
         """Mirror the real Hermes schema: messages carry active/compacted columns
         (Hermes soft-archives compressed turns in place with active=0)."""
         con = sqlite3.connect(str(self.state_db))
         try:
-            con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, started_at REAL, last_activity_at REAL)")
+            if with_last_activity:
+                con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, started_at REAL, last_activity_at REAL)")
+            else:
+                con.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, started_at REAL)")
             con.execute(
                 "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "session_id TEXT, role TEXT, content TEXT, active INTEGER DEFAULT 1, "
                 "compacted INTEGER DEFAULT 0)"
             )
-            con.execute("INSERT INTO sessions VALUES ('s1', ?, 1000.0, 1000.0)", (title,))
+            if with_last_activity:
+                con.execute("INSERT INTO sessions VALUES ('s1', ?, 1000.0, 1000.0)", (title,))
+            else:
+                con.execute("INSERT INTO sessions VALUES ('s1', ?, 1000.0)", (title,))
             for i, content in enumerate(user_messages):
                 active = 1 if active_flags is None else int(active_flags[i])
                 con.execute(
@@ -91,7 +100,7 @@ class TestContextPreamble(unittest.TestCase):
         finally:
             con.close()
 
-    def _run_ask_capture(self, sandboxed=True):
+    def _run_ask_capture(self, sandboxed=True, stdout="ok"):
         """Run ask() with a fake engine and return the prompt written for Hermes."""
         captured = {}
 
@@ -99,7 +108,7 @@ class TestContextPreamble(unittest.TestCase):
             for i, part in enumerate(cmd):
                 if part == "--query-file":
                     captured["prompt"] = Path(cmd[i + 1]).read_text(encoding="utf-8")
-            return {"ok": True, "returncode": 0, "stdout": "ok", "stderr": "",
+            return {"ok": True, "returncode": 0, "stdout": stdout, "stderr": "",
                     "timed_out": False, "output_truncated": False, "error": None}
 
         with mock.patch.object(botty_backend, "run_bounded_process", side_effect=fake_run), \
@@ -110,6 +119,7 @@ class TestContextPreamble(unittest.TestCase):
              mock.patch.object(botty_backend, "update_encrypted_vault", return_value=True):
             res = botty_backend.ask("ciao botty")
         self.assertTrue(res.get("ok"), res)
+        self._last_ask_res = res
         return captured["prompt"]
 
     # --- 1. preamble detection ---
@@ -335,6 +345,21 @@ class TestContextPreamble(unittest.TestCase):
                          "the child's outcome must go somewhere readable")
         state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
         self.assertEqual(state["messages_at_attempt"], 20)
+
+    def test_notice_cannot_come_back_through_the_raw_fallback(self):
+        # When the cleaned answer is empty, ask() falls back to raw stdout — which is
+        # exactly where the CLI notice lives. It must not resurrect.
+        self._run_ask_capture(stdout=NOTICE + "\n")
+        self.assertEqual(self._last_ask_res["response"], "✓ Done.")
+        h = json.loads(botty_backend.HISTORY_FILE.read_text())
+        self.assertFalse(any("restored workspace dir" in (m.get("content") or "") for m in h["messages"]))
+
+    def test_older_schema_without_last_activity_at_still_works(self):
+        # A Hermes build whose sessions table has no last_activity_at must not turn
+        # the check into a silent exception (which would send the directive forever).
+        self._make_state_db(["[SYSTEM DIRECTIVE]\nYou are acting as Botty.…"],
+                            with_last_activity=False)
+        self.assertTrue(botty_backend.hermes_session_has_preamble())
 
     def test_cooldown_blocks_a_repeat_attempt(self):
         botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps(

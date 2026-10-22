@@ -1,5 +1,57 @@
 # Bug Fixes Applied
 
+## 2026-10-22 (branch feat/context): per-turn context duplication + dead auto-compaction
+
+### 1. The system directive was re-sent on every message ✅ FIXED
+
+`ask()` prefixed `[SYSTEM DIRECTIVE] <BOTTY_AGENT_DIRECTIVE>` to **every** user
+turn, even though `hermes chat --continue botty-widget` keeps the session
+server-side — the directive from turn 1 is still in the model's context on turn
+N. Measured on the live session: 31 user messages, 30 of them carrying the
+directive (1476 chars each) → ~48% of every prompt was the same repeated text,
+and the last request carried ~30 copies of it.
+
+Fix: the directive is now a **session preamble**. `hermes_session_has_preamble()`
+reads the live session's last 60 user turns from `state.db`; the directive (and
+the continuity bridge) are included only when that session does not carry them
+yet — a brand-new session, or one reset by compaction/Clear. Every turn still
+carries a short `[MODE: SANDBOXED …]` / `[MODE: UNRESTRICTED RUN …]` line,
+because the write policy can flip between turns and a stale copy in the history
+must not be the last word. omp/claude/codex are unchanged: they have no
+server-side session, so they keep receiving the full context every run.
+
+Verified with a real `hermes` run on an isolated session: turn 1 = 2801 chars
+(directive sent), turn 2 = 373 chars (directive skipped), both answered
+correctly. Doubt (missing/corrupt DB, no session) falls back to sending the
+directive — losing it is worse than a few hundred tokens.
+
+### 2. Auto-compaction never ran ✅ FIXED
+
+The trigger lived inside `ask()` and called `distill_and_compact_session()`
+there. That function refuses to prune while an ask is live (`_ask_live()` reads
+the PID file the running ask itself created), so it returned "Botty is
+processing a request" on **every** turn and the result was ignored. Effect: no
+compaction since 2026-09-12 while history reached 62 messages (threshold: 14)
+and the Hermes session grew to 339 messages / ~96k tokens re-sent per turn.
+
+Fix: the decision stays in `ask()`, execution moved to the `finally` block,
+after the ask lock is released, as a detached child (`botty_backend.py compact`
+— the same path the UI's Compact button uses). Answer latency is unchanged.
+
+### 3. Tests were mutating the live profile ✅ FIXED
+
+`test_security.py` called `distill_and_compact_session()` without isolating
+`HERMES_STATE_DB`, so running the test suite renamed the user's real
+`botty-widget` session to `archived-botty-widget-*` (the widget then looks like
+it lost its chat history). `test_compaction.py` appended its compaction logs to
+the real `botty.log`. Both now isolate `HERMES_STATE_DB`, `HERMES_SKILLS_DIR`
+and `BOTTY_LOG_FILE`; verified: title and log line count unchanged across a
+full suite run.
+
+`test_context_preamble.py` (new, 16 tests) covers preamble detection, prompt
+composition, the mode line, the auto-compaction trigger and bridge cleanup on
+Clear.
+
 ## 2026-09-12 update: ALL scroll changes REVERTED
 
 After 4 rounds of scroll patches the widget flickered constantly even idle —

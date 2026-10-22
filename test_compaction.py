@@ -59,6 +59,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
         self.orig_hermes_state_db = botty_backend.HERMES_STATE_DB
         self.orig_proposals_file = botty_backend.PROPOSALS_FILE
         self.orig_context_bridge_file = botty_backend.CONTEXT_BRIDGE_FILE
+        self.orig_log_file = botty_backend.BOTTY_LOG_FILE
 
         botty_backend.BOTTY_DATA_DIR = self.data_dir
         botty_backend.HISTORY_FILE = self.history_file
@@ -71,6 +72,8 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.HERMES_STATE_DB = self.hermes_state_db
         botty_backend.PROPOSALS_FILE = self.proposals_file
         botty_backend.CONTEXT_BRIDGE_FILE = self.context_bridge_file
+        # Compaction logging must not append to the user's real botty.log.
+        botty_backend.BOTTY_LOG_FILE = self.data_dir / "botty.log"
 
         # Initialize mock SQLite state.db with sessions table
         con = sqlite3.connect(str(self.hermes_state_db))
@@ -93,6 +96,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
         botty_backend.HERMES_STATE_DB = self.orig_hermes_state_db
         botty_backend.PROPOSALS_FILE = self.orig_proposals_file
         botty_backend.CONTEXT_BRIDGE_FILE = self.orig_context_bridge_file
+        botty_backend.BOTTY_LOG_FILE = self.orig_log_file
         self.test_dir.cleanup()
 
     def test_threshold_config(self):

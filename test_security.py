@@ -26,7 +26,8 @@ class TestSecurityHardening(unittest.TestCase):
         self.orig = {}
         for name in ("BOTTY_DATA_DIR", "HISTORY_FILE", "HISTORY_ARCHIVE_FILE",
                      "CONFIG_FILE", "STATUS_FILE", "LOCK_FILE", "HISTORY_LOCK_FILE",
-                     "HERMES_MEMORY_DIR", "PROPOSALS_FILE", "BOTTY_LOG_FILE"):
+                     "HERMES_MEMORY_DIR", "HERMES_SKILLS_DIR", "HERMES_STATE_DB",
+                     "PROPOSALS_FILE", "BOTTY_LOG_FILE"):
             self.orig[name] = getattr(botty_backend, name)
         botty_backend.BOTTY_DATA_DIR = self.data_dir
         botty_backend.HISTORY_FILE = self.data_dir / "history.json"
@@ -36,6 +37,12 @@ class TestSecurityHardening(unittest.TestCase):
         botty_backend.LOCK_FILE = self.data_dir / "running.pid"
         botty_backend.HISTORY_LOCK_FILE = self.data_dir / ".history.lock"
         botty_backend.HERMES_MEMORY_DIR = self.hermes_mem_dir
+        botty_backend.HERMES_SKILLS_DIR = Path(self.test_dir.name) / "skills"
+        # Without these two the suite reaches into the LIVE botty profile: the
+        # compaction tests call reset_hermes_session(), which renames the user's
+        # real 'botty-widget' session to archived-*, silently detaching the
+        # widget from its own chat history.
+        botty_backend.HERMES_STATE_DB = Path(self.test_dir.name) / "state.db"
         botty_backend.PROPOSALS_FILE = self.data_dir / "pending_proposals.json"
         botty_backend.BOTTY_LOG_FILE = self.data_dir / "botty.log"
 

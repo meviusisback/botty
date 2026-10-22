@@ -184,11 +184,17 @@ _compact_lock_fh = None
 
 
 def _compact_live() -> bool:
-    """True if another process currently holds the compaction lock."""
+    """True if another process currently holds the compaction lock.
+
+    Opens WITHOUT creating: a liveness read must not leave a `compacting.pid` behind
+    in the profile (same read-path side effect already removed from _pid_file_live).
+    """
     try:
-        fh = open(COMPACT_LOCK_FILE, "a+b")
+        fh = open(COMPACT_LOCK_FILE, "rb")
+    except FileNotFoundError:
+        return False
     except OSError:
-        return True  # cannot tell -> assume busy, never spawn a duplicate
+        return True
     try:
         try:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2069,20 +2075,41 @@ def _auto_compact_allowed(message_count: int = 0) -> bool:
         attempts = int(state.get("attempts", 0) or 0)
         if not last_ts or attempts <= 0:
             return True
-        return (time.time() - last_ts) >= AUTO_COMPACT_COOLDOWN_SECONDS
+        now = time.time()
+        if last_ts > now:
+            # Clock stepped backwards (NTP/manual): a future stamp must not block the
+            # optimisation until the clock catches up.
+            return True
+        return (now - last_ts) >= AUTO_COMPACT_COOLDOWN_SECONDS
     except Exception:
         return True
 
 
-def _compaction_state_update(**changes) -> None:
+def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
+    """Load-modify-save compaction_state.json under the shared history flock.
+
+    Three writers touch this file (the spawn, the background child's success, and the
+    pending-reset retry). Unlocked, a lost update could resurrect a `reset_pending` flag
+    ask() had just consumed — resetting a re-created session and re-injecting the old
+    bridge — or drop an attempt increment.
+    """
+    fh = _exclusive_file_lock()
     try:
         state = load_json_file(COMPACTION_STATE_FILE, {})
         if not isinstance(state, dict):
             state = {}
+        if callable(mutate):
+            mutate(state)
         state.update(changes)
         save_json_file(COMPACTION_STATE_FILE, state)
-    except Exception as e:
-        append_botty_log(f"Compaction state write error: {str(e)}")
+        return state
+    finally:
+        _release_file_lock(fh)
+
+
+def _clear_pending_reset(state: Dict[str, Any]) -> None:
+    state.pop("reset_pending", None)
+    state.pop("reset_bridge", None)
 
 
 def _apply_pending_reset() -> bool:
@@ -2100,16 +2127,22 @@ def _apply_pending_reset() -> bool:
         if _ask_live():
             return False
         bridge = str(state.get("reset_bridge", "") or "")
+        res = reset_hermes_session(HERMES_SESSION_NAME)
+        if isinstance(res, dict) and not res.get("ok"):
+            # A transient sqlite failure must NOT disarm the only retry: keep the flag
+            # armed and say so, instead of logging a success that did not happen.
+            append_botty_log(
+                f"Pending reset failed ({res.get('error') or 'unknown error'}); retry stays armed"
+            )
+            return False
         if bridge:
             try:
                 CONTEXT_BRIDGE_FILE.write_text(bridge, encoding="utf-8")
                 secure_file_permissions(CONTEXT_BRIDGE_FILE)
             except Exception as e:
                 append_botty_log(f"Pending bridge write error: {str(e)}")
-        reset_hermes_session(HERMES_SESSION_NAME)
-        state.pop("reset_pending", None)
-        state.pop("reset_bridge", None)
-        save_json_file(COMPACTION_STATE_FILE, state)
+                return False
+        _compaction_state_update(mutate=_clear_pending_reset)
         append_botty_log("COMPACTION: deferred session reset applied (retry succeeded)")
         return True
     except Exception as e:
@@ -2143,15 +2176,15 @@ def _spawn_detached_compaction(message_count: int = 0) -> bool:
                 close_fds=True,
             )
         secure_file_permissions(COMPACTION_LOG_FILE)
-        state = load_json_file(COMPACTION_STATE_FILE, {})
-        if not isinstance(state, dict):
-            state = {}
-        state.update({
-            "last_auto_attempt": int(time.time()),
-            "messages_at_attempt": int(message_count or 0),
-            "attempts": int(state.get("attempts", 0) or 0) + 1,
-        })
-        save_json_file(COMPACTION_STATE_FILE, state)
+
+        def _count_attempt(state: Dict[str, Any]) -> None:
+            state["attempts"] = int(state.get("attempts", 0) or 0) + 1
+
+        _compaction_state_update(
+            mutate=_count_attempt,
+            last_auto_attempt=int(time.time()),
+            messages_at_attempt=int(message_count or 0),
+        )
         append_botty_log(
             f"Auto-compaction spawned in background (history={message_count}); "
             f"outcome logged to {COMPACTION_LOG_FILE}"
@@ -3695,6 +3728,10 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
 
         # 5. Reset Hermes session context in SQLite state.db
         reset_hermes_session(HERMES_SESSION_NAME)
+        # An armed pending reset is now spent: leaving it would make the next ask
+        # reset the *new* session again and overwrite the fresh bridge with the old
+        # summary (the model would get a stale COMPACTED CONTEXT block).
+        _compaction_state_update(mutate=_clear_pending_reset)
 
     # 6. Synchronize encrypted memory vault
     try:

@@ -144,6 +144,34 @@ appear). Residual, accepted: a check-then-act window of a few milliseconds betwe
 
 Guard sweep after round 2: **17 mutations, 17/17 CAUGHT**.
 
+### 7. Third round: the retry machinery itself had three medium defects
+
+The scoped re-review of the round-2 delta passed but found the new `reset_pending`
+machinery half-broken, all fixed here:
+
+1. **A failed reset was treated as success** — `_apply_pending_reset()` ignored
+   `reset_hermes_session()`'s return value, cleared the flag and logged "retry succeeded"
+   even when sqlite answered "database is locked": one transient failure dropped the only
+   retry, the exact silent loss the retry exists to prevent. → Only `ok: True` disarms it;
+   otherwise the flag stays armed and the error is logged.
+2. **`compaction_state.json` had three unlocked writers** (spawn, child success, retry), so a
+   lost update could resurrect a consumed `reset_pending` (re-resetting a re-created session
+   and re-injecting the old bridge) or drop an attempt increment. → All writes go through
+   `_compaction_state_update()` under the shared history flock, re-reading inside it.
+3. **An armed flag survived an immediate compaction**, so the next ask reset the new session
+   again and overwrote the fresh bridge with the previous summary. → The immediate path
+   clears the flag.
+
+Also: `_compact_live()` no longer creates `compacting.pid` (a liveness read must not leave a
+file behind), and a future-dated `last_auto_attempt` (backwards clock step) no longer blocks
+compaction forever.
+
+Accepted residual (documented, not fixed): the ask-slot reap is still read-then-unlink, so a
+claim created inside that microsecond window can be replaced; it needs the same flock
+conversion the compaction slot got, which is a bigger change to the ask path than this cycle
+should carry. Guard sweep after round 3: **22 mutations, 22/22 CAUGHT**.
+
+
 ## 2026-09-12 update: ALL scroll changes REVERTED
 
 After 4 rounds of scroll patches the widget flickered constantly even idle —

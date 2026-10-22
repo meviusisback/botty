@@ -403,6 +403,53 @@ class TestContextPreamble(unittest.TestCase):
         self.assertEqual(state.get("attempts"), 0)
         self.assertTrue(botty_backend._auto_compact_allowed(99))
 
+    def test_failed_reset_keeps_the_retry_armed(self):
+        # A transient sqlite failure must not disarm the only retry (and must not log
+        # a success that did not happen).
+        botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps(
+            {"reset_pending": True, "reset_bridge": "vecchio riassunto"}), encoding="utf-8")
+        with mock.patch.object(botty_backend, "reset_hermes_session",
+                               return_value={"ok": False, "error": "database is locked"}):
+            self.assertFalse(botty_backend._apply_pending_reset())
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertTrue(state.get("reset_pending"), "the retry must stay armed")
+        self.assertEqual(state.get("reset_bridge"), "vecchio riassunto")
+
+    def test_immediate_reset_clears_an_armed_flag(self):
+        # After a normal compaction the flag is spent: leaving it would reset the NEW
+        # session again and overwrite the fresh bridge with the old summary.
+        self._history_with(16)
+        botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps(
+            {"reset_pending": True, "reset_bridge": "OLD-STALE-SUMMARY"}), encoding="utf-8")
+        res = self._run_compaction()
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(res["session_reset"])
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertNotIn("reset_pending", state)
+        self.assertIn("riassunto", botty_backend.CONTEXT_BRIDGE_FILE.read_text(),
+                      "the fresh summary must be the one on disk")
+        self.assertNotIn("OLD-STALE-SUMMARY", botty_backend.CONTEXT_BRIDGE_FILE.read_text())
+
+    def test_liveness_read_does_not_create_the_lock_file(self):
+        self.assertFalse(botty_backend.COMPACT_LOCK_FILE.exists())
+        self.assertFalse(botty_backend._compact_live())
+        self.assertFalse(botty_backend.COMPACT_LOCK_FILE.exists(),
+                         "a liveness read must not create the lock file")
+
+    def test_future_dated_cooldown_stamp_does_not_block(self):
+        import time as _t
+        botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps(
+            {"last_auto_attempt": int(_t.time()) + 86400, "attempts": 3}), encoding="utf-8")
+        self.assertTrue(botty_backend._auto_compact_allowed(20),
+                        "a backwards clock step must not disable compaction")
+
+    def test_state_update_merges_instead_of_replacing(self):
+        botty_backend._compaction_state_update(attempts=2, last_auto_attempt=5)
+        botty_backend._compaction_state_update(reset_pending=True)
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertEqual(state.get("attempts"), 2)
+        self.assertTrue(state.get("reset_pending"))
+
     def test_deferred_reset_is_armed_and_retried(self):
         # The prune commits before the reset is attempted, so a deferral must arm a
         # retry: without it Hermes keeps the whole inflated context forever while the

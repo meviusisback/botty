@@ -46,6 +46,21 @@ class TestCliNoticeStripping(unittest.TestCase):
         self.assertNotIn("restored workspace dir", out)
         self.assertEqual(out, "Risposta.")
 
+    def test_missing_dir_warning_is_stripped_too(self):
+        # The sibling notice Hermes prints when the recorded dir no longer exists.
+        raw = "⚠ session's recorded dir is gone (/tmp/x); staying in /home/alberto\nRisposta."
+        out = botty_backend.strip_reasoning(raw)
+        self.assertNotIn("recorded dir is gone", out)
+        self.assertEqual(out, "Risposta.")
+
+    def test_notice_inside_a_code_fence_is_preserved(self):
+        # A fenced block is content the model is quoting: deleting a line there would
+        # silently corrupt a code sample.
+        raw = "Guarda:\n```\n" + NOTICE + "\n```\nfine."
+        out = botty_backend.strip_reasoning(raw)
+        self.assertIn(NOTICE, out, "a quoted notice must survive")
+        self.assertIn("fine.", out)
+
 
 if __name__ == "__main__":
     unittest.main()

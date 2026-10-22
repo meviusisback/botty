@@ -115,6 +115,35 @@ Guard sweep: 8 mutations (mutex, both status skips, `active` filter, abort-befor
 `--background` in the child argv, cooldown, notice stripping) — **8/8 CAUGHT** by a named test.
 
 
+### 6. Second fix round (concurrency reviewer: 4 medium findings, all probe-backed)
+
+1. **The compactor mutex was stealable.** `O_EXCL` create and the PID write are two
+   syscalls and an unparsable file counted as stale, so a second compactor arriving in
+   that gap took a lock the first one believed it held. → The compaction slot is now an
+   **flock held open for the whole run**: the kernel releases it on process death (no
+   stale-file reaping at all) and there is no window to steal.
+2. **Release deleted the successor's claim.** `unlink()` ran unconditionally, so a late
+   owner erased the new owner's file and a third run was admitted. → `_release_pid_file()`
+   / `_release_compact_lock()` only release what is still ours.
+3. **The 600 s cooldown could never fire.** `messages_at_attempt` was recorded with the
+   count the same turn had already grown, so the "history grew" override was always true
+   (probe: 3 turns → 3 spawns, 2 aborts, 0 skips). → It backs off on a consecutive-attempt
+   counter that a successful compaction resets; history growth no longer bypasses it.
+4. **A deferred session reset was never retried.** The prune committed, the reset was
+   skipped because an ask was live, and nothing tried again: Hermes kept the whole
+   inflated context while the UI said "compacted". → The reset is persisted
+   (`reset_pending` + the bridge text) and applied at the start of the next turn, when no
+   ask is live.
+
+Also from this round: `_pid_file_live()` is side-effect free (it no longer unlinks from a
+read path that runs inside the history flock); the CLI-notice stripper is fence-aware and
+also drops Hermes' other stdout notice (`⚠ session's recorded dir is gone …`); the
+preamble docstring no longer claims the profile dir is untouched (a `-shm` sidecar may
+appear). Residual, accepted: a check-then-act window of a few milliseconds between the
+"is an ask live?" check and the session rename.
+
+Guard sweep after round 2: **17 mutations, 17/17 CAUGHT**.
+
 ## 2026-09-12 update: ALL scroll changes REVERTED
 
 After 4 rounds of scroll patches the widget flickered constantly even idle —

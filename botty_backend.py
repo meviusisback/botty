@@ -113,10 +113,12 @@ def _synchronized(fn):
 
 
 def _pid_file_live(path: Path) -> bool:
-    """True if `path` holds the PID of a live process; stale files are reaped.
+    """True if `path` holds the PID of a live process.
 
-    Only ENOENT/ESRCH/ValueError mean stale; EPERM means a live foreign-uid
-    process, which counts as live.
+    SIDE-EFFECT FREE on purpose: reads happen from `set_status() -> get_status() ->
+    _ask_live()`, which can run inside the history flock. Reaping belongs to
+    `_acquire_pid_file()` only, where a stale file actually blocks a claim.
+    Only ENOENT/ESRCH/ValueError mean stale; EPERM means a live foreign-uid process.
     """
     try:
         if not path.exists():
@@ -130,10 +132,6 @@ def _pid_file_live(path: Path) -> bool:
             raise
         return True
     except (ValueError, OSError):
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
         return False
 
 
@@ -150,7 +148,27 @@ def _acquire_pid_file(path: Path) -> bool:
         except FileExistsError:
             if _pid_file_live(path):
                 return False
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
     return False
+
+
+def _release_pid_file(path: Path) -> None:
+    """Release a PID-file slot, but only if it still holds OUR pid.
+
+    An unconditional unlink would delete a successor's claim (the previous owner
+    releasing late), which makes a live slot read as free and admits a third run.
+    """
+    try:
+        if not path.exists():
+            return
+        if path.read_text().strip() != str(os.getpid()):
+            return
+        path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
 
 
 def _ask_live() -> bool:
@@ -158,9 +176,62 @@ def _ask_live() -> bool:
     return _pid_file_live(LOCK_FILE)
 
 
+# Compaction owns its slot through an flock held open for the whole run, NOT through
+# an O_EXCL+PID file: the kernel releases it when the process dies (no stale-file
+# reaping) and there is no window between "created" and "wrote my pid" in which a
+# second compactor can take a lock the first one believes it holds.
+_compact_lock_fh = None
+
+
 def _compact_live() -> bool:
-    """True if a compaction is currently live in this profile."""
-    return _pid_file_live(COMPACT_LOCK_FILE)
+    """True if another process currently holds the compaction lock."""
+    try:
+        fh = open(COMPACT_LOCK_FILE, "a+b")
+    except OSError:
+        return True  # cannot tell -> assume busy, never spawn a duplicate
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return False
+    finally:
+        fh.close()
+
+
+def _acquire_compact_lock() -> bool:
+    """Take the compaction slot for the life of this process's compaction."""
+    global _compact_lock_fh
+    try:
+        fh = open(COMPACT_LOCK_FILE, "a+b")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()  # someone else holds it: never leak the descriptor
+        return False
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()).encode())
+        fh.flush()
+    except OSError:
+        pass
+    _compact_lock_fh = fh
+    return True
+
+
+def _release_compact_lock() -> None:
+    global _compact_lock_fh
+    fh, _compact_lock_fh = _compact_lock_fh, None
+    if fh is None:
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    finally:
+        fh.close()
 
 
 def _acquire_ask_lock() -> bool:
@@ -168,6 +239,11 @@ def _acquire_ask_lock() -> bool:
     A stale PID file is reaped once and creation retried a single time, so
     two concurrent ask() invocations cannot both go live (F4)."""
     return _acquire_pid_file(LOCK_FILE)
+
+
+def _release_ask_lock() -> None:
+    """Release the ask slot without stealing a successor's claim."""
+    _release_pid_file(LOCK_FILE)
 
 
 def _bump_history_rev(history: Dict[str, Any]) -> int:
@@ -512,21 +588,45 @@ def run_bounded_process(
         result["error"] = f"Process error: {str(e)}"
         return result
 
-# Anchored to the CLI's own marker so legitimate arrow glyphs in an answer survive.
-_CLI_NOTICE_RES = re.compile(r"^[ \t]*↪[ \t]*restored workspace dir:[^\n]*\n?", re.MULTILINE)
+# Anchored to the CLI's own markers so arrows used as prose survive.
+_CLI_NOTICE_PATTERNS = (
+    re.compile(r"^[ \t]*↪[ \t]*restored workspace dir:"),
+    re.compile(r"^[ \t]*⚠[ \t]*session's recorded dir is gone"),
+)
 
 
 def strip_cli_notices(text: str) -> str:
     """Drop notice lines that the AGENT CLI prints, not the model.
 
-    `hermes chat --continue` announces the workspace it restores at the start of
-    every run ("↪ restored workspace dir: …"). Botty captures the CLI's stdout as
-    the answer, so without this the widget shows that line as the first line of
-    every reply — it is process chatter, never part of the response.
+    `hermes chat --continue` announces the workspace it restores ("↪ restored
+    workspace dir: …") or warns that the recorded dir is gone ("⚠ session's recorded
+    dir is gone …"). Botty captures the CLI's stdout as the answer, so without this
+    the widget shows that line as the first line of every reply.
+
+    Fence-aware: a line inside a ``` block is content the model is quoting, so it is
+    left alone (deleting it would silently corrupt a code sample).
     """
     if not text:
         return text
-    return _CLI_NOTICE_RES.sub("", text)
+    out: List[str] = []
+    fence = ""
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            marker = stripped[:3]
+            if not fence:
+                fence = marker
+            elif stripped.startswith(fence):
+                fence = ""
+            out.append(line)
+            continue
+        if fence:
+            out.append(line)
+            continue
+        if any(p.match(line) for p in _CLI_NOTICE_PATTERNS):
+            continue
+        out.append(line)
+    return "\n".join(out)
 
 
 def strip_reasoning(text: str) -> str:
@@ -1869,9 +1969,9 @@ def hermes_session_has_preamble(session_name: str = HERMES_SESSION_NAME, lookbac
     directive was ~48% of each prompt and the last request carried ~30 copies of
     the same text.
 
-    Reads with a READ-ONLY connection (never creates or checkpoints the profile's
-    WAL) and only counts rows Hermes still keeps in context.
-
+    Reads with a READ-ONLY connection (`mode=ro`): no write lock, no checkpoint. On a
+    WAL database sqlite may still materialise `state.db-shm` next to it, so the
+    profile directory is not literally untouched — its contents are.
     Any doubt (no DB, no session, read error) returns False so the caller sends
     the preamble anyway — losing the directive is worse than a few hundred tokens.
     """
@@ -1953,21 +2053,68 @@ def build_hermes_prompt(final_prompt: str, directive: str, mode_line: str,
 AUTO_COMPACT_COOLDOWN_SECONDS = 600
 
 
-def _auto_compact_allowed(message_count: int) -> bool:
+def _auto_compact_allowed(message_count: int = 0) -> bool:
     """Rate-limit automatic compaction so a repeatedly aborting run cannot burn a
-    full agent call per turn. A previous attempt within the cooldown blocks a new
-    one only while the history has not grown since (growth means real new work)."""
+    full agent call on every turn.
+
+    Backs off on a consecutive-failure counter, NOT on history growth: the previous
+    version compared against the count recorded at spawn time, which the same turn
+    had already grown, so the growth override fired every turn and the cooldown was
+    inert (probe: 3 turns, 3 spawns, 0 skips, 2 aborts). A successful compaction
+    resets the counter.
+    """
     try:
         state = load_json_file(COMPACTION_STATE_FILE, {})
         last_ts = int(state.get("last_auto_attempt", 0) or 0)
-        last_count = int(state.get("messages_at_attempt", 0) or 0)
-        if not last_ts:
-            return True
-        if message_count > last_count:
+        attempts = int(state.get("attempts", 0) or 0)
+        if not last_ts or attempts <= 0:
             return True
         return (time.time() - last_ts) >= AUTO_COMPACT_COOLDOWN_SECONDS
     except Exception:
         return True
+
+
+def _compaction_state_update(**changes) -> None:
+    try:
+        state = load_json_file(COMPACTION_STATE_FILE, {})
+        if not isinstance(state, dict):
+            state = {}
+        state.update(changes)
+        save_json_file(COMPACTION_STATE_FILE, state)
+    except Exception as e:
+        append_botty_log(f"Compaction state write error: {str(e)}")
+
+
+def _apply_pending_reset() -> bool:
+    """Finish a compaction whose session reset had to be deferred.
+
+    Deferring without a retry left the prune committed while Hermes kept the whole
+    inflated context forever — the UI says "compacted", the model still receives
+    everything, and nothing ever tried again. This runs between turns (no ask live),
+    before the new turn decides whether the directive must be re-sent.
+    """
+    try:
+        state = load_json_file(COMPACTION_STATE_FILE, {})
+        if not isinstance(state, dict) or not state.get("reset_pending"):
+            return False
+        if _ask_live():
+            return False
+        bridge = str(state.get("reset_bridge", "") or "")
+        if bridge:
+            try:
+                CONTEXT_BRIDGE_FILE.write_text(bridge, encoding="utf-8")
+                secure_file_permissions(CONTEXT_BRIDGE_FILE)
+            except Exception as e:
+                append_botty_log(f"Pending bridge write error: {str(e)}")
+        reset_hermes_session(HERMES_SESSION_NAME)
+        state.pop("reset_pending", None)
+        state.pop("reset_bridge", None)
+        save_json_file(COMPACTION_STATE_FILE, state)
+        append_botty_log("COMPACTION: deferred session reset applied (retry succeeded)")
+        return True
+    except Exception as e:
+        append_botty_log(f"Pending reset error: {str(e)}")
+        return False
 
 
 def _spawn_detached_compaction(message_count: int = 0) -> bool:
@@ -1996,10 +2143,15 @@ def _spawn_detached_compaction(message_count: int = 0) -> bool:
                 close_fds=True,
             )
         secure_file_permissions(COMPACTION_LOG_FILE)
-        save_json_file(COMPACTION_STATE_FILE, {
+        state = load_json_file(COMPACTION_STATE_FILE, {})
+        if not isinstance(state, dict):
+            state = {}
+        state.update({
             "last_auto_attempt": int(time.time()),
             "messages_at_attempt": int(message_count or 0),
+            "attempts": int(state.get("attempts", 0) or 0) + 1,
         })
+        save_json_file(COMPACTION_STATE_FILE, state)
         append_botty_log(
             f"Auto-compaction spawned in background (history={message_count}); "
             f"outcome logged to {COMPACTION_LOG_FILE}"
@@ -2079,6 +2231,11 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
 def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False) -> Dict[str, Any]:
     if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
         return {"ok": False, "error": "Empty query and no attachment or context provided."}
+
+    # Before claiming the ask slot, so the "is an ask live?" check inside can see the
+    # truth: finish a session reset that a compaction had to defer (otherwise Hermes
+    # keeps the whole pre-compaction context forever).
+    _apply_pending_reset()
 
     if not _acquire_ask_lock():
         return {"ok": False, "error": "Botty is already processing a request."}
@@ -2306,7 +2463,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         set_status("error", headline="Sandboxed engine not supported", last_error=err_msg)
         append_botty_log(f"REFUSED [{engine}] sandboxed ask: non-Hermes engine has no approval gate")
         add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine)
-        LOCK_FILE.unlink(missing_ok=True)
+        _release_ask_lock()
         return {"ok": False, "error": err_msg}
 
     query_tmp = BOTTY_DATA_DIR / "current_query.txt"
@@ -2394,7 +2551,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
         # Security (P0): this early return predates the try/finally below —
         # release the lock or the next ask wedges on "already processing".
-        LOCK_FILE.unlink(missing_ok=True)
+        _release_ask_lock()
         return {"ok": False, "error": err}
 
     stdout_data = run.get("stdout", "")
@@ -2511,7 +2668,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
         return {"ok": False, "error": err}
     finally:
-        LOCK_FILE.unlink(missing_ok=True)
+        _release_ask_lock()
         query_tmp.unlink(missing_ok=True)
         try:
             (BOTTY_DATA_DIR / "current_omp_prompt.txt").unlink(missing_ok=True)
@@ -3276,14 +3433,14 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
     # One compactor per profile: the auto-spawned child, the UI button and a manual
     # `compact` run would otherwise all burn a full agent call, and each one appends
     # the same messages to history_archive.jsonl before the re-validation rejects it.
-    if not _acquire_pid_file(COMPACT_LOCK_FILE):
+    if not _acquire_compact_lock():
         append_botty_log("COMPACTION REFUSED: another compaction is already running")
         return {"ok": False, "error": "A compaction is already running."}
     try:
         return _distill_and_compact_locked(force=force, preserve_tail=preserve_tail,
                                            background=background)
     finally:
-        COMPACT_LOCK_FILE.unlink(missing_ok=True)
+        _release_compact_lock()
 
 
 def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
@@ -3500,30 +3657,41 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
     # turn that started after the prune already decided whether to send the preamble
     # against the OLD session, so renaming it now would detach that turn from the
     # session the user is talking to. Defer instead; the next turn re-evaluates.
+    try:
+        tail_text = "\n".join(
+            f"{('User' if m.get('role') == 'user' else 'Assistant')}: {m.get('content', '').strip()}"
+            for m in tail_messages if m.get("content", "").strip()
+        )
+        bridge_parts = [
+            "📌 [COMPACTED CONTEXT — retain this as your prior conversation summary]:",
+            cap_text(summary_text, 2000),
+        ]
+        if tail_text:
+            bridge_parts.append(
+                "\n🧵 [Recent messages preserved verbatim]:\n" + cap_text(tail_text, BRIDGE_TAIL_CAP_CHARS)
+            )
+        bridge_text = "\n".join(bridge_parts)
+    except Exception as e:
+        bridge_text = ""
+        append_botty_log(f"Context bridge build error: {str(e)}")
+
     ask_started = _ask_live()
     if ask_started:
+        # Arm a retry instead of silently losing the reset: the prune is already
+        # committed, so without this Hermes would keep the whole inflated context
+        # forever while the UI reports "compacted".
+        _compaction_state_update(reset_pending=True, reset_bridge=bridge_text)
         append_botty_log(
             "COMPACTION: session reset deferred (an ask went live during compaction); "
-            "history is pruned, the next turn re-evaluates the preamble"
+            "retry armed for the next turn"
         )
     else:
-        try:
-            tail_text = "\n".join(
-                f"{('User' if m.get('role') == 'user' else 'Assistant')}: {m.get('content', '').strip()}"
-                for m in tail_messages if m.get("content", "").strip()
-            )
-            bridge_parts = [
-                "📌 [COMPACTED CONTEXT — retain this as your prior conversation summary]:",
-                cap_text(summary_text, 2000),
-            ]
-            if tail_text:
-                bridge_parts.append(
-                    "\n🧵 [Recent messages preserved verbatim]:\n" + cap_text(tail_text, BRIDGE_TAIL_CAP_CHARS)
-                )
-            CONTEXT_BRIDGE_FILE.write_text("\n".join(bridge_parts), encoding="utf-8")
-            secure_file_permissions(CONTEXT_BRIDGE_FILE)
-        except Exception as e:
-            append_botty_log(f"Context bridge write error: {str(e)}")
+        if bridge_text:
+            try:
+                CONTEXT_BRIDGE_FILE.write_text(bridge_text, encoding="utf-8")
+                secure_file_permissions(CONTEXT_BRIDGE_FILE)
+            except Exception as e:
+                append_botty_log(f"Context bridge write error: {str(e)}")
 
         # 5. Reset Hermes session context in SQLite state.db
         reset_hermes_session(HERMES_SESSION_NAME)
@@ -3544,6 +3712,9 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
     if not background:
         set_status("idle", headline="Ready", last_query="",
                    last_answer=f"Context pruned. {proposed_total} learning proposal(s) staged for review (Memories tab).")
+    # A successful compaction ends the back-off streak (a deferred reset keeps its
+    # own pending flag, which _compaction_state_update preserves).
+    _compaction_state_update(attempts=0, last_auto_attempt=0)
 
     return {
         "ok": True,

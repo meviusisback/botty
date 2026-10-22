@@ -288,20 +288,41 @@ class TestContextPreamble(unittest.TestCase):
         # The auto-spawn, the UI button and a manual run must not overlap: each one
         # costs a full agent call and used to archive the same messages again.
         self._history_with(16)
-        botty_backend.COMPACT_LOCK_FILE.write_text(str(__import__("os").getpid()), encoding="utf-8")
-        with mock.patch.object(botty_backend, "run_bounded_process") as fake:
-            res = botty_backend.distill_and_compact_session(force=True)
-        self.assertFalse(res["ok"])
-        self.assertIn("already running", res["error"])
-        self.assertFalse(fake.called, "the losing compactor must not call the model")
-        self.assertFalse(botty_backend.HISTORY_ARCHIVE_FILE.exists(),
-                         "the losing compactor must not archive anything")
+        self.assertTrue(botty_backend._acquire_compact_lock(), "fixture must hold the slot")
+        try:
+            self.assertTrue(botty_backend._compact_live())
+            with mock.patch.object(botty_backend, "run_bounded_process") as fake:
+                res = botty_backend.distill_and_compact_session(force=True)
+            self.assertFalse(res["ok"])
+            self.assertIn("already running", res["error"])
+            self.assertFalse(fake.called, "the losing compactor must not call the model")
+            self.assertFalse(botty_backend.HISTORY_ARCHIVE_FILE.exists(),
+                             "the losing compactor must not archive anything")
+        finally:
+            botty_backend._release_compact_lock()
 
     def test_compaction_lock_is_released_after_a_run(self):
         self._history_with(16)
         res = self._run_compaction()
         self.assertTrue(res["ok"], res)
-        self.assertFalse(botty_backend.COMPACT_LOCK_FILE.exists())
+        self.assertFalse(botty_backend._compact_live(), "the slot must be free afterwards")
+
+    def test_liveness_read_has_no_side_effects(self):
+        # _pid_file_live runs from set_status()->get_status()->_ask_live(), i.e. inside
+        # the history flock: it must never unlink anything.
+        botty_backend.LOCK_FILE.write_text("999999", encoding="utf-8")
+        self.assertFalse(botty_backend._ask_live())
+        self.assertTrue(botty_backend.LOCK_FILE.exists(),
+                        "a read must not reap the file (reaping belongs to the acquire path)")
+
+    def test_release_does_not_steal_a_successor_claim(self):
+        # Our late release must not delete a lock that now belongs to someone else.
+        botty_backend.LOCK_FILE.write_text("999999", encoding="utf-8")
+        botty_backend._release_ask_lock()
+        self.assertTrue(botty_backend.LOCK_FILE.exists(), "a foreign claim must survive")
+        botty_backend.LOCK_FILE.write_text(str(__import__("os").getpid()), encoding="utf-8")
+        botty_backend._release_ask_lock()
+        self.assertFalse(botty_backend.LOCK_FILE.exists(), "our own claim must be released")
 
     def test_background_compaction_does_not_touch_status(self):
         # state "working" makes the widget believe an ask is in flight: it blocks the
@@ -362,12 +383,53 @@ class TestContextPreamble(unittest.TestCase):
         self.assertTrue(botty_backend.hermes_session_has_preamble())
 
     def test_cooldown_blocks_a_repeat_attempt(self):
+        # History growth must NOT bypass the back-off: the previous version recorded the
+        # count after the turn's own appends, so the override fired every turn and the
+        # cooldown never engaged (probe: 3 turns, 3 spawns, 0 skips, 2 aborts).
         botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps(
-            {"last_auto_attempt": int(__import__("time").time()), "messages_at_attempt": 20}),
-            encoding="utf-8")
+            {"last_auto_attempt": int(__import__("time").time()),
+             "messages_at_attempt": 20, "attempts": 1}), encoding="utf-8")
         self.assertFalse(botty_backend._auto_compact_allowed(20))
-        self.assertTrue(botty_backend._auto_compact_allowed(21),
-                        "new messages are real work: the cooldown must not block them")
+        self.assertFalse(botty_backend._auto_compact_allowed(99),
+                         "new messages must not bypass the back-off")
+
+    def test_successful_compaction_clears_the_back_off(self):
+        self._history_with(16)
+        botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps(
+            {"last_auto_attempt": 1, "attempts": 3}), encoding="utf-8")
+        res = self._run_compaction(background=True)
+        self.assertTrue(res["ok"], res)
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertEqual(state.get("attempts"), 0)
+        self.assertTrue(botty_backend._auto_compact_allowed(99))
+
+    def test_deferred_reset_is_armed_and_retried(self):
+        # The prune commits before the reset is attempted, so a deferral must arm a
+        # retry: without it Hermes keeps the whole inflated context forever while the
+        # UI reports "compacted".
+        self._history_with(16)
+        seq = {"n": 0}
+
+        def ask_live_seq():
+            seq["n"] += 1
+            return seq["n"] > 1  # guard call false, "did an ask appear?" call true
+
+        with mock.patch.object(botty_backend, "_ask_live", side_effect=ask_live_seq):
+            res = self._run_compaction()
+        self.assertTrue(res["ok"], res)
+        self.assertFalse(res["session_reset"])
+
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertTrue(state.get("reset_pending"), state)
+        self.assertIn("COMPACTED CONTEXT", state.get("reset_bridge", ""))
+
+        with mock.patch.object(botty_backend, "reset_hermes_session", return_value={"ok": True}) as reset:
+            self.assertTrue(botty_backend._apply_pending_reset())
+        self.assertTrue(reset.called, "the deferred reset must actually be retried")
+        self.assertTrue(botty_backend.CONTEXT_BRIDGE_FILE.exists(),
+                        "the bridge must be written on the retry")
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertNotIn("reset_pending", state)
 
 
 if __name__ == "__main__":

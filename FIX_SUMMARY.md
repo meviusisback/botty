@@ -1,5 +1,149 @@
 # Bug Fixes Applied
 
+## 2026-10-22 (branch feat/context): per-turn context duplication + dead auto-compaction
+
+### 1. The system directive was re-sent on every message ✅ FIXED
+
+`ask()` prefixed `[SYSTEM DIRECTIVE] <BOTTY_AGENT_DIRECTIVE>` to **every** user
+turn, even though `hermes chat --continue botty-widget` keeps the session
+server-side — the directive from turn 1 is still in the model's context on turn
+N. Measured on the live session: 31 user messages, 30 of them carrying the
+directive (1476 chars each) → ~48% of every prompt was the same repeated text,
+and the last request carried ~30 copies of it.
+
+Fix: the directive is now a **session preamble**. `hermes_session_has_preamble()`
+reads the live session's last 60 user turns from `state.db`; the directive (and
+the continuity bridge) are included only when that session does not carry them
+yet — a brand-new session, or one reset by compaction/Clear. Every turn still
+carries a short `[MODE: SANDBOXED …]` / `[MODE: UNRESTRICTED RUN …]` line,
+because the write policy can flip between turns and a stale copy in the history
+must not be the last word. omp/claude/codex are unchanged: they have no
+server-side session, so they keep receiving the full context every run.
+
+Verified with a real `hermes` run on an isolated session: turn 1 = 2801 chars
+(directive sent), turn 2 = 373 chars (directive skipped), both answered
+correctly. Doubt (missing/corrupt DB, no session) falls back to sending the
+directive — losing it is worse than a few hundred tokens.
+
+### 2. Auto-compaction never ran ✅ FIXED
+
+The trigger lived inside `ask()` and called `distill_and_compact_session()`
+there. That function refuses to prune while an ask is live (`_ask_live()` reads
+the PID file the running ask itself created), so it returned "Botty is
+processing a request" on **every** turn and the result was ignored. Effect: no
+compaction since 2026-09-12 while history reached 62 messages (threshold: 14)
+and the Hermes session grew to 339 messages / ~96k tokens re-sent per turn.
+
+Fix: the decision stays in `ask()`, execution moved to the `finally` block,
+after the ask lock is released, as a detached child (`botty_backend.py compact`
+— the same path the UI's Compact button uses). Answer latency is unchanged.
+
+### 3. Tests were mutating the live profile ✅ FIXED
+
+`test_security.py` called `distill_and_compact_session()` without isolating
+`HERMES_STATE_DB`, so running the test suite renamed the user's real
+`botty-widget` session to `archived-botty-widget-*` (the widget then looks like
+it lost its chat history). It also called `clear_history()` with the real bridge
+path (deleting it) and rebuilt the real `vault.enc` from the temp fixtures
+(71 KB -> 1 KB), while `test_compaction.py` appended its compaction logs to the
+real `botty.log`.
+
+All three test files now isolate `HERMES_STATE_DB`, `HERMES_SKILLS_DIR`,
+`HERMES_MEMORY_DIR`, `BOTTY_LOG_FILE`, `CONTEXT_BRIDGE_FILE`, `VAULT_FILE` and
+`APPROVED_STAGING_DIR`. Verified with a sha256 + line-count fingerprint of the
+live data dir, the vault, the bridge, the staging dir and the session table taken
+before and after a full suite run: identical.
+
+`test_context_preamble.py` (new, 16 tests) covers preamble detection, prompt
+composition, the mode line, the auto-compaction trigger and bridge cleanup on
+Clear.
+
+### 4. Every reply started with `↪ restored workspace dir: …` ✅ FIXED
+
+`hermes chat --continue` restores the resumed session's recorded working
+directory and prints `↪ restored workspace dir: <path>` on stdout. Botty treats
+stdout as the answer, so that CLI notice became the first line of every reply in
+the widget and of every entry in `history.json`.
+
+Fix: `strip_cli_notices()` runs inside `strip_reasoning()` (the single funnel for
+response text) and drops exactly that marker line — anchored to
+`restored workspace dir:` so arrows used as prose survive. Stored messages were
+cleaned in place (7 of 64, backup kept); nothing else changed.
+
+Verified with a real `hermes` run: answered turn 2 from a different working
+directory (the condition that triggers the restore) and the notice no longer
+reaches the saved answer.
+
+### 5. Fix round after the security review (3 reviewers, 2 blocking verdicts)
+
+The first review round rejected the change. What it found, and what changed:
+
+1. **The detached child hijacked the shared status** (blocking). `distill_and_compact_session()`
+   set `state="working"` / "Distilling memory & compacting…", which the widget reads as "an ask
+   is in flight": it blocks the input field and shows "Botty thinking…" for the whole
+   distillation. → The child now runs `compact --background` and touches neither the status nor
+   `last_answer`.
+2. **No compaction-level mutex** (blocking): the auto-spawn, the UI button and a manual
+   `compact` could all run at once, each burning a full agent call, and — worse — the archive
+   append ran BEFORE the history re-validation, so a losing compactor still appended its
+   messages (probe: 3 concurrent runs archived 12 messages 36 times). → `COMPACT_LOCK_FILE`
+   (`compacting.pid`, O_EXCL + PID liveness) is claimed before any LLM work and released in a
+   `finally`; the archive append now happens inside the validated lock region, and proposal
+   staging after the commit (flock is not re-entrant, staging takes it itself).
+3. **The preamble check was fail-OPEN under Hermes' own compression** (blocking): Hermes
+   compresses a long session in place (`active = 0` soft archive) and builds the live prompt
+   from `active = 1` rows, so a marker in an archived row would suppress the directive forever.
+   → `_session_messages_filter()` probes the schema and adds `COALESCE(active,1)=1` /
+   `COALESCE(compacted,0)=0`; the read is `mode=ro` with a 1 s timeout on the answer path.
+4. **Silent child + no backoff**: the parent logged "started" before the child did anything and
+   the child's output went to /dev/null. → the child's stdout/stderr go to `compaction.log`,
+   every abort path logs a `COMPACTION REFUSED/ABORTED/DEFERRED` line, and a 600 s cooldown
+   (overridden when the history grew) stops a repeatedly failing run from calling the model
+   every turn.
+5. **Session reset could detach a live ask**: `_ask_live()` was checked once, ~90 s before the
+   rename. → the bridge write and `reset_hermes_session()` are skipped (and logged) if an ask
+   went live during the distillation.
+6. Cheap ones also in: the mode line now says it supersedes any earlier MODE/sandbox
+   instruction; the bridge summary/tail are capped (2000 / 6000 chars); all three suites isolate
+   `COMPACT_LOCK_FILE`, `COMPACTION_*`, `HISTORY_LOCK_FILE`, `VOICE_PID_FILE`, `SCREENSHOT_DIR`
+   (a fingerprint of the live dir is byte-identical across a run).
+
+Declined: the "bridge is re-injected unfenced" finding is contradicted by the code — `ask()`
+already wraps it in a `[UNTRUSTED DATA — reference only…]` fence (only the cap was missing).
+
+Guard sweep: 8 mutations (mutex, both status skips, `active` filter, abort-before-side-effects,
+`--background` in the child argv, cooldown, notice stripping) — **8/8 CAUGHT** by a named test.
+
+
+### 6. Second fix round (concurrency reviewer: 4 medium findings, all probe-backed)
+
+1. **The compactor mutex was stealable.** `O_EXCL` create and the PID write are two
+   syscalls and an unparsable file counted as stale, so a second compactor arriving in
+   that gap took a lock the first one believed it held. → The compaction slot is now an
+   **flock held open for the whole run**: the kernel releases it on process death (no
+   stale-file reaping at all) and there is no window to steal.
+2. **Release deleted the successor's claim.** `unlink()` ran unconditionally, so a late
+   owner erased the new owner's file and a third run was admitted. → `_release_pid_file()`
+   / `_release_compact_lock()` only release what is still ours.
+3. **The 600 s cooldown could never fire.** `messages_at_attempt` was recorded with the
+   count the same turn had already grown, so the "history grew" override was always true
+   (probe: 3 turns → 3 spawns, 2 aborts, 0 skips). → It backs off on a consecutive-attempt
+   counter that a successful compaction resets; history growth no longer bypasses it.
+4. **A deferred session reset was never retried.** The prune committed, the reset was
+   skipped because an ask was live, and nothing tried again: Hermes kept the whole
+   inflated context while the UI said "compacted". → The reset is persisted
+   (`reset_pending` + the bridge text) and applied at the start of the next turn, when no
+   ask is live.
+
+Also from this round: `_pid_file_live()` is side-effect free (it no longer unlinks from a
+read path that runs inside the history flock); the CLI-notice stripper is fence-aware and
+also drops Hermes' other stdout notice (`⚠ session's recorded dir is gone …`); the
+preamble docstring no longer claims the profile dir is untouched (a `-shm` sidecar may
+appear). Residual, accepted: a check-then-act window of a few milliseconds between the
+"is an ask live?" check and the session rename.
+
+Guard sweep after round 2: **17 mutations, 17/17 CAUGHT**.
+
 ## 2026-09-12 update: ALL scroll changes REVERTED
 
 After 4 rounds of scroll patches the widget flickered constantly even idle —

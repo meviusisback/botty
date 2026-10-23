@@ -158,61 +158,6 @@ Panel {
     root.scrollChatToEnd()
   }
 
-  // Compact history window: only the recent slice renders. Paging grows
-  // the window; show-all renders everything until collapsed again.
-  property int chatVisibleCount: 10
-  property bool chatShowAll: false
-
-  function chatTotalMessages() {
-    return (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
-  }
-
-  function chatHiddenCount() {
-    if (root.chatShowAll) return 0
-    return Math.max(0, root.chatTotalMessages() - root.chatVisibleCount)
-  }
-
-  function chatVisibleMessages() {
-    var msgs = (root.historyData && root.historyData.messages) ? root.historyData.messages : []
-    if (root.chatShowAll || root.chatVisibleCount >= msgs.length) return msgs
-    return msgs.slice(msgs.length - root.chatVisibleCount)
-  }
-
-  function chatHoldPosition(changeFn) {
-    if (!chatFlick) { changeFn(); return }
-    var oldH = chatFlick.contentHeight
-    var oldY = chatFlick.contentY
-    root.autoScrollPinned = false
-    changeFn()
-    Qt.callLater(function() {
-      if (chatFlick) {
-        chatFlick.contentY = Math.max(0, oldY + (chatFlick.contentHeight - oldH))
-      }
-    })
-  }
-
-  function chatShowMore() {
-    root.chatShowAll = false
-    var total = root.chatTotalMessages()
-    var next = Math.min(total, root.chatVisibleCount + 20)
-    if (next <= root.chatVisibleCount) return
-    root.chatHoldPosition(function() { root.chatVisibleCount = next })
-  }
-
-  function chatShowAllFn() {
-    var total = root.chatTotalMessages()
-    root.chatHoldPosition(function() {
-      root.chatShowAll = true
-      root.chatVisibleCount = total
-    })
-  }
-
-  function chatCollapseRecent() {
-    root.chatShowAll = false
-    root.chatVisibleCount = 10
-    root.scrollChatToEnd()
-  }
-
   // Voice dictation state
   property bool isRecordingVoice: false
   property bool isTranscribingVoice: false

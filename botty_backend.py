@@ -292,6 +292,54 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 600
 # context on the next turn.
 HERMES_SESSION_NAME = "botty-widget"
 
+# Read-only handle on the botty profile's session ledger, used only to decide
+# whether `--continue botty-widget` will resume (creation flags forbidden) or
+# create (creation flags required). Never written to.
+HERMES_BOTTY_STATE_DB = Path.home() / ".hermes" / "profiles" / "botty" / "state.db"
+
+# Hermes rejects these on the resume path ("creation overrides are unsupported
+# on resume"). Kept in one place so the builder and the retry strip agree.
+HERMES_CREATION_FLAGS = frozenset({"--max-turns", "--run-budget", "-m", "--model", "--provider"})
+
+
+def hermes_session_exists(name: str) -> bool:
+    """True when a session titled `name` exists in the botty profile ledger.
+
+    Read-only open with a short lock timeout; any failure (missing DB, lock,
+    schema drift) assumes resume (omit the flags): a resume always works,
+    while wrongly-included flags hard-fail the query.
+    """
+    try:
+        import sqlite3
+
+        uri = f"file:{HERMES_BOTTY_STATE_DB}?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=2)
+        try:
+            row = con.execute(
+                "SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (name,)
+            ).fetchone()
+        finally:
+            con.close()
+        return row is not None
+    except Exception as e:
+        append_botty_log(f"HERMES SESSION CHECK failed ({e}); assuming resume")
+        return True
+
+
+def strip_hermes_creation_flags(argv: List[str]) -> List[str]:
+    """Drop creation flags (flag + its value) from a hermes argv list."""
+    out: List[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in HERMES_CREATION_FLAGS:
+            skip_next = True
+            continue
+        out.append(token)
+    return out
+
 # Marks the static preamble Botty injects into the first user message of a
 # session. Finding it in the recent session turns means the directive is
 # already in context and must not be re-sent (token waste).
@@ -2545,6 +2593,10 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         # codex exec reads the prompt from stdin when PROMPT is omitted (or `-`).
         stdin_text = codex_prompt
     else:
+        # Hermes rejects creation flags on the resume path ("creation
+        # overrides are unsupported on resume"), so they are only passed when
+        # the session does not exist yet and will actually be created.
+        is_resume = hermes_session_exists(HERMES_SESSION_NAME)
         cmd = [
             "hermes",
             "-p", "botty",
@@ -2553,9 +2605,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             "--query-file", str(query_tmp),
             "--continue", HERMES_SESSION_NAME,
             "--create-if-missing",
-            "--max-turns", "15",
-            "--run-budget", "200",
         ]
+        if not is_resume:
+            cmd.extend(["--max-turns", "15", "--run-budget", "200"])
         # Security: --yolo bypasses Hermes's dangerous-command approval gate. It is added
         # ONLY on the explicitly user-approved bypass run (is_sandboxed False, reached only
         # via the Approve button on a sandbox permission card). Sandboxed runs never carry
@@ -2565,10 +2617,11 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             cmd.append("--yolo")
         if target_image and os.path.exists(target_image):
             cmd.extend(["--image", target_image])
-        if selected_model:
-            cmd.extend(["-m", selected_model])
-        if provider:
-            cmd.extend(["--provider", provider])
+        if not is_resume:
+            if selected_model:
+                cmd.extend(["-m", selected_model])
+            if provider:
+                cmd.extend(["--provider", provider])
 
     run = run_bounded_process(
         cmd,
@@ -2576,6 +2629,22 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         stdin_text=stdin_text,
         max_output_chars=AGENT_OUTPUT_CAP_CHARS,
     )
+    # Safety net (race-free): if the session was created between our ledger
+    # check and the spawn, the resume above fails validation before any LLM
+    # call. Strip the creation flags and run once more — no token cost.
+    if (
+        run.get("returncode") not in (None, 0)
+        and "creation overrides are unsupported on resume"
+        in str(run.get("stderr") or "").lower()
+    ):
+        append_botty_log("HERMES RESUME rejected creation flags; retrying without them")
+        cmd = strip_hermes_creation_flags(cmd)
+        run = run_bounded_process(
+            cmd,
+            timeout_s=request_timeout_seconds,
+            stdin_text=stdin_text,
+            max_output_chars=AGENT_OUTPUT_CAP_CHARS,
+        )
     if not run.get("ok") and not run.get("stdout") and not run.get("stderr"):
         err = run.get("error") or "Agent process failed to start."
         set_status("error", headline="Error", last_error=err)

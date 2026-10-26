@@ -54,6 +54,8 @@ Panel {
   // this is empty exactly when there is nothing to approve.
   // Prompt waiting to be written to the backend's stdin once the process starts.
   property string pendingStdinPayload: ""
+  property string pendingCopyPayload: ""
+  property string pendingMemPayload: ""
 
   readonly property string pendingPermissionId: {
     var msgs = (root.historyData && root.historyData.messages) || []
@@ -382,7 +384,7 @@ Panel {
     // local process can read another process's command line, and the README
     // promises this. Quickshell cannot close a child's stdin, so the payload is
     // followed by a nonce line the backend stops at.
-    var stdinToken = "EOF-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36)
+    var stdinToken = root.newStdinToken()
     cmd.push("--query-stdin")
     cmd.push("--stdin-end")
     cmd.push(stdinToken)
@@ -460,9 +462,19 @@ Panel {
     }
   }
 
+  // One nonce shape for every stdin-framed call. It travels in argv (a nonce is
+  // not sensitive) and cannot be produced by the payload by accident.
+  function newStdinToken() {
+    return "EOF-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36)
+  }
+
   function copyText(text) {
     if (!text) return
-    copyProc.command = ["python3", root.scriptPath(), "copy", "--", text]
+    // The text goes over stdin: on a host without hidepid argv is readable by any
+    // local process, and what gets copied is often the whole answer.
+    var tok = root.newStdinToken()
+    root.pendingCopyPayload = text + "\n" + tok + "\n"
+    copyProc.command = ["python3", root.scriptPath(), "copy", "--text-stdin", "--stdin-end", tok]
     copyProc.running = true
     if (root.currentView === "chat") {
       Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
@@ -479,8 +491,12 @@ Panel {
     var cmd = ["python3", root.scriptPath(), "add-memory"]
     if (isUser) cmd.push("--user")
     if (fromModel) cmd.push("--from-model")
-    cmd.push("--")
-    cmd.push(text)
+    // Same reason as copyText: memory text is model output, never argv.
+    var tok = root.newStdinToken()
+    cmd.push("--text-stdin")
+    cmd.push("--stdin-end")
+    cmd.push(tok)
+    root.pendingMemPayload = text + "\n" + tok + "\n"
     addMemProc.command = cmd
     addMemProc.running = true
   }
@@ -1144,6 +1160,13 @@ Panel {
 
   Process {
     id: addMemProc
+    stdinEnabled: true
+    onStarted: {
+      if (root.pendingMemPayload.length > 0) {
+        addMemProc.write(root.pendingMemPayload)
+        root.pendingMemPayload = ""
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1155,6 +1178,13 @@ Panel {
 
   Process {
     id: copyProc
+    stdinEnabled: true
+    onStarted: {
+      if (root.pendingCopyPayload.length > 0) {
+        copyProc.write(root.pendingCopyPayload)
+        root.pendingCopyPayload = ""
+      }
+    }
   }
 
   // ------------------------------------------------------------- IPC Handlers

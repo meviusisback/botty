@@ -451,6 +451,24 @@ AGENT_OUTPUT_CAP_CHARS = 2_000_000  # per stream hard cap for agent subprocesses
 QUERY_STDIN_MAX_CHARS = 1_000_000
 
 
+def _text_from_args(args) -> str:
+    """Text for `copy` / `add-memory`: stdin when asked, else the positional.
+
+    On a host without hidepid every local process can read argv, so the widget
+    sends memory text and clipboard text the same way it sends prompts: over
+    stdin, terminated by a nonce that only travels in argv.
+    """
+    if getattr(args, "text_stdin", False):
+        term = getattr(args, "stdin_end", None)
+        if not term:
+            raise ValueError("--text-stdin requires --stdin-end")
+        return read_framed_stdin(str(term))
+    text = getattr(args, "text", None)
+    if text is None:
+        raise ValueError("missing text: pass a positional or --text-stdin/--stdin-end")
+    return text
+
+
 def read_framed_stdin(terminator: str, max_chars: int = QUERY_STDIN_MAX_CHARS) -> str:
     """Read the prompt from stdin up to a terminator LINE.
 
@@ -4283,7 +4301,12 @@ def main():
     rej_p.add_argument("id", help="Proposal ID")
     
     add_m = subparsers.add_parser("add-memory", help="Add persistent memory")
-    add_m.add_argument("text", help="Memory content")
+    add_m.add_argument("text", nargs="?", default=None,
+                       help="Memory content (prefer --text-stdin: argv is readable)")
+    add_m.add_argument("--text-stdin", dest="text_stdin", action="store_true",
+                       help="Read the text from stdin up to --stdin-end (keeps it out of argv)")
+    add_m.add_argument("--stdin-end", dest="stdin_end", default=None,
+                       help="Terminator line for --text-stdin")
     add_m.add_argument("--user", dest="user", action="store_true", help="Store as user fact in USER.md")
     add_m.add_argument("--from-model", dest="from_model", action="store_true", help="Model-derived fact: stage as pending proposal for review instead of writing live memory")
 
@@ -4305,7 +4328,12 @@ def main():
     create_s.add_argument("instructions", help="Skill instructions/markdown")
 
     copy_p = subparsers.add_parser("copy", help="Copy text to clipboard")
-    copy_p.add_argument("text", help="Text to copy")
+    copy_p.add_argument("text", nargs="?", default=None,
+                        help="Text to copy (prefer --text-stdin: argv is readable)")
+    copy_p.add_argument("--text-stdin", dest="text_stdin", action="store_true",
+                        help="Read the text from stdin up to --stdin-end (keeps it out of argv)")
+    copy_p.add_argument("--stdin-end", dest="stdin_end", default=None,
+                        help="Terminator line for --text-stdin")
 
     subparsers.add_parser("clip-image", help="Get clipboard image")
 
@@ -4391,7 +4419,12 @@ def main():
     elif args.command == "proposal-reject":
         print(json.dumps(reject_proposal(args.id), ensure_ascii=False))
     elif args.command == "add-memory":
-        print(json.dumps(add_memory(args.text, is_user_fact=args.user, from_model=args.from_model), ensure_ascii=False))
+        try:
+            mem_text = _text_from_args(args)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": f"add-memory: {exc}"}, ensure_ascii=False))
+            return
+        print(json.dumps(add_memory(mem_text, is_user_fact=args.user, from_model=args.from_model), ensure_ascii=False))
     elif args.command == "delete-memory":
         print(json.dumps(delete_memory(args.id, is_user_fact=args.user), ensure_ascii=False))
     elif args.command == "compact":
@@ -4402,7 +4435,12 @@ def main():
     elif args.command == "create-skill":
         print(json.dumps(create_skill(args.name, args.description, args.instructions), ensure_ascii=False))
     elif args.command == "copy":
-        print(json.dumps(copy_to_clipboard(args.text), ensure_ascii=False))
+        try:
+            copy_text = _text_from_args(args)
+        except ValueError as exc:
+            print(json.dumps({"ok": False, "error": f"copy: {exc}"}, ensure_ascii=False))
+            return
+        print(json.dumps(copy_to_clipboard(copy_text), ensure_ascii=False))
     elif args.command == "clip-image":
         print(json.dumps(get_clipboard_image(), ensure_ascii=False))
     else:

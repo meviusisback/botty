@@ -902,6 +902,43 @@ class TestSecurityHardening(unittest.TestCase):
                          "a failed run burned the approval")
         self.assertFalse(botty_backend.LOCK_FILE.exists())
 
+    def test_copy_and_memory_text_do_not_travel_in_argv(self):
+        """B2: prompts moved to stdin, but copy/add-memory still put their text in
+        argv for any local process to read."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        self.assertGreaterEqual(src.count("--text-stdin"), 2)
+        self.assertNotIn('"copy", "--"', src)
+        self.assertNotIn('cmd.push(text)', src)
+
+    def test_text_from_args_refuses_rather_than_guessing(self):
+        class A:
+            text_stdin = True
+            stdin_end = None
+            text = None
+        with self.assertRaises(ValueError):
+            botty_backend._text_from_args(A())
+
+        class B:
+            text_stdin = False
+            stdin_end = None
+            text = None
+        with self.assertRaises(ValueError):
+            botty_backend._text_from_args(B())
+
+        class C:
+            text_stdin = False
+            stdin_end = None
+            text = "positional still works"
+        self.assertEqual(botty_backend._text_from_args(C()), "positional still works")
+
+        class D:
+            text_stdin = True
+            stdin_end = "EOF-abc12345"
+            text = None
+        with mock.patch("botty_backend.read_framed_stdin", return_value="from stdin") as rf:
+            self.assertEqual(botty_backend._text_from_args(D()), "from stdin")
+        rf.assert_called_once_with("EOF-abc12345")
+
 
 if __name__ == "__main__":
     unittest.main()

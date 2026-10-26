@@ -187,11 +187,11 @@ stdin or owner-only files under `~/.local/share/botty` (0600/0700) — never in 
 engine's `argv` — and the widget now hands the prompt to the local
 `botty_backend.py` CLI over stdin too (a nonce-terminated frame, because the
 shell cannot close a child's stdin), so the prompt never appears in any command
-line. Two smaller paths still pass their text as an argument, and are named here
-rather than implied away: the copy-to-clipboard helper and the add-memory
-action. On a machine mounted without `hidepid` another local user could read
-those from `/proc` for the duration of that command. Notification payloads are
-fixed copy, not answer text.
+line. The copy-to-clipboard helper and the add-memory action use the same framed
+stdin transport, so what you copy and what gets remembered is not an argument
+either; only a random nonce is. Notification payloads are fixed copy, not answer
+text. The positional form is still accepted for direct CLI use, and is named in
+`--help` as the less private option.
 
 **Agent output is bounded.** Subprocess output is streamed with hard caps, runs
 are killed by process group on timeout (no orphaned children), log reads tail
@@ -206,6 +206,13 @@ with their own permission models; Botty's sandbox directive is advisory there,
 not engine-enforced. Process-group kills do not reach grandchildren that
 detach into their own session. Log files grow on disk; only the read side is
 capped.
+
+**Memory files are writable by any process running as you.** Model-initiated
+memory writes are staged as proposals for review, but that staging exists to stop
+the *model* from editing memory on its own — it is not a barrier against local
+processes. `USER.md`, `MEMORY.md` and `history.json` are ordinary owner-only
+files (`0600`), and anything running under your user account can write them
+directly. Treat the staging as a review workflow, not as integrity protection.
 
 **Memory Vault is an obfuscation-grade backup, not confidentiality.** The vault
 key is derived from publicly readable machine identifiers, and the vault is a

@@ -66,7 +66,8 @@ function stripReasoning(text) {
 }
 
 /**
- * Sanitizes message text for safe rendering by Qt Quick's MarkdownText.
+ * Sanitizes message text before display. Agent output is rendered as PLAIN TEXT
+ * by the panel; this keeps the visible text tidy and is a second layer.
  *
  * Security policy (marketplace review F5):
  * - NO raw HTML passes through: every `<...>` tag (including `<a>` and `<img>`,
@@ -76,8 +77,9 @@ function stripReasoning(text) {
  * - Markdown image syntax is stripped: inline `![alt](url)` and reference-style
  *   `![alt][ref]` both load remote images on render and are removed. Ordinary
  *   links `[text](url)` stay — they fire only on explicit user click, and
- *   Panel.qml's onLinkActivated allows http(s) schemes only.
- * Escaping keeps stray angle-bracket text visible instead of dropping it.
+ * Agent output is rendered as PLAIN TEXT (Panel.qml), so nothing here is a
+ * rendering control any more: this keeps the visible text tidy and stays a
+ * second layer. The panel's guard test fails if markdown rendering returns.
  */
 /**
  * Removes every markdown image form, including alt/label text with BALANCED
@@ -96,7 +98,7 @@ function _refDefinitionLabels(text) {
   // CommonMark also registers a definition that opens a blockquote or a list
   // item, and never registers one inside a fenced code block.
   var defs = {}
-  var re = /^[ \t>]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]{0,3}\[([^\]\n]+)\]:/gm
+  var re = /^(?:[ \t]{0,3}>[ \t]?)*[ \t]{0,3}(?:[-*+][ \t]+|\d+[.)][ \t]+)?\[([^\]\n]+)\]:/gm
   // Match against the text with fenced blocks removed: a "definition" inside a
   // code fence is literal text, not a definition.
   var scan = String(text).replace(/```[\s\S]*?(?:```|$)/g, "")
@@ -193,11 +195,6 @@ function sanitizeTextForMarkdown(text) {
   // Reference definitions `[id]: <url>` that remain are inert: with every
   // ![alt][id] form stripped above, no image node can reference them. They stay
   // so legitimate reference-style text links `[text][id]` keep working.
-
-  // Escape ALL XML/HTML-like tags to literal text. No tag is allowed through.
-  t = t.replace(/<([^>\n]+)>/g, function(match, tagContent) {
-    return "&lt;" + tagContent + "&gt;"
-  })
 
   // Restore inline codes
   t = t.replace(/__INLINE_CODE_(\d+)__/g, function(_, idx) {

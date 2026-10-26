@@ -59,7 +59,8 @@ Panel {
     var msgs = (root.historyData && root.historyData.messages) || []
     if (msgs.length === 0) return ""
     var m = msgs[msgs.length - 1]
-    return (m && m.sandbox_request === true) ? String(m.id || "") : ""
+    if (!m || m.sandbox_request !== true || m.sandbox_approved_at) return ""
+    return String(m.id || "")
   }
   property int lastMessageCount: 0
   property int lastReadMessageCount: 0
@@ -353,8 +354,8 @@ Panel {
 
     if (!q.trim() && !fpath && !scr && !sit) return
 
-    // Flags first, then "--", then the raw query — query text can never be
-    // parsed as backend options (option injection).
+    // Flags first; the prompt is NOT an argument — it goes over stdin below, so
+    // it cannot be parsed as an option and cannot be read from /proc.
     var cmd = ["python3", root.scriptPath(), "ask"]
     if (fpath) {
       if (root.attachedFileIsImage) {
@@ -1576,7 +1577,9 @@ Panel {
             tooltipText: "Clear Chat"
             implicitWidth: Style.space(32)
             implicitHeight: Style.space(32)
-            enabled: !root.isProcessing
+            // The shared Button renders no disabled state, so hiding is the only
+            // honest way to not offer a click that does nothing.
+            visible: !root.isProcessing
             onClicked: root.clearChat()
           }
 
@@ -2413,9 +2416,23 @@ Panel {
                             selected: true
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
+                            // A consumed card must not offer Approve again: the
+                            // backend refuses it, so the button would lie.
+                            visible: !modelData.sandbox_approved_at
                             onClicked: {
-                              root.approveSandboxBypass(modelData.sandbox_request === true ? modelData.id : "")
+                              root.approveSandboxBypass(modelData.id)
                             }
+                          }
+
+                          Text {
+                            visible: modelData.sandbox_approved_at === true
+                            textFormat: Text.PlainText
+                            text: "Approval already used — re-run the task for a fresh card."
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(10)
+                            color: root.dim
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
                           }
 
                           Button {
@@ -3075,7 +3092,7 @@ Panel {
                 anchors.top: parent.top
                 anchors.margins: Style.space(6)
                 spacing: Style.space(8)
-                Text { text: root.pendingProposals > 0 ? "⚠" : "✅"; font.pixelSize: Style.space(13); color: root.pendingProposals > 0 ? "#F59E0B" : "#4CAF50" }
+                Text { text: root.pendingProposals > 0 ? "⚠" : "✅"; textFormat: Text.PlainText; font.pixelSize: Style.space(13); color: root.pendingProposals > 0 ? "#F59E0B" : "#4CAF50" }
                 Text {
                   textFormat: Text.PlainText
                   text: {

@@ -30,9 +30,12 @@ function check(name, input, mustNotContain, mustContain) {
 // Raw HTML including <a>/<img> must be escaped to literal text (no tag pass-through).
 // The escaped text may still CONTAIN strings like "javascript:" — that is the fix:
 // they render as inert visible text, never as a parsed link/handler.
-check('raw img tag escaped', 'hi <img src="https://evil/x.png"> there', ['<img'], ['&lt;img']);
-check('raw anchor tag escaped', '<a href="javascript:alert(1)">click</a>', ['<a '], ['&lt;a']);
-check('self-closing img escaped', '<img src="https://evil/x.png"/>', ['<img'], ['&lt;img']);
+check('raw img tag left as literal text', 'hi <img src="https://evil/x.png"> there',
+      [], ['<img src="https://evil/x.png">']);
+check('raw anchor tag left as literal text', '<a href="javascript:alert(1)">click</a>',
+      [], ['<a href="javascript:alert(1)">']);
+check('self-closing img left as literal text', '<img src="https://evil/x.png"/>',
+      [], ['<img src="https://evil/x.png"/>']);
 // Inline + reference-style markdown images stripped (remote-image fetch vector)
 check('inline md image stripped', 'look ![puppy](https://evil/p.png) here', ['![puppy](', 'https://evil/p.png)'], ['image removed']);
 check('ref md image stripped', '![puppy][pic]\n\n[pic]: https://evil/p.png', ['![puppy][pic]'], ['image removed']);
@@ -90,12 +93,18 @@ check('definition inside a list item resolves',
       '- [shot]: https://evil/l.png\n\n![shot]', ['![shot]'], ['image removed']);
 check('definition inside a code fence does not resolve',
       '```\n[shot]: https://evil/f.png\n```\n\n![shot]', [], ['![shot]']);
+// X7: a definition indented 4+ spaces is an INDENTED CODE BLOCK in CommonMark,
+// where it is literal text and must not register.
+check('definition in an indented code block does not resolve',
+      '    [shot]: https://evil/i.png\n\n![shot]', [], ['![shot]']);
+check('definition indented 3 spaces still resolves',
+      '   [shot]: https://evil/t.png\n\n![shot]', ['![shot]'], ['image removed']);
 // Legitimate text markdown survives
 check('text link preserved', 'see [docs](https://example.com)', [], ['[docs](https://example.com)']);
 check('bold italic preserved', '**bold** and *italic*', [], ['**bold**', '*italic*']);
 check('inline code preserved', 'run `echo hello` now', [], ['echo hello']);
 // Angle-bracket comparisons render as literal text via entities (never a tag)
-check('comparison stays text', 'check x < 3 and y > 2', ['<img', '<a '], ['&lt;', '&gt;']);
+check('comparison stays text', 'check x < 3 and y > 2', ['<img', '<a '], ['x < 3']);
 
 // Permission-marker hardening: fenced/quoted/loose markers must not mint cards.
 const detect = sandbox.detectPermissionRequest;

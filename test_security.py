@@ -844,6 +844,64 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertFalse(second.get("ok"), second)
         self.assertIn("already used", second.get("error", ""))
 
+    def test_history_redacts_actions_and_raw_output(self):
+        """X6: W6 claims three sinks; only attachments had a test."""
+        secret = "sk-" + "C" * 40
+        botty_backend.add_history_message(
+            "assistant", "done",
+            actions=[{"label": f"key {secret}"}],
+            raw_output=f"log line {secret}")
+        msg = self._history()["messages"][0]
+        self.assertNotIn(secret, json.dumps(msg))
+        self.assertIn("REDACTED", msg["raw_output"])
+
+    def test_widget_sends_the_prompt_over_stdin(self):
+        """X8: the CLI half was tested; nothing asserted that the WIDGET stopped
+        putting the prompt in argv, so reverting sendQuery kept the suite green."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn("--query-stdin", src)
+        self.assertIn("--stdin-end", src)
+        self.assertNotIn("cmd.push(q)", src)
+
+    def test_consumed_approval_is_not_offered_again(self):
+        """X4: R6 is enforced server-side; the UI must not keep offering a card
+        whose approval is spent (otherwise the click is refused and looks ignored)."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        self.assertIn("m.sandbox_approved_at", src)
+        self.assertIn("visible: !modelData.sandbox_approved_at", src)
+
+    def test_failed_run_does_not_burn_the_approval(self):
+        """X3: a run that never started must leave the card retryable."""
+        botty_backend.HISTORY_FILE.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"id": "msg_p", "role": "assistant", "sandbox_request": True,
+                          "content": "🔒 SANDBOX PERMISSION REQUIRED: create ~/notes.md",
+                          "attachments": [], "actions": []}]}))
+
+        def dead_run(cmd, **kwargs):
+            return {"ok": False, "returncode": None, "stdout": "", "stderr": "",
+                    "timed_out": False, "output_truncated": False,
+                    "error": "spawn failed"}
+
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.run_bounded_process", side_effect=dead_run), \
+                 mock.patch("botty_backend.add_history_message"), \
+                 mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.send_system_notification"), \
+                 mock.patch("botty_backend.update_encrypted_vault"):
+                res = botty_backend.ask("I approve", bypass_sandbox=True, approve_id="msg_p")
+        finally:
+            botty_backend.set_active_engine(prev)
+
+        self.assertFalse(res.get("ok"), res)
+        msg = botty_backend.HISTORY_FILE.read_text()
+        self.assertNotIn("sandbox_approved_at", msg,
+                         "a failed run burned the approval")
+        self.assertFalse(botty_backend.LOCK_FILE.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2316,6 +2316,18 @@ def _claim_approved_proposal(approve_id: str):
                 "sandboxed and approve the new card.")
 
 
+@_synchronized
+def _unclaim_approved_proposal(approve_id: str) -> None:
+    """Release a claim whose run never started, so the card can be retried."""
+    hist = load_json_file(HISTORY_FILE, {"messages": []})
+    msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+    for m in msgs:
+        if isinstance(m, dict) and str(m.get("id", "")) == str(approve_id):
+            m.pop("sandbox_approved_at", None)
+            save_json_file(HISTORY_FILE, hist)
+            return
+
+
 def _clear_pending_reset(state: Dict[str, Any]) -> None:
     state.pop("reset_pending", None)
     state.pop("reset_bridge", None)
@@ -2525,17 +2537,22 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     # backwards for the newest `sandbox_request` message meant an injected card that
     # landed after a legitimate one became the executed payload while the user
     # approved the card they could actually see.
+    if not _acquire_ask_lock():
+        # Before the approval is claimed: a busy bot must not burn a card.
+        return {"ok": False, "error": "Botty is already processing a request."}
+
     approved_scope = ""
+    approval_claimed = False
     if bypass_sandbox:
         if not approve_id:
+            _release_ask_lock()
             return {"ok": False,
                     "error": "Sandbox bypass refused: the approved proposal id is missing."}
         approved_scope, refusal = _claim_approved_proposal(str(approve_id))
         if refusal:
+            _release_ask_lock()
             return {"ok": False, "error": f"Sandbox bypass refused: {refusal}"}
-
-    if not _acquire_ask_lock():
-        return {"ok": False, "error": "Botty is already processing a request."}
+        approval_claimed = True
 
     set_status("working", headline="Botty is thinking…", last_query=query)
 
@@ -2868,6 +2885,10 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         append_botty_log(f"ERROR [{engine}/{selected_model}]: {err}")
         add_history_message("assistant", f"⚠️ Error: {err}", model=selected_model, engine=engine, raw_output=err)
         send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
+        # A run that never started must not consume the approval: the user has
+        # to be able to retry the same card.
+        if approval_claimed:
+            _unclaim_approved_proposal(str(approve_id))
         # Security (P0): this early return predates the try/finally below —
         # release the lock or the next ask wedges on "already processing".
         _release_ask_lock()

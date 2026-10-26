@@ -78,6 +78,18 @@ check('bare bracket label kept when no definition exists', 'see ![note] here',
 // Batch mode must not manufacture an opener out of an already-escaped one (V1).
 check('escaped opener stays inert in batch mode',
       '![a]'.repeat(200) + ' \\![p](https://evil/live.png)', ['![p]('], []);
+// W1: a run of "!" must not leave a live opener behind in batch mode.
+check('batch mode: double bang cannot rebuild an opener',
+      '![a]'.repeat(200) + ' !![p](https://evil/x.png)', ['![p]('], []);
+check('batch mode: triple bang cannot rebuild an opener',
+      '![a]'.repeat(200) + ' !!![p](https://evil/x.png)', ['![p]('], []);
+// W3: definitions also register inside blockquote/list items, never in a fence.
+check('definition inside a blockquote resolves',
+      '> [shot]: https://evil/b.png\n\n![shot]', ['![shot]'], ['image removed']);
+check('definition inside a list item resolves',
+      '- [shot]: https://evil/l.png\n\n![shot]', ['![shot]'], ['image removed']);
+check('definition inside a code fence does not resolve',
+      '```\n[shot]: https://evil/f.png\n```\n\n![shot]', [], ['![shot]']);
 // Legitimate text markdown survives
 check('text link preserved', 'see [docs](https://example.com)', [], ['[docs](https://example.com)']);
 check('bold italic preserved', '**bold** and *italic*', [], ['**bold**', '*italic*']);

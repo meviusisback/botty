@@ -584,10 +584,14 @@ class TestSecurityHardening(unittest.TestCase):
         """B3: the PID file is writable state. A stale or hostile value must not
         become a SIGTERM aimed at an unrelated process."""
         botty_backend.VOICE_PID_FILE.write_text(str(os.getpid()))
-        res = botty_backend.dictate_stop()
-        self.assertFalse(res["ok"])
-        self.assertIn("stale", res["error"].lower())
+        with mock.patch("botty_backend.os.kill") as kill:
+            res = botty_backend.dictate_stop()
+        # The property is "never signal a pid that is not our ffmpeg" — and the
+        # flow continues from there (W4), so this fixture reports empty audio.
+        kill.assert_not_called()
         self.assertFalse(botty_backend.VOICE_PID_FILE.exists())
+        self.assertFalse(res["ok"])
+        self.assertIn("empty", res["error"].lower())
         # Reaching this line proves the test process itself was not signalled.
 
     def test_dictation_audio_not_in_world_writable_tmp(self):
@@ -742,6 +746,60 @@ class TestSecurityHardening(unittest.TestCase):
         # query file that the backend handed it.
         self.assertTrue(prompt_log.exists(), "the prompt never reached the engine")
         self.assertIn(marker, prompt_log.read_text(encoding="utf-8"))
+
+    # --- round-4 review findings (W-series) ---
+
+    def test_dictation_transcribes_when_recorder_already_exited(self):
+        """W4: a finished ffmpeg must not block transcription, and a foreign pid
+        must still never be signalled."""
+        botty_backend.VOICE_PID_FILE.write_text(str(os.getpid()))
+        rt = Path(self.test_dir.name) / "rt"
+        rt.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt)}):
+            wav = botty_backend._voice_wav_file()
+            wav.parent.mkdir(parents=True, exist_ok=True)
+            wav.write_bytes(b"RIFF" + b"\x00" * 2000)
+
+            def fake_run(cmd, **kw):
+                return mock.Mock(returncode=0, stdout="hello from the mic\n", stderr="")
+
+            with mock.patch("botty_backend.subprocess.run", side_effect=fake_run), \
+                 mock.patch("botty_backend.os.kill") as kill:
+                res = botty_backend.dictate_stop()
+
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("text"), "hello from the mic")
+        kill.assert_not_called()
+
+    def test_dictation_capture_is_created_0600(self):
+        """W5: the capture must not be world-readable while it is being recorded."""
+        rt = Path(self.test_dir.name) / "rt"
+        rt.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt)}), \
+             mock.patch("botty_backend.subprocess.Popen") as popen:
+            popen.return_value.pid = 4242
+            res = botty_backend.dictate_start()
+            wav = botty_backend._voice_wav_file()
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(os.stat(wav).st_mode & 0o777, 0o600)
+
+    def test_history_redacts_attachment_fields(self):
+        """W6: attachments are persisted too — a secret in a window title must
+        not survive in history.json."""
+        secret = "sk-proj-" + "B" * 40
+        botty_backend.add_history_message(
+            "user", "look at this",
+            attachments=[{"filename": "a.txt", "window_title": f"key {secret}"}])
+        msg = self._history()["messages"][0]
+        self.assertNotIn(secret, json.dumps(msg))
+        self.assertIn("a.txt", msg["attachments"][0]["filename"])
+        self.assertIn("REDACTED", msg["attachments"][0]["window_title"])
+
+    def test_engine_id_accepts_real_custom_provider_ids(self):
+        """W9: the allowlist must not reject ids the ecosystem actually uses."""
+        res = botty_backend.set_model(
+            "custom:http://localhost:11434/v1#aff94a1a7f730464", engine_name="hermes")
+        self.assertTrue(res.get("ok"), res)
 
 
 if __name__ == "__main__":

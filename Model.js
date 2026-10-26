@@ -92,11 +92,16 @@ function _normalizeRefLabel(label) {
 }
 
 function _refDefinitionLabels(text) {
-  // Shortcut references resolve against any definition line, in either order.
+  // Shortcut references resolve against any definition, in either order.
+  // CommonMark also registers a definition that opens a blockquote or a list
+  // item, and never registers one inside a fenced code block.
   var defs = {}
-  var re = /^[ \t]{0,3}\[([^\]\n]+)\]:/gm
+  var re = /^[ \t>]*(?:[-*+][ \t]+|\d+[.)][ \t]+)?[ \t]{0,3}\[([^\]\n]+)\]:/gm
+  // Match against the text with fenced blocks removed: a "definition" inside a
+  // code fence is literal text, not a definition.
+  var scan = String(text).replace(/```[\s\S]*?(?:```|$)/g, "")
   var m
-  while ((m = re.exec(text)) !== null) {
+  while ((m = re.exec(scan)) !== null) {
     defs[_normalizeRefLabel(m[1])] = true
   }
   return defs
@@ -181,7 +186,7 @@ function sanitizeTextForMarkdown(text) {
     // Drop the opener itself rather than escaping "!": "\!" after a backslash
     // would become "\\!", which CommonMark reads as an escaped backslash plus a
     // real image opener (review finding V1).
-    t = t.replace(/!\[/g, "[")
+    t = t.replace(/!+\[/g, "[")
   } else {
     t = stripMarkdownImages(t)
   }

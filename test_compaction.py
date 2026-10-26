@@ -844,7 +844,11 @@ class TestCompactionAndDistillation(unittest.TestCase):
             self.assertFalse(botty_backend.LOCK_FILE.exists(),
                              "a refused bypass leaked the ask lock")
 
-        _assert_refused(botty_backend.ask("x", bypass_sandbox=True), "no id")
+        # W10: assert the SPECIFIC refusal, not just "not ok" — deleting the
+        # missing-id guard would otherwise still produce a generic refusal.
+        no_id = botty_backend.ask("x", bypass_sandbox=True)
+        _assert_refused(no_id, "no id")
+        self.assertIn("missing", no_id.get("error", ""), no_id)
         _assert_refused(botty_backend.ask("x", bypass_sandbox=True, approve_id="msg_missing"),
                         "unknown id")
         _assert_refused(botty_backend.ask("x", bypass_sandbox=True, approve_id="msg_user"),

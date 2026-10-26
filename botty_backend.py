@@ -426,6 +426,17 @@ def _strip_fenced_code(text: str) -> str:
     return re.sub(r"```[\s\S]*?(?:```|$)", "", text or "")
 
 
+def _redact_obj(value):
+    """Redact secrets inside a nested JSON-ish structure (attachments/actions)."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, list):
+        return [_redact_obj(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _redact_obj(v) for k, v in value.items()}
+    return value
+
+
 def redact_secrets(text: str) -> str:
     if not text:
         return ""
@@ -2455,11 +2466,11 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
         "role": role,
         "content": safe_content,
         "timestamp": int(time.time()),
-        "attachments": attachments or [],
-        "actions": actions or [],
+        "attachments": _redact_obj(attachments or []),
+        "actions": _redact_obj(actions or []),
         "model": model or "",
         "engine": engine or "",
-        "raw_output": raw_output or "",
+        "raw_output": redact_secrets(raw_output) if raw_output else "",
         "sandbox_request": bool(sandbox_request)
     }
     msgs.append(msg)
@@ -3208,7 +3219,7 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
 
     return {"ok": False, "error": f"Unknown engine {engine}"}
 
-_ENGINE_ID_RE = re.compile(r"^[A-Za-z0-9._:/@+~-]{1,120}$")
+_ENGINE_ID_RE = re.compile(r"^[A-Za-z0-9._:/@+~#-]{1,120}$")
 
 
 def _valid_engine_id(value: str) -> bool:
@@ -3276,6 +3287,13 @@ def dictate_start() -> Dict[str, Any]:
             pass
 
     try:
+        # Own the file mode before ffmpeg opens it: the microphone capture must
+        # not be world-readable for the whole recording window.
+        try:
+            fd = os.open(str(wav), os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except OSError:
+            pass
         proc = subprocess.Popen(
             ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ac", "1", "-ar", "16000", str(wav)],
             stdout=subprocess.DEVNULL,
@@ -3292,11 +3310,12 @@ def dictate_stop() -> Dict[str, Any]:
 
     try:
         pid = int(VOICE_PID_FILE.read_text().strip())
-        # The file is attacker-writable state: never SIGTERM an arbitrary PID.
-        if not _pid_is_ffmpeg(pid):
-            return {"ok": False, "error": "Recording process is gone (stale PID file)."}
-        os.kill(pid, 15)
-        time.sleep(0.3)
+        # The file is attacker-writable state: only ever signal our own ffmpeg.
+        # If it already exited (Pulse restart, device unplugged) keep going — a
+        # complete recording may still be on disk and must still transcribe.
+        if _pid_is_ffmpeg(pid):
+            os.kill(pid, 15)
+            time.sleep(0.3)
     except Exception:
         pass
     finally:

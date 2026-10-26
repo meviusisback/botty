@@ -49,9 +49,9 @@ Panel {
   })
 
   property var historyData: ({ session_id: "botty-widget", messages: [] })
-  // Id of the last assistant message that is a REAL sandbox proposal. Legacy
-  // rows detected heuristically carry no flag, so they have no approvable id:
-  // the Approve button is hidden for them instead of doing nothing silently.
+  // Id of the last assistant message that is a REAL sandbox proposal (a flag
+  // written by the backend). Rows without the flag render no card at all, so
+  // this is empty exactly when there is nothing to approve.
   // Prompt waiting to be written to the backend's stdin once the process starts.
   property string pendingStdinPayload: ""
 

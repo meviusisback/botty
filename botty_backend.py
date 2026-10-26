@@ -3868,19 +3868,42 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
                 "compaction; not re-arming a bridge for a cleared conversation"
             )
     else:
-        if bridge_text:
-            try:
-                CONTEXT_BRIDGE_FILE.write_text(bridge_text, encoding="utf-8")
-                secure_file_permissions(CONTEXT_BRIDGE_FILE)
-            except Exception as e:
-                append_botty_log(f"Context bridge write error: {str(e)}")
+        # Same fence on the NON-deferred path: the prune commit released the state
+        # lock, so a Clear Chat can still land between it and this write. Writing
+        # the bridge here would recreate the file clear_history() just unlinked,
+        # and the next ask() would prepend the cleared conversation to the prompt.
+        # Holding the shared lock across the check AND the write makes this
+        # mutually exclusive with clear_history(), which holds it for its whole body.
+        _fh = None
+        _was_held = getattr(_lock_state, "held", False)
+        try:
+            _fh = _exclusive_file_lock()
+            _lock_state.held = True
+            _st = load_json_file(COMPACTION_STATE_FILE, {})
+            _epoch_now = int(_st.get("clear_epoch", 0) or 0) if isinstance(_st, dict) else 0
+            if _epoch_now != clear_epoch_at_start:
+                append_botty_log(
+                    "COMPACTION: bridge NOT written — Clear Chat landed during this "
+                    "compaction; not re-creating a summary for a cleared conversation"
+                )
+            else:
+                if bridge_text:
+                    try:
+                        CONTEXT_BRIDGE_FILE.write_text(bridge_text, encoding="utf-8")
+                        secure_file_permissions(CONTEXT_BRIDGE_FILE)
+                    except Exception as e:
+                        append_botty_log(f"Context bridge write error: {str(e)}")
 
-        # 5. Reset Hermes session context in SQLite state.db
-        reset_hermes_session(HERMES_SESSION_NAME)
-        # An armed pending reset is now spent: leaving it would make the next ask
-        # reset the *new* session again and overwrite the fresh bridge with the old
-        # summary (the model would get a stale COMPACTED CONTEXT block).
-        _compaction_state_update(mutate=_clear_pending_reset)
+                # 5. Reset Hermes session context in SQLite state.db
+                reset_hermes_session(HERMES_SESSION_NAME)
+                # An armed pending reset is now spent: leaving it would make the next ask
+                # reset the *new* session again and overwrite the fresh bridge with the old
+                # summary (the model would get a stale COMPACTED CONTEXT block).
+                _compaction_state_update_locked(mutate=_clear_pending_reset)
+        finally:
+            if _fh is not None:
+                _lock_state.held = _was_held
+                _release_file_lock(_fh)
 
     # 6. Synchronize encrypted memory vault
     try:

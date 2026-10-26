@@ -713,6 +713,62 @@ class TestCompactionAndDistillation(unittest.TestCase):
         self.assertFalse(botty_backend.CONTEXT_BRIDGE_FILE.exists(),
                          "the retry resurrected the bridge after Clear Chat")
 
+    def test_compaction_cannot_write_bridge_after_clear(self):
+        """The NON-deferred path must be fenced too.
+
+        When no ask is live the compactor writes the bridge file directly instead
+        of arming a retry. That write happens after the prune commit has released
+        the state lock, so a Clear Chat landing in between wipes the history and
+        unlinks the bridge — and the compactor then recreates it from the
+        pre-clear summary, which the next ask() prepends to the prompt.
+        """
+        messages = []
+        for i in range(16):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({
+                "id": f"msg_{i}",
+                "role": role,
+                "content": f"Turn {i}: my passport number is X1234567.",
+                "timestamp": 1700000000 + i,
+                "attachments": [],
+                "actions": [],
+            })
+        self.history_file.write_text(json.dumps({
+            "session_id": "botty-widget", "messages": messages, "rev": 1,
+        }), encoding="utf-8")
+
+        mock_llm_json = json.dumps({
+            "user_memories": [], "system_memories": [], "skills": [],
+            "context_summary": "Working on the K380 keyboard task.",
+        })
+
+        def fake_run(cmd, **kwargs):
+            return {"ok": True, "returncode": 0,
+                    "stdout": f"```json\n{mock_llm_json}\n```",
+                    "stderr": "", "timed_out": False,
+                    "output_truncated": False, "error": None}
+
+        seen = {}
+
+        def fake_stage(distilled):
+            # Clear lands between the prune commit and the bridge write. No ask is
+            # live in this scenario, so the compactor takes the direct-write branch.
+            seen["clear"] = botty_backend.clear_history()
+            return {"user_memories": 0, "system_memories": 0, "skills": 0}
+
+        with patch("botty_backend.run_bounded_process", side_effect=fake_run), \
+             patch("botty_backend.stage_learning_proposals", side_effect=fake_stage), \
+             patch("botty_backend._ask_live", new=lambda: False):
+            res = botty_backend.distill_and_compact_session(force=False, preserve_tail=4)
+
+        self.assertTrue(res.get("ok"), f"compaction should still succeed: {res}")
+        self.assertTrue(seen["clear"]["ok"], "the simulated Clear Chat must have succeeded")
+        self.assertFalse(botty_backend.CONTEXT_BRIDGE_FILE.exists(),
+                         "the cleared conversation was written back as a prompt bridge")
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertNotIn("reset_bridge", state)
+        self.assertFalse(botty_backend._apply_pending_reset())
+
 
 if __name__ == "__main__":
     unittest.main()

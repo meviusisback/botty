@@ -2836,11 +2836,8 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             f"but the active engine is '{engine}'. Switch to Hermes in Settings, "
             f"or approve a bypass run to proceed unrestricted."
         )
-        set_status("error", headline="Sandboxed engine not supported", last_error=err_msg)
-        append_botty_log(f"REFUSED [{engine}] sandboxed ask: non-Hermes engine has no approval gate")
-        add_history_message("assistant", f"⚠️ Error: {err_msg}", model=selected_model, engine=engine)
         _release_ask_lock()
-        return {"ok": False, "error": err_msg}
+        return _ask_refused(err_msg, engine=engine, model=selected_model)
 
     query_tmp = BOTTY_DATA_DIR / "current_query.txt"
     mode_line = build_mode_line(is_sandboxed)
@@ -2932,17 +2929,31 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
                 engine=engine, model=selected_model)
         approval_claimed = True
 
-    run = run_bounded_process(
-        cmd,
-        timeout_s=request_timeout_seconds,
-        stdin_text=stdin_text,
-        max_output_chars=AGENT_OUTPUT_CAP_CHARS,
-    )
+    try:
+        run = run_bounded_process(
+            cmd,
+            timeout_s=request_timeout_seconds,
+            stdin_text=stdin_text,
+            max_output_chars=AGENT_OUTPUT_CAP_CHARS,
+        )
+    except Exception:
+        # run_bounded_process reports failures as a dict, so a raise here means it
+        # never got as far as spawning: nothing executed and the card is
+        # refundable. (A raise AFTER execution must not refund — that is what
+        # turns one approval into two runs.)
+        if approval_claimed:
+            _unclaim_approved_proposal(str(approve_id))
+        raise
+    # Did any attempt actually produce output? That, not the shape of the last
+    # dict, is what decides whether the card may be handed back.
+    ran_output = bool(run.get("stdout"))
     # Safety net (race-free): if the session was created between our ledger
     # check and the spawn, the resume above fails validation before any LLM
-    # call. Strip the creation flags and run once more — no token cost.
+    # call. Strip the creation flags and run once more — no token cost, and only
+    # when the first attempt cannot have executed the payload.
     if (
-        run.get("returncode") not in (None, 0)
+        not ran_output
+        and run.get("returncode") not in (None, 0)
         and "creation overrides are unsupported on resume"
         in str(run.get("stderr") or "").lower()
     ):
@@ -2954,15 +2965,16 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             stdin_text=stdin_text,
             max_output_chars=AGENT_OUTPUT_CAP_CHARS,
         )
+        ran_output = ran_output or bool(run.get("stdout"))
     if not run.get("ok") and not run.get("stdout") and not run.get("stderr"):
         err = run.get("error") or "Agent process failed to start."
         set_status("error", headline="Error", last_error=err)
         append_botty_log(f"ERROR [{engine}/{selected_model}]: {err}")
         add_history_message("assistant", f"⚠️ Error: {err}", model=selected_model, engine=engine, raw_output=err)
         send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
-        # A run that never started must not consume the approval: the user has
-        # to be able to retry the same card.
-        if approval_claimed:
+        # A run that never started must not consume the approval — but only if no
+        # attempt produced output, or the payload would be runnable a second time.
+        if approval_claimed and not ran_output:
             _unclaim_approved_proposal(str(approve_id))
         # Security (P0): this early return predates the try/finally below —
         # release the lock or the next ask wedges on "already processing".
@@ -3109,9 +3121,13 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     """Entry point guard: an exception must not leave the ask slot claimed.
 
     Prompt assembly (status write, query file, chmod, history) runs while the
-    slot is held. Without this, a raise there wedges every later request on
-    "already processing" and can leave an approval consumed for a run that never
-    started.
+    slot is held; a raise there would wedge every later request on "already
+    processing". This wrapper releases the slot and makes the failure visible.
+
+    It deliberately does NOT refund the approval: whether a card may be handed
+    back depends on whether the payload ran, which only the body knows. The
+    spawn call refunds on a raise (nothing was created) and a run that produced
+    output never refunds.
     """
     args = (query, image_path, file_path, screen_context, situation_context,
             model, provider, bypass_sandbox, approve_id)
@@ -3128,8 +3144,13 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             _release_ask_lock()
         except Exception:
             pass
+        # Separate tries: when set_status is the thing that raised, the row the
+        # panel renders must still be written.
         try:
             set_status("error", headline="Botty hit an internal error", last_error=detail)
+        except Exception:
+            pass
+        try:
             add_history_message("assistant", f"⚠️ Botty hit an internal error: {detail}")
         except Exception:
             pass

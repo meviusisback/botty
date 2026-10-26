@@ -2133,6 +2133,24 @@ def _auto_compact_allowed(message_count: int = 0) -> bool:
         return True
 
 
+def _compaction_state_update_locked(mutate=None, **changes) -> Dict[str, Any]:
+    """Load-modify-save compaction_state.json — caller ALREADY holds the shared
+    history flock (inside @_synchronized or an explicit _exclusive_file_lock).
+
+    flock is not re-entrant across two descriptors of the same file, so a caller
+    that holds the lock must use this variant: _compaction_state_update would
+    open a second descriptor and block against its own lock.
+    """
+    state = load_json_file(COMPACTION_STATE_FILE, {})
+    if not isinstance(state, dict):
+        state = {}
+    if callable(mutate):
+        mutate(state)
+    state.update(changes)
+    save_json_file(COMPACTION_STATE_FILE, state)
+    return state
+
+
 def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
     """Load-modify-save compaction_state.json under the shared history flock.
 
@@ -2143,14 +2161,7 @@ def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
     """
     fh = _exclusive_file_lock()
     try:
-        state = load_json_file(COMPACTION_STATE_FILE, {})
-        if not isinstance(state, dict):
-            state = {}
-        if callable(mutate):
-            mutate(state)
-        state.update(changes)
-        save_json_file(COMPACTION_STATE_FILE, state)
-        return state
+        return _compaction_state_update_locked(mutate, **changes)
     finally:
         _release_file_lock(fh)
 
@@ -2160,6 +2171,19 @@ def _clear_pending_reset(state: Dict[str, Any]) -> None:
     state.pop("reset_bridge", None)
 
 
+def _clear_pending_reset_and_bump_epoch(state: Dict[str, Any]) -> None:
+    """Clear Chat invalidates a deferred compaction — flag AND fence.
+
+    Dropping `reset_pending` alone is not enough: a compaction that already
+    committed its history prune can arm a NEW pending reset after this runs, and
+    its `reset_bridge` describes the conversation the user just wiped. The epoch
+    is the fence the compactor checks before arming, so it is bumped in the same
+    locked write that drops the flag.
+    """
+    _clear_pending_reset(state)
+    state["clear_epoch"] = int(state.get("clear_epoch", 0) or 0) + 1
+
+
 def _apply_pending_reset() -> bool:
     """Finish a compaction whose session reset had to be deferred.
 
@@ -2167,8 +2191,20 @@ def _apply_pending_reset() -> bool:
     inflated context forever — the UI says "compacted", the model still receives
     everything, and nothing ever tried again. This runs between turns (no ask live),
     before the new turn decides whether the directive must be re-sent.
+
+    The whole effect runs under the shared history flock, which is what makes it
+    mutually exclusive with clear_history(): a Clear Chat landing mid-retry would
+    otherwise wipe history and unlink the bridge while this wrote the bridge back
+    from its stale read, resurrecting the conversation the user just cleared.
     """
+    fh = None
+    was_held = getattr(_lock_state, "held", False)
     try:
+        fh = _exclusive_file_lock()
+        # Mirror @_synchronized's re-entrancy flag while this lock is held: a nested
+        # synchronized writer must pass through rather than open a second descriptor
+        # and block against our own lock (flock is not re-entrant).
+        _lock_state.held = True
         state = load_json_file(COMPACTION_STATE_FILE, {})
         if not isinstance(state, dict) or not state.get("reset_pending"):
             return False
@@ -2190,12 +2226,16 @@ def _apply_pending_reset() -> bool:
             except Exception as e:
                 append_botty_log(f"Pending bridge write error: {str(e)}")
                 return False
-        _compaction_state_update(mutate=_clear_pending_reset)
+        _compaction_state_update_locked(mutate=_clear_pending_reset)
         append_botty_log("COMPACTION: deferred session reset applied (retry succeeded)")
         return True
     except Exception as e:
         append_botty_log(f"Pending reset error: {str(e)}")
         return False
+    finally:
+        if fh is not None:
+            _lock_state.held = was_held
+            _release_file_lock(fh)
 
 
 def _spawn_detached_compaction(message_count: int = 0) -> bool:
@@ -2272,6 +2312,13 @@ def clear_history() -> Dict[str, Any]:
         CONTEXT_BRIDGE_FILE.unlink(missing_ok=True)
     except OSError:
         pass
+    # Same stale-context problem one level up: a compaction that had to defer its
+    # session reset keeps the summary + verbatim tail in `reset_bridge`, and the
+    # next ask() would write that file back and prepend it to the prompt —
+    # resubmitting the conversation the user just cleared. Drop it here, and bump
+    # the epoch in the same locked write so a compactor that already committed its
+    # prune cannot arm a fresh pending reset AFTER this point.
+    _compaction_state_update_locked(mutate=_clear_pending_reset_and_bump_epoch)
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
     return {"ok": True, "message": "History cleared and session reset"}
 
@@ -3547,6 +3594,15 @@ def distill_and_compact_session(force: bool = False, preserve_tail: Optional[int
 
 def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
                                 background: bool) -> Dict[str, Any]:
+    # Fence for the deferred-reset arm far below: Clear Chat may land at any point
+    # between this snapshot and that arm (the prune commits long before it, and
+    # stage_learning_proposals() runs in between). Captured BEFORE the history
+    # snapshot is read, so any clear from here on invalidates the arm.
+    _state_at_start = load_json_file(COMPACTION_STATE_FILE, {})
+    clear_epoch_at_start = (
+        int(_state_at_start.get("clear_epoch", 0) or 0)
+        if isinstance(_state_at_start, dict) else 0
+    )
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
     
@@ -3778,15 +3834,39 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
         append_botty_log(f"Context bridge build error: {str(e)}")
 
     ask_started = _ask_live()
+    reset_armed = False
     if ask_started:
         # Arm a retry instead of silently losing the reset: the prune is already
         # committed, so without this Hermes would keep the whole inflated context
         # forever while the UI reports "compacted".
-        _compaction_state_update(reset_pending=True, reset_bridge=bridge_text)
-        append_botty_log(
-            "COMPACTION: session reset deferred (an ask went live during compaction); "
-            "retry armed for the next turn"
-        )
+        #
+        # Refuse to arm when Clear Chat landed during this compaction. The commit
+        # above and this arm are separated by staging + bridge construction, and a
+        # clear inside that window already wiped the conversation: re-arming here
+        # would make the next ask() write `bridge_text` back and prepend it to the
+        # prompt, resubmitting the context the user explicitly cleared. The epoch
+        # is checked inside the state lock so the decision cannot race the clear.
+        decided = []
+
+        def _arm_unless_cleared(state: Dict[str, Any]) -> None:
+            if int(state.get("clear_epoch", 0) or 0) != clear_epoch_at_start:
+                return
+            state["reset_pending"] = True
+            state["reset_bridge"] = bridge_text
+            decided.append(True)
+
+        _compaction_state_update(mutate=_arm_unless_cleared)
+        reset_armed = bool(decided)
+        if reset_armed:
+            append_botty_log(
+                "COMPACTION: session reset deferred (an ask went live during compaction); "
+                "retry armed for the next turn"
+            )
+        else:
+            append_botty_log(
+                "COMPACTION: deferred reset DISCARDED — Clear Chat landed during this "
+                "compaction; not re-arming a bridge for a cleared conversation"
+            )
     else:
         if bridge_text:
             try:
@@ -3812,7 +3892,9 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
         f"COMPACTION COMPLETED{' (background)' if background else ''}: Compacted {len(to_compact)} msgs "
         f"-> {len(history['messages'])} msgs left. Staged {proposed_user} user mems, "
         f"{proposed_sys} sys mems, {proposed_skill} skills as proposals (none auto-saved)."
-        + ("" if not ask_started else " Session reset deferred.")
+        + ("" if not ask_started else
+           (" Session reset deferred." if reset_armed
+            else " Deferred reset discarded (conversation was cleared)."))
     )
     append_botty_log(completion_log)
     if not background:

@@ -309,13 +309,18 @@ class TestCompactionAndDistillation(unittest.TestCase):
         self.assertEqual(res["skills_added"], 0)
         self.assertEqual(res["proposals_staged"], 3)
 
-        # Explicit per-entry approval writes the memory to the live store.
+        # Explicit per-entry approval stages the entry for the human to install.
+        # Hardening (F2/A4): approval must NOT write the live agent instruction
+        # store (USER.md) — model-derived text stays inert until a human moves it.
         mem_prop = by_kind[("memory", True)]["id"]
         apply_res = botty_backend.apply_proposal(mem_prop)
         self.assertTrue(apply_res["ok"])
+        staged_memories = botty_backend.APPROVED_STAGING_DIR / "memories_user.md"
+        self.assertTrue(staged_memories.exists(), "approved memory was not staged")
+        self.assertIn("Python 3.11", staged_memories.read_text(encoding="utf-8"))
         mems = botty_backend.get_memories()
-        self.assertEqual(mems["count"], 1)
-        self.assertIn("Python 3.11", mems["memories"][0]["text"])
+        self.assertEqual(mems["count"], 0,
+                         "approved content must not be auto-written to the live store")
 
         # Skill stays staged until explicitly approved.
         skills = botty_backend.get_skills()
@@ -549,6 +554,165 @@ class TestCompactionAndDistillation(unittest.TestCase):
         names = [p.get("name") for p in props["proposals"] if p["kind"] == "skill"]
         self.assertEqual(texts, ["ok memory"])
         self.assertEqual(names, ["good-skill"])
+
+    def test_clear_history_invalidates_pending_reset(self):
+        """Clear Chat must invalidate a deferred compaction's pending reset.
+
+        Regression (marketplace review, Medium): a compaction that had to defer its
+        session reset keeps the distilled summary + verbatim tail in `reset_bridge`.
+        Clear Chat wiped history.json and unlinked the bridge FILE but left that
+        state armed, so the next ask() wrote the bridge back and prepended the
+        CLEARED conversation to the model prompt — resubmitting private context the
+        user had just deleted.
+        """
+        botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps({
+            "reset_pending": True,
+            "reset_bridge": "SECRET: my passport number is X1234567",
+        }), encoding="utf-8")
+        self.history_file.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"role": "user", "content": "private question"}],
+            "rev": 3,
+        }), encoding="utf-8")
+
+        res = botty_backend.clear_history()
+        self.assertTrue(res["ok"])
+
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertNotIn("reset_pending", state, "Clear Chat left a deferred reset armed")
+        self.assertNotIn("reset_bridge", state, "Clear Chat left the old bridge text on disk")
+
+        # The retry must now be a no-op: no bridge file, nothing injectable next turn.
+        self.assertFalse(botty_backend._apply_pending_reset(),
+                         "the deferred reset still fired after Clear Chat")
+        self.assertFalse(botty_backend.CONTEXT_BRIDGE_FILE.exists(),
+                         "the cleared conversation was written back as a prompt bridge")
+
+    def test_compaction_cannot_rearm_bridge_after_clear(self):
+        """A compactor that already committed its prune must not arm a pending reset
+        when Clear Chat lands before the arm is reached.
+
+        The prune commit and the deferred arm are separated by staging + bridge
+        construction, so a clear in that window used to leave the compactor free to
+        arm a bridge describing the conversation the user had just wiped.
+        """
+        messages = []
+        for i in range(16):
+            role = "user" if i % 2 == 0 else "assistant"
+            messages.append({
+                "id": f"msg_{i}",
+                "role": role,
+                "content": f"Turn {i}: my passport number is X1234567.",
+                "timestamp": 1700000000 + i,
+                "attachments": [],
+                "actions": [],
+            })
+        self.history_file.write_text(json.dumps({
+            "session_id": "botty-widget", "messages": messages, "rev": 1,
+        }), encoding="utf-8")
+
+        mock_llm_json = json.dumps({
+            "user_memories": [],
+            "system_memories": [],
+            "skills": [],
+            "context_summary": "Working on the K380 keyboard task.",
+        })
+
+        def fake_run(cmd, **kwargs):
+            return {"ok": True, "returncode": 0,
+                    "stdout": f"```json\n{mock_llm_json}\n```",
+                    "stderr": "", "timed_out": False,
+                    "output_truncated": False, "error": None}
+
+        live = {"ask_live": False}
+        seen = {}
+
+        def fake_stage(distilled):
+            # Runs between the prune commit and the deferred arm, exactly where the
+            # real stage_learning_proposals() sits. The user clears the chat here and
+            # immediately sends a new message, so the compactor sees a live ask.
+            seen["clear"] = botty_backend.clear_history()
+            live["ask_live"] = True
+            return {"user_memories": 0, "system_memories": 0, "skills": 0}
+
+        with patch("botty_backend.run_bounded_process", side_effect=fake_run), \
+             patch("botty_backend.stage_learning_proposals", side_effect=fake_stage), \
+             patch("botty_backend._ask_live", new=lambda: live["ask_live"]):
+            res = botty_backend.distill_and_compact_session(force=False, preserve_tail=4)
+
+        self.assertTrue(res.get("ok"), f"compaction should still succeed: {res}")
+        self.assertIn("clear", seen, "the simulated Clear Chat never ran")
+        self.assertTrue(seen["clear"]["ok"], "the simulated Clear Chat must have succeeded")
+
+        state = json.loads(botty_backend.COMPACTION_STATE_FILE.read_text())
+        self.assertNotIn("reset_pending", state,
+                         "compaction re-armed a reset after Clear Chat wiped the conversation")
+        self.assertNotIn("reset_bridge", state,
+                         "compaction kept a bridge for the cleared conversation")
+        self.assertFalse(botty_backend.CONTEXT_BRIDGE_FILE.exists(),
+                         "a bridge for the cleared conversation was written to disk")
+        self.assertFalse(botty_backend._apply_pending_reset())
+
+    def test_clear_history_cannot_interleave_with_pending_retry(self):
+        """The pending-reset retry and Clear Chat must be mutually exclusive.
+
+        The retry is the writer that brings a bridge FILE back from `reset_bridge`.
+        If a Clear Chat can run between its state read and that write, the clear
+        unlinks the bridge and the retry immediately recreates it: the cleared
+        conversation is resurrected for the next prompt. Both run under the shared
+        history flock, so the clear must WAIT for the retry to finish (and then be
+        the last writer, leaving no bridge behind).
+        """
+        import threading
+
+        botty_backend.COMPACTION_STATE_FILE.write_text(json.dumps({
+            "reset_pending": True,
+            "reset_bridge": "SECRET bridge from the conversation about to be cleared",
+        }), encoding="utf-8")
+        self.history_file.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"role": "user", "content": "private question"}],
+            "rev": 7,
+        }), encoding="utf-8")
+
+        clear_results = []
+        threads = []
+        overlapped = []
+        fired = []
+
+        def fake_reset(session_name, *a, **k):
+            # Only the RETRY's reset triggers the concurrent clear: clear_history()
+            # calls reset_hermes_session() too, and letting this fire again would
+            # recurse into another thread instead of measuring the lock.
+            if not fired:
+                fired.append(True)
+                t = threading.Thread(
+                    target=lambda: clear_results.append(botty_backend.clear_history()),
+                    daemon=True,
+                )
+                threads.append(t)
+                t.start()
+                t.join(timeout=1.0)
+                overlapped.append(not t.is_alive())
+            return {"ok": True, "reset": True}
+
+        with patch("botty_backend.reset_hermes_session", side_effect=fake_reset):
+            applied = botty_backend._apply_pending_reset()
+
+        for t in threads:
+            t.join(timeout=5.0)
+
+        self.assertTrue(applied, "the deferred reset should still have applied")
+        self.assertFalse(
+            overlapped and overlapped[0],
+            "Clear Chat ran inside the pending-reset retry: the two are not exclusive",
+        )
+        self.assertTrue(clear_results and clear_results[0]["ok"],
+                        "the Clear Chat that waited never completed")
+        # The clear ran last, so its unlink wins: no bridge may survive it.
+        self.assertFalse(botty_backend.CONTEXT_BRIDGE_FILE.exists(),
+                         "the retry resurrected the bridge after Clear Chat")
+
 
 if __name__ == "__main__":
     unittest.main()

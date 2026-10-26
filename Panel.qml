@@ -293,11 +293,28 @@ Panel {
     setSandboxProc.running = true
   }
 
-  function approveSandboxBypass(originalQuery) {
-    var queryToSend = originalQuery || "I approve this operation. Please bypass the sandbox and execute the proposed file/system write actions."
-    // Bypass is passed explicitly as sendQuery's last arg — no shared flag,
-    // so an approve-click while busy can never latch onto a later prompt.
-    root.sendQuery(queryToSend, "", false, false, true)
+  // Id of the last assistant message that is a REAL sandbox proposal. The banner
+  // also renders for legacy rows detected heuristically (no sandbox_request flag);
+  // those have no approvable id and the backend refuses a bypass without one, so
+  // they surface as "re-run the task" instead of executing something unvetted.
+  function lastPendingPermissionId() {
+    var msgs = (root.historyData && root.historyData.messages) || []
+    if (msgs.length === 0) return ""
+    var m = msgs[msgs.length - 1]
+    if (!m || m.sandbox_request !== true) return ""
+    return String(m.id || "")
+  }
+
+  function approveSandboxBypass(messageId) {
+    // The approval is bound to the card the user clicked: the id travels with the
+    // request and the backend resolves THAT message (a forward/backward scan for
+    // "the newest proposal" let an injected card become the executed payload).
+    if (!messageId) {
+      root.rawStatus.last_error = "This permission card has no approval id. Re-run the task sandboxed to get a fresh card."
+      return
+    }
+    root.sendQuery("I approve this action. Please bypass the sandbox and execute the proposed changes.",
+                   "", false, false, true, messageId)
   }
 
   function setNotificationPref(key, value) {
@@ -320,7 +337,7 @@ Panel {
     testNotifProc.running = true
   }
 
-  function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox) {
+  function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox, approveId) {
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
@@ -349,6 +366,10 @@ Panel {
     }
     if (bypassSandbox) {
       cmd.push("--bypass-sandbox")
+      if (approveId) {
+        cmd.push("--approve-id")
+        cmd.push(String(approveId))
+      }
     }
     cmd.push("--")
     cmd.push(q)
@@ -2354,7 +2375,7 @@ Panel {
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             onClicked: {
-                              root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
+                              root.approveSandboxBypass(modelData.id)
                             }
                           }
 
@@ -2551,7 +2572,7 @@ Panel {
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {
-                    root.approveSandboxBypass("I approve this action. Please bypass the sandbox and execute the proposed changes.")
+                    root.approveSandboxBypass(root.lastPendingPermissionId())
                   }
                 }
 

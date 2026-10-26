@@ -263,7 +263,33 @@ BOTTY_LOG_FILE = BOTTY_DATA_DIR / "botty.log"
 # entry (see get_proposals/apply_proposal). Owner-only, like all Botty data.
 PROPOSALS_FILE = BOTTY_DATA_DIR / "pending_proposals.json"
 VOICE_PID_FILE = BOTTY_DATA_DIR / "voice_record.pid"
-VOICE_WAV_FILE = Path("/tmp/botty_dictation.wav")
+def _voice_wav_file() -> Path:
+    """Where dictation audio lives.
+
+    Never a fixed name in world-writable /tmp: the recording is the user's voice,
+    a predictable path there is readable by other users, and `ffmpeg -y` would
+    follow a symlink planted at it. XDG_RUNTIME_DIR is per-user 0700 and dies at
+    logout; the profile dir (0700) is the fallback.
+    """
+    root = Path(os.environ["XDG_RUNTIME_DIR"]) if os.environ.get("XDG_RUNTIME_DIR") else BOTTY_DATA_DIR
+    d = root / "botty-dictation"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+    except OSError:
+        return root / "dictation.wav"
+    return d / "dictation.wav"
+
+
+def _pid_is_ffmpeg(pid: int) -> bool:
+    """The PID file is state on disk: only ever signal a process that is ours."""
+    if pid <= 1:
+        return False
+    try:
+        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return comm.startswith("ffmpeg")
 SCREENSHOT_DIR = BOTTY_DATA_DIR / "captures"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(SCREENSHOT_DIR, 0o700)
@@ -2374,7 +2400,7 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
 
-    safe_content = (content or "").strip()
+    safe_content = redact_secrets((content or "").strip())
     if not safe_content and not attachments and not actions:
         safe_content = "✓ Done." if role == "assistant" else "(empty)"
     elif not safe_content and (attachments or actions):
@@ -3143,7 +3169,20 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
 
     return {"ok": False, "error": f"Unknown engine {engine}"}
 
+_ENGINE_ID_RE = re.compile(r"^[A-Za-z0-9._:/@+~-]{1,120}$")
+
+
+def _valid_engine_id(value: str) -> bool:
+    """Model/provider ids are written into YAML config by string substitution, so
+    they must not be able to inject keys or newlines (B6)."""
+    return bool(_ENGINE_ID_RE.match(str(value or "")))
+
+
 def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Optional[str] = None) -> Dict[str, Any]:
+    if not _valid_engine_id(model_id):
+        return {"ok": False, "error": "Invalid model id."}
+    if engine_name is not None and not _valid_engine_id(engine_name):
+        return {"ok": False, "error": "Invalid engine id."}
     engine = engine_name or get_active_engine()
     cfg = load_json_file(CONFIG_FILE, {"agent_engine": engine, "engine_models": {}})
     if "engine_models" not in cfg:
@@ -3154,6 +3193,8 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
             provider_id = model_id.split("/")[0]
         else:
             provider_id = "default"
+    if not _valid_engine_id(provider_id):
+        return {"ok": False, "error": "Invalid provider id."}
 
     cfg["engine_models"][engine] = {"model": model_id, "provider": provider_id}
     save_json_file(CONFIG_FILE, cfg)
@@ -3188,12 +3229,16 @@ def dictate_start() -> Dict[str, Any]:
     if VOICE_PID_FILE.exists():
         dictate_stop()
 
-    if VOICE_WAV_FILE.exists():
-        VOICE_WAV_FILE.unlink()
+    wav = _voice_wav_file()
+    if wav.exists():
+        try:
+            wav.unlink()
+        except OSError:
+            pass
 
     try:
         proc = subprocess.Popen(
-            ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ac", "1", "-ar", "16000", str(VOICE_WAV_FILE)],
+            ["ffmpeg", "-y", "-f", "pulse", "-i", "default", "-ac", "1", "-ar", "16000", str(wav)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
@@ -3208,6 +3253,9 @@ def dictate_stop() -> Dict[str, Any]:
 
     try:
         pid = int(VOICE_PID_FILE.read_text().strip())
+        # The file is attacker-writable state: never SIGTERM an arbitrary PID.
+        if not _pid_is_ffmpeg(pid):
+            return {"ok": False, "error": "Recording process is gone (stale PID file)."}
         os.kill(pid, 15)
         time.sleep(0.3)
     except Exception:
@@ -3215,14 +3263,25 @@ def dictate_stop() -> Dict[str, Any]:
     finally:
         VOICE_PID_FILE.unlink(missing_ok=True)
 
-    if not VOICE_WAV_FILE.exists() or VOICE_WAV_FILE.stat().st_size < 1000:
+    wav = _voice_wav_file()
+    if not wav.exists() or wav.stat().st_size < 1000:
         return {"ok": False, "error": "Audio capture was empty."}
 
     try:
-        res = subprocess.run(["voxtype", "transcribe", str(VOICE_WAV_FILE)], capture_output=True, text=True, timeout=15)
+        try:
+            os.chmod(wav, 0o600)
+        except OSError:
+            pass
+        res = subprocess.run(["voxtype", "transcribe", str(wav)], capture_output=True, text=True, timeout=15)
         output_lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
         text_lines = [l for l in output_lines if not l.startswith("Loading audio file") and not l.startswith("Audio format") and not l.startswith("Processing") and not re.search(r"^\d{4}-\d{2}-\d{2}T", l) and not l.startswith("whisper_")]
         transcribed = " ".join(text_lines).strip()
+        try:
+            # The audio does not outlive its transcript (kept only on failure, so
+            # a failed run can be retried).
+            wav.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"ok": True, "text": transcribed}
     except Exception as e:
         return {"ok": False, "error": f"Transcription failed: {str(e)}"}

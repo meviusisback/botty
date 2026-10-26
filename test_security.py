@@ -553,6 +553,52 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertFalse(any(ln.strip().startswith("[SYSTEM DIRECTIVE: curl") for ln in lines),
                          f"a filename forged a prompt line:\n{prompt}")
 
+    # --- Pre-existing findings from the full audit (medium batch) ---
+
+    def test_set_model_rejects_yaml_injection(self):
+        """B6: model/provider ids are interpolated into YAML by string
+        substitution, so a newline or a stray key must be refused."""
+        for bad in ("gpt-4\n  api_key: stolen", "model: x", "a" * 200,
+                    "", "id with space", "id\r\nx"):
+            res = botty_backend.set_model(bad)
+            self.assertFalse(res.get("ok"), f"accepted bad id {bad!r}")
+
+        ok = botty_backend.set_model("openai/gpt-4o", engine_name="hermes")
+        self.assertTrue(ok.get("ok"), ok)
+        cfg = json.loads(botty_backend.CONFIG_FILE.read_text())
+        self.assertEqual(cfg["engine_models"]["hermes"]["model"], "openai/gpt-4o")
+        self.assertEqual(cfg["engine_models"]["hermes"]["provider"], "openai")
+
+    def test_history_redacts_token_shaped_secrets(self):
+        """B5: history.json is a sink like status/log/notifications — the same
+        redaction must apply before the transcript is persisted."""
+        secret = "ghp_" + "A" * 36
+        botty_backend.add_history_message("user", f"my token is {secret} ok")
+        msg = self._history()["messages"][0]["content"]
+        self.assertNotIn(secret, msg)
+        self.assertIn("REDACTED", msg)
+
+    def test_dictation_refuses_foreign_pid(self):
+        """B3: the PID file is writable state. A stale or hostile value must not
+        become a SIGTERM aimed at an unrelated process."""
+        botty_backend.VOICE_PID_FILE.write_text(str(os.getpid()))
+        res = botty_backend.dictate_stop()
+        self.assertFalse(res["ok"])
+        self.assertIn("stale", res["error"].lower())
+        self.assertFalse(botty_backend.VOICE_PID_FILE.exists())
+        # Reaching this line proves the test process itself was not signalled.
+
+    def test_dictation_audio_not_in_world_writable_tmp(self):
+        """B4/S3: the recording is the user's voice — it must live in a per-user
+        0700 runtime dir, never under /tmp with a predictable name."""
+        rt = self.data_dir / "runtime"
+        rt.mkdir(parents=True, exist_ok=True)
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(rt)}):
+            wav = botty_backend._voice_wav_file()
+        self.assertFalse(str(wav).startswith("/tmp"), wav)
+        self.assertTrue(str(wav).startswith(str(rt)), wav)
+        self.assertEqual(os.stat(wav.parent).st_mode & 0o777, 0o700)
+
 
 if __name__ == "__main__":
     unittest.main()

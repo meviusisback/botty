@@ -1179,7 +1179,6 @@ Panel {
     }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
-    function toggleSandbox(): void { root.toggleSandboxMode() }
   }
 
   IpcHandler {
@@ -1225,7 +1224,6 @@ Panel {
     }
     function attach(path: string): void { root.attachFileNow(path) }
     function clear(): void { root.clearChat() }
-    function toggleSandbox(): void { root.toggleSandboxMode() }
   }
   // ------------------------------------------------------------- Bar Button (Icon Mode)
   BarIconButton {
@@ -2322,8 +2320,10 @@ Panel {
                     // Sandbox Permission Request Card
                     BorderSurface {
                       id: permCard
-                      visible: !isUser && (modelData.sandbox_request === true
-                        || (modelData.sandbox_request == null && Model.detectPermissionRequest(modelData.content).isPermission))
+                      // Only a REAL flag mints an approval card. The heuristic
+                      // fallback rendered one from model prose, so an injected
+                      // answer could conjure a security-looking control.
+                      visible: !isUser && modelData.sandbox_request === true
                       width: parent.width
                       Layout.fillWidth: true
                       implicitHeight: permCol.implicitHeight + Style.space(16)
@@ -2516,8 +2516,8 @@ Panel {
               var msgs = (root.historyData && root.historyData.messages) || []
               if (root.isProcessing || msgs.length === 0) return false
               var lastMsg = msgs[msgs.length - 1]
-              return lastMsg && lastMsg.role === "assistant" && (lastMsg.sandbox_request === true
-                || (lastMsg.sandbox_request == null && Model.detectPermissionRequest(lastMsg.content).isPermission))
+              // Flag only, same rule as the in-message card.
+              return lastMsg && lastMsg.role === "assistant" && lastMsg.sandbox_request === true
             }
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)

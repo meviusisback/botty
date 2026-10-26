@@ -2618,6 +2618,14 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         if refusal:
             _release_ask_lock()
             return _ask_refused(f"Sandbox bypass refused: {refusal}")
+        if image_path or file_path or screen_context or situation_context:
+            # The approved run carries the proposal and nothing else: an
+            # attachment or screen capture would be untrusted content inside a
+            # privileged prompt.
+            _release_ask_lock()
+            return _ask_refused(
+                "Sandbox bypass refused: an approved run executes the proposal only. "
+                "Attachments, images and screen context cannot be added to it.")
 
     set_status("working", headline="Botty is thinking…", last_query=query)
 
@@ -2793,8 +2801,14 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             + "\n[END APPROVED EXECUTION SCOPE]\n"
         )
 
-    user_query = query.strip() if query.strip() else ("Analyze the attached file." if attached_file_info else ("Analyze the current desktop situation and active tools." if situation_data else "Analyze the attached screenshot context."))
-    prompt_parts.append(user_query)
+    if approved_scope:
+        # Do NOT append the caller's query: on a --yolo follow-up anything else
+        # in the prompt is text the user never approved. The widget happens to
+        # send a fixed sentence, but the backend cannot rely on its caller.
+        user_query = ""
+    else:
+        user_query = query.strip() if query.strip() else ("Analyze the attached file." if attached_file_info else ("Analyze the current desktop situation and active tools." if situation_data else "Analyze the attached screenshot context."))
+        prompt_parts.append(user_query)
     final_prompt = "\n".join(prompt_parts)
 
     engine = get_active_engine()
@@ -2911,7 +2925,8 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         # deny) technically blocks writes/state changes regardless of prompt content.
         if not is_sandboxed:
             cmd.append("--yolo")
-        if target_image and os.path.exists(target_image):
+        # Never on an approved run: the proposal is the whole prompt.
+        if target_image and not approved_scope and os.path.exists(target_image):
             cmd.extend(["--image", target_image])
         if not is_resume:
             if selected_model:
@@ -2927,6 +2942,10 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             _release_ask_lock()
             # The card vanished (cleared/compacted) or was consumed by another
             # request: say which, and never leave the panel on "working".
+            try:
+                query_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
             return _ask_refused(
                 "Sandbox bypass refused: that card is gone from the conversation or "
                 "was already approved. Re-run the task sandboxed for a fresh card.",
@@ -4353,7 +4372,8 @@ def main():
     subparsers.add_parser("status", help="Get live bot status")
     
     ask_p = subparsers.add_parser("ask", help="Send a query to Botty")
-    ask_p.add_argument("query", nargs="?", default="", help="Query prompt text")
+    ask_p.add_argument("query", nargs="?", default="",
+                       help="Query prompt text (prefer --query-stdin: argv is readable by any local process)")
     ask_p.add_argument("--image", dest="image", default=None, help="Path to image/media file")
     ask_p.add_argument("--file", dest="file", default=None, help="Path to any file/code/document")
     ask_p.add_argument("--screen", dest="screen", action="store_true", help="Capture and include screen screenshot context")

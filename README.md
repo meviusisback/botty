@@ -190,8 +190,8 @@ shell cannot close a child's stdin), so the prompt never appears in any command
 line. The copy-to-clipboard helper and the add-memory action use the same framed
 stdin transport, so what you copy and what gets remembered is not an argument
 either; only a random nonce is. Notification payloads are fixed copy, not answer
-text. The positional form is still accepted for direct CLI use, and is named in
-`--help` as the less private option.
+text. Every command still accepts a positional form for direct CLI use, and each
+`--help` names it as the less private option: the widget never uses it.
 
 **Agent output is bounded.** Subprocess output is streamed with hard caps, runs
 are killed by process group on timeout (no orphaned children), log reads tail
@@ -201,9 +201,11 @@ answer cannot trigger a remote-image request, a link handler or spoofed chrome;
 the sanitiser runs as a second layer. The cost is real: links in an answer are
 not clickable, copy them if you need them.
 
-**Non-Hermes engines (omp/claude/codex) and other caveats:** these engines run
-with their own permission models; Botty's sandbox directive is advisory there,
-not engine-enforced. Process-group kills do not reach grandchildren that
+**Non-Hermes engines (omp/claude/codex) and other caveats:** while Sandbox Mode
+is on, a request on any engine other than Hermes is refused outright — those
+engines have no approval gate Botty can drive, so there is nothing to enforce.
+With Sandbox Mode off they run with their own permission models, and Botty adds
+no containment of its own. Process-group kills do not reach grandchildren that
 detach into their own session. Log files grow on disk; only the read side is
 capped.
 

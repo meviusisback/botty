@@ -2288,6 +2288,34 @@ def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
         _release_file_lock(fh)
 
 
+@_synchronized
+def _claim_approved_proposal(approve_id: str):
+    """Resolve AND consume a sandbox proposal. Returns (scope, refusal).
+
+    One approval is good for ONE execution: replaying an old card long after the
+    user's intent passed is exactly what an injected answer would want, and every
+    historical card keeps a live Approve button. The claim happens under the
+    history lock so two concurrent bypasses cannot both take the same proposal.
+    """
+    hist = load_json_file(HISTORY_FILE, {"messages": []})
+    msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+    for m in msgs:
+        if not isinstance(m, dict) or str(m.get("id", "")) != str(approve_id):
+            continue
+        if (m.get("sandbox_request") is not True
+                or m.get("role") != "assistant"
+                or not str(m.get("content", "")).strip()):
+            return "", "that message is not a sandbox permission proposal."
+        if m.get("sandbox_approved_at"):
+            return "", ("that approval was already used. Re-run the task "
+                        "sandboxed for a fresh card.")
+        m["sandbox_approved_at"] = int(time.time())
+        save_json_file(HISTORY_FILE, hist)
+        return str(m.get("content", "")), ""
+    return "", ("that proposal is no longer in the conversation. Re-run the task "
+                "sandboxed and approve the new card.")
+
+
 def _clear_pending_reset(state: Dict[str, Any]) -> None:
     state.pop("reset_pending", None)
     state.pop("reset_bridge", None)
@@ -2502,23 +2530,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         if not approve_id:
             return {"ok": False,
                     "error": "Sandbox bypass refused: the approved proposal id is missing."}
-        hist = load_json_file(HISTORY_FILE, {"messages": []})
-        approved_msg = None
-        for m in (hist.get("messages", []) if isinstance(hist, dict) else []):
-            if isinstance(m, dict) and str(m.get("id", "")) == str(approve_id):
-                approved_msg = m
-                break
-        if approved_msg is None:
-            return {"ok": False,
-                    "error": "Sandbox bypass refused: that proposal is no longer in the "
-                             "conversation. Re-run the task sandboxed and approve the new card."}
-        if (approved_msg.get("sandbox_request") is not True
-                or approved_msg.get("role") != "assistant"
-                or not str(approved_msg.get("content", "")).strip()):
-            return {"ok": False,
-                    "error": "Sandbox bypass refused: that message is not a sandbox "
-                             "permission proposal."}
-        approved_scope = str(approved_msg.get("content", ""))
+        approved_scope, refusal = _claim_approved_proposal(str(approve_id))
+        if refusal:
+            return {"ok": False, "error": f"Sandbox bypass refused: {refusal}"}
 
     if not _acquire_ask_lock():
         return {"ok": False, "error": "Botty is already processing a request."}

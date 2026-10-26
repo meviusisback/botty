@@ -801,6 +801,49 @@ class TestSecurityHardening(unittest.TestCase):
             "custom:http://localhost:11434/v1#aff94a1a7f730464", engine_name="hermes")
         self.assertTrue(res.get("ok"), res)
 
+    def test_agent_output_is_rendered_as_plain_text(self):
+        """Representation choice (not a sanitiser tweak): agent output is plain
+        text, so markdown image/link constructs cannot exist at all. This guard
+        fails if the panel ever starts parsing markdown or opening links again."""
+        panel = Path(botty_backend.__file__).resolve().parent / "Panel.qml"
+        src = panel.read_text(encoding="utf-8")
+        self.assertNotIn("TextEdit.MarkdownText", src,
+                         "agent output must not be parsed as markdown")
+        self.assertNotIn("openUrlExternally", src,
+                         "the panel must not hand links to the OS opener")
+
+    def test_approval_is_single_use(self):
+        """R6: every historical card keeps a live Approve button, so an approval
+        must be consumed — replaying it long after the user's intent passed is
+        exactly what an injected answer would want."""
+        botty_backend.HISTORY_FILE.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"id": "msg_p", "role": "assistant", "sandbox_request": True,
+                          "content": "🔒 SANDBOX PERMISSION REQUIRED: create ~/notes.md",
+                          "attachments": [], "actions": []}]}))
+
+        def fake_run(cmd, **kwargs):
+            return {"ok": True, "returncode": 0, "stdout": "Done.", "stderr": "",
+                    "timed_out": False, "output_truncated": False, "error": None}
+
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.run_bounded_process", side_effect=fake_run), \
+                 mock.patch("botty_backend.add_history_message"), \
+                 mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.send_system_notification"), \
+                 mock.patch("botty_backend.update_encrypted_vault"):
+                first = botty_backend.ask("I approve", bypass_sandbox=True, approve_id="msg_p")
+                second = botty_backend.ask("I approve", bypass_sandbox=True, approve_id="msg_p")
+        finally:
+            botty_backend.set_active_engine(prev)
+
+        self.assertTrue(first.get("ok"), first)
+        self.assertFalse(second.get("ok"), second)
+        self.assertIn("already used", second.get("error", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

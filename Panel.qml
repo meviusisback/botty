@@ -422,6 +422,10 @@ Panel {
   }
 
   function clearChat() {
+    // The backend refuses to clear while a request is live (an in-flight answer
+    // would resurrect the session). Do not fire a command that will be refused
+    // and whose error is invisible: the button is disabled too.
+    if (root.isProcessing) return
     clearProc.command = ["python3", root.scriptPath(), "clear"]
     clearProc.running = true
     root.lastMessageCount = 0
@@ -1312,6 +1316,7 @@ Panel {
       spacing: Style.space(6)
 
       Text {
+        textFormat: Text.PlainText
         text: Model.statusIcon(root.rawStatus.state)
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
@@ -1320,6 +1325,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         text: Model.getBarHeadline(root.rawStatus, 24)
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -1422,6 +1428,7 @@ Panel {
           borderSpec: Border.controlSpec("normal", root.alpha(Model.statusColor(root.rawStatus.state, root.accent, root.accent, root.urgent), 0.4), root.accent)
 
           Text {
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: Model.statusIcon(root.rawStatus.state)
             color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -1439,6 +1446,7 @@ Panel {
             spacing: Style.space(6)
 
             Text {
+              textFormat: Text.PlainText
               text: "Botty 🐼"
               color: root.foreground
               font.family: root.fontFamily
@@ -1568,6 +1576,7 @@ Panel {
             tooltipText: "Clear Chat"
             implicitWidth: Style.space(32)
             implicitHeight: Style.space(32)
+            enabled: !root.isProcessing
             onClicked: root.clearChat()
           }
 
@@ -1704,6 +1713,7 @@ Panel {
                     spacing: Style.space(6)
 
                     Text {
+                      textFormat: Text.PlainText
                       visible: root.chatHiddenCount() > 0
                       text: root.chatHiddenCount() + " older messages"
                       font.family: root.fontFamily
@@ -1722,6 +1732,7 @@ Panel {
                         color: pillMoreMouse.containsMouse ? root.accent : root.alpha(root.accent, 0.12)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.4), root.accent)
                         Text {
+                          textFormat: Text.PlainText
                           id: pillMoreText
                           anchors.centerIn: parent
                           text: "+ Show 20 more"
@@ -1746,6 +1757,7 @@ Panel {
                         color: pillAllMouse.containsMouse ? root.accent : root.alpha(root.accent, 0.12)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.accent, 0.4), root.accent)
                         Text {
+                          textFormat: Text.PlainText
                           id: pillAllText
                           anchors.centerIn: parent
                           text: "Show all"
@@ -1770,6 +1782,7 @@ Panel {
                         color: pillCollapseMouse.containsMouse ? root.accent : root.alpha(root.foreground, 0.12)
                         borderSpec: Border.controlSpec("normal", root.alpha(root.foreground, 0.25), root.accent)
                         Text {
+                          textFormat: Text.PlainText
                           id: pillCollapseText
                           anchors.centerIn: parent
                           text: "Collapse to recent"
@@ -1841,6 +1854,7 @@ Panel {
                       spacing: Style.space(6)
 
                       Text {
+                        textFormat: Text.PlainText
                         text: isSummary ? "📌 Context Compacted" : (isUser ? "You" : "Botty 🐼")
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -1880,6 +1894,7 @@ Panel {
                             }
 
                             Text {
+                              textFormat: Text.PlainText
                               anchors.centerIn: parent
                               visible: agLogoImg.status !== Image.Ready
                               text: (agentBadge.agInfo && agentBadge.agInfo.fallbackIcon) ? agentBadge.agInfo.fallbackIcon : "󱚣"
@@ -1890,6 +1905,7 @@ Panel {
                           }
 
                           Text {
+                            textFormat: Text.PlainText
                             text: agentBadge.agInfo.name || "Agent"
                             font.family: root.fontFamily
                             font.pixelSize: Style.space(9)
@@ -1933,6 +1949,7 @@ Panel {
                             }
 
                             Text {
+                              textFormat: Text.PlainText
                               anchors.centerIn: parent
                               visible: badgeLogoImg.status !== Image.Ready
                               text: (modelBadge.logoInfo && modelBadge.logoInfo.fallbackIcon) ? modelBadge.logoInfo.fallbackIcon : "󰚩"
@@ -1944,6 +1961,7 @@ Panel {
 
                           // Model Name Label
                           Text {
+                            textFormat: Text.PlainText
                             text: Model.cleanModelName(assistantModel)
                             font.family: "JetBrainsMono Nerd Font"
                             font.pixelSize: Style.space(9)
@@ -1967,6 +1985,7 @@ Panel {
                       }
 
                       Text {
+                        textFormat: Text.PlainText
                         text: Model.formatTimestamp(modelData.timestamp)
                         font.family: root.fontFamily
                         font.pixelSize: Style.space(9)
@@ -1993,6 +2012,7 @@ Panel {
                           spacing: Style.space(6)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: {
                               if (modelData.type === "situation") return "󰘦"
                               if (modelData.is_screen_capture) return "󰄀"
@@ -2043,7 +2063,13 @@ Panel {
                           visible: modelData.type !== "code"
                           width: parent.width
                           text: modelData.text || ""
-                          textFormat: TextEdit.MarkdownText
+                          // Agent output is attacker-influenced. Rendering it as
+                          // plain text means no markdown/HTML is parsed at all:
+                          // no remote images, no link handlers, no spoofed chrome.
+                          // Formatting niceties (bold, clickable links) are the
+                          // price; code blocks are split out earlier by
+                          // Model.parseBlocks and rendered in their own card.
+                          textFormat: TextEdit.PlainText
                           wrapMode: TextEdit.Wrap
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.body
@@ -2055,17 +2081,6 @@ Panel {
                           activeFocusOnPress: true
                           selectionColor: root.alpha(root.accent, 0.4)
                           selectedTextColor: root.foreground
-                          onLinkActivated: function(link) {
-                            // Only http(s) goes to the OS opener; any other
-                            // scheme (file://, custom handlers) is copied for
-                            // inspection instead of executed.
-                            if (/^https?:\/\//i.test(link)) {
-                              Qt.openUrlExternally(link)
-                            } else {
-                              root.copyText(link)
-                            }
-                          }
-
                           Keys.onPressed: function(event) {
                             if (event.matches(StandardKey.Copy) || ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_C)) {
                               if (selectedText.length > 0) {
@@ -2137,6 +2152,7 @@ Panel {
                             RowLayout {
                               Layout.fillWidth: true
                               Text {
+                                textFormat: Text.PlainText
                                 text: (modelData.language || "CODE").toUpperCase()
                                 font.family: "JetBrainsMono Nerd Font"
                                 font.pixelSize: Style.space(9)
@@ -2315,6 +2331,7 @@ Panel {
                           spacing: Style.space(6)
 
                           Text {
+                            textFormat: Text.PlainText
                             text: "󰄬"
                             color: "#10B981"
                             font.family: root.fontFamily
@@ -2360,10 +2377,12 @@ Panel {
                           Layout.fillWidth: true
                           spacing: Style.space(8)
                           Text {
+                            textFormat: Text.PlainText
                             text: "🔒"
                             font.pixelSize: Style.space(14)
                           }
                           Text {
+                            textFormat: Text.PlainText
                             text: "Sandbox Write Permission Requested"
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.body
@@ -2469,6 +2488,7 @@ Panel {
               z: 10
 
               Text {
+                textFormat: Text.PlainText
                 anchors.centerIn: parent
                 text: "󰁅"
                 font.family: root.fontFamily
@@ -2509,6 +2529,7 @@ Panel {
               spacing: Style.space(10)
 
               Text {
+                textFormat: Text.PlainText
                 text: "󰑐"
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(16)
@@ -2517,6 +2538,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 text: "Botty is processing your request…"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
@@ -2555,6 +2577,7 @@ Panel {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "🔒"
                   font.pixelSize: Style.space(16)
                 }
@@ -2564,6 +2587,7 @@ Panel {
                   spacing: Style.space(2)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Permission Required for Sandbox Bypass"
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
@@ -2572,6 +2596,7 @@ Panel {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "Botty halted file/system writes. Choose an action below. Verify every proposed path and command before approving."
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
@@ -2640,6 +2665,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 text: {
                   if (root.situationContextEnabled) return "󰘦"
                   if (root.screenContextEnabled) return "󰄀"
@@ -3008,6 +3034,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               text: "Continuous Learning & Skills"
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -3050,6 +3077,7 @@ Panel {
                 spacing: Style.space(8)
                 Text { text: root.pendingProposals > 0 ? "⚠" : "✅"; font.pixelSize: Style.space(13); color: root.pendingProposals > 0 ? "#F59E0B" : "#4CAF50" }
                 Text {
+                  textFormat: Text.PlainText
                   text: {
                     var parts = []
                     if (root.pendingProposals > 0) parts.push("Pending: " + root.pendingProposals)
@@ -3063,6 +3091,7 @@ Panel {
                   Layout.fillWidth: true
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.pendingProposals > 0 ? "AI-generated — verify before approving" : "Approved — inert, copy to install"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(9)
@@ -3156,6 +3185,7 @@ Panel {
                         onClicked: root.reviewProposal(modelData.id, true)
                       }
                       Text {
+                        textFormat: Text.PlainText
                         visible: modelData.status === "approved"
                         text: "Saved to staging (outside Hermes)"
                         font.family: root.fontFamily
@@ -3199,6 +3229,7 @@ Panel {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 text: "🔒"
                 font.pixelSize: Style.space(14)
               }
@@ -3208,6 +3239,7 @@ Panel {
                 spacing: Style.space(1)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Memory Vault (Obfuscation-Grade Backup)"
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -3216,6 +3248,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "AES-256 backup copy • Real protection: POSIX 0600/0700 owner-only permissions • Sources remain plaintext on disk"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
@@ -3260,6 +3293,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: "Stored Long-Term Memories (" + root.memoriesData.length + ")"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -3299,6 +3333,7 @@ Panel {
                     spacing: Style.space(8)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: modelData.type === "user" ? "󰋚 User" : "🐼 Botty"
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
@@ -3338,6 +3373,7 @@ Panel {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: "Learned Custom Skills (" + root.skillsData.length + ")"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -3377,6 +3413,7 @@ Panel {
                     spacing: Style.space(8)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "󰘦"
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.icon
@@ -3495,6 +3532,7 @@ Panel {
               spacing: Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 text: "1. Agent Engine (Backend Runner):"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -3534,6 +3572,7 @@ Panel {
               spacing: Style.space(4)
 
               Text {
+                textFormat: Text.PlainText
                 text: "2. Active Inference Providers in " + (root.rawStatus.active_engine ? root.rawStatus.active_engine.toUpperCase() : "HERMES") + " (" + settingsViewItem.allProviders.length + " configured):"
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -3574,6 +3613,7 @@ Panel {
                 spacing: Style.space(6)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "3. Select Model (" + settingsViewItem.filteredModels.length + " in " + settingsViewItem.currentProviderObj.name + "):"
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -3631,6 +3671,7 @@ Panel {
                         spacing: Style.space(8)
 
                         Text {
+                          textFormat: Text.PlainText
                           text: isCurrent ? "󰄬" : "🐼"
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.icon
@@ -3645,6 +3686,7 @@ Panel {
                             spacing: Style.space(6)
 
                             Text {
+                              textFormat: Text.PlainText
                               text: modelData.name || modelData.id
                               font.family: root.fontFamily
                               font.pixelSize: Style.font.body
@@ -3708,6 +3750,7 @@ Panel {
                   spacing: Style.space(10)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: root.sandboxMode ? "󰒃" : "󰒄"
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(24)
@@ -3719,6 +3762,7 @@ Panel {
                     spacing: Style.space(2)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: root.sandboxMode ? "Sandboxed Write Protection: ACTIVE" : "Sandboxed Write Protection: UNRESTRICTED"
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
@@ -3729,6 +3773,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: root.sandboxMode
                         ? (root.hermesEnforcement === "enforced"
                             ? "Hermes engine: writes technically denied until you approve. Full read access active."
@@ -3755,6 +3800,7 @@ Panel {
                 PanelSeparator { Layout.fillWidth: true }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "How Sandboxing Works in Botty:"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(11)
@@ -3763,6 +3809,7 @@ Panel {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "• Unrestricted Read Access: Botty can always read your files, inspect directories, check system logs, analyze git branches, and view process output without restriction.\n• Technically Enforced Sandbox (Hermes engine): Sandboxed runs launch Hermes WITHOUT --yolo, so its single-query approval gate (default: deny for dangerous commands) technically blocks writes and state changes regardless of prompt content. Botty warns you if your Hermes profile config weakens this.\n• Approval Card: When a task needs writes, the agent proposes concrete actions and Botty shows an approval card. Approving executes ONE follow-up whose prompt is the human-approved proposal itself — the original query and attachment/screen content are not re-inlined into that privileged run.\n• Non-Hermes engines (omp/claude/codex) run under their own permission models — the sandbox directive is advisory there, not engine-enforced."
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(10)
@@ -3804,6 +3851,7 @@ Panel {
                   spacing: Style.space(10)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "󰂚"
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(20)
@@ -3815,6 +3863,7 @@ Panel {
                     spacing: Style.space(2)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "System Desktop Notifications"
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
@@ -3825,6 +3874,7 @@ Panel {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       text: "Send native desktop alerts via notify-send when widget is in the background."
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
@@ -3846,6 +3896,7 @@ Panel {
                 PanelSeparator { Layout.fillWidth: true }
 
                 Text {
+                  textFormat: Text.PlainText
                   text: "Event Notification Triggers:"
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(11)
@@ -3859,6 +3910,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "󰄬 Task Completed"
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(11)
@@ -3881,6 +3933,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "🔒 Permission Required / Blocked"
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(11)
@@ -3903,6 +3956,7 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "󰅚 Execution Error & Timeout"
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(11)
@@ -3964,6 +4018,7 @@ Panel {
             spacing: Style.space(8)
 
             Text {
+              textFormat: Text.PlainText
               text: "Hermes Task Trace & Real Agent Logs"
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -4097,6 +4152,7 @@ Panel {
               spacing: Style.space(6)
 
               Text {
+                textFormat: Text.PlainText
                 text: "Turn: " + (root.selectedMsgLog ? (root.selectedMsgLog.engine || "agent") + " / " + (root.selectedMsgLog.model || "model") : "")
                 font.family: "JetBrainsMono Nerd Font"
                 font.pixelSize: Style.space(10)
@@ -4169,6 +4225,7 @@ Panel {
                   Item { Layout.fillWidth: true }
 
                   Text {
+                    textFormat: Text.PlainText
                     text: {
                       if (!logsViewItem.hermesTraceObj || !logsViewItem.hermesTraceObj.session || !logsViewItem.hermesTraceObj.session.tokens) return ""
                       var tok = logsViewItem.hermesTraceObj.session.tokens
@@ -4226,6 +4283,7 @@ Panel {
                             spacing: Style.space(6)
 
                             Text {
+                              textFormat: Text.PlainText
                               text: modelData.role === "user" ? "󰀕 USER QUERY" : (modelData.role === "tool" ? ("󰘦 TOOL OUTPUT (" + (modelData.tool_name || "tool") + ")") : "🐼 HERMES ASSISTANT")
                               font.family: "JetBrainsMono Nerd Font"
                               font.pixelSize: Style.space(10)
@@ -4236,6 +4294,7 @@ Panel {
                             Item { Layout.fillWidth: true }
 
                             Text {
+                              textFormat: Text.PlainText
                               text: Model.formatHermesTimestamp(modelData.timestamp)
                               font.family: "JetBrainsMono Nerd Font"
                               font.pixelSize: Style.space(9)
@@ -4261,6 +4320,7 @@ Panel {
                               spacing: Style.space(3)
 
                               Text {
+                                textFormat: Text.PlainText
                                 text: "󰌵 MODEL REASONING & THOUGHT TRACE:"
                                 font.family: "JetBrainsMono Nerd Font"
                                 font.pixelSize: Style.space(9)
@@ -4309,6 +4369,7 @@ Panel {
                                   spacing: Style.space(6)
 
                                   Text {
+                                    textFormat: Text.PlainText
                                     text: Model.formatToolBadge(modelData.name).icon + " TOOL CALL: " + modelData.name
                                     font.family: "JetBrainsMono Nerd Font"
                                     font.pixelSize: Style.space(9)

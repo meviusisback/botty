@@ -196,9 +196,10 @@ fixed copy, not answer text.
 **Agent output is bounded.** Subprocess output is streamed with hard caps, runs
 are killed by process group on timeout (no orphaned children), log reads tail
 from the end of the file, and database reads are limited. Rendered agent text
-is sanitized: raw HTML and markdown images are stripped, so a crafted answer
-cannot trigger remote-image requests; links require an explicit click and are
-http(s)-only.
+is displayed as **plain text** — no markdown and no HTML is parsed — so a crafted
+answer cannot trigger a remote-image request, a link handler or spoofed chrome;
+the sanitiser runs as a second layer. The cost is real: links in an answer are
+not clickable, copy them if you need them.
 
 **Non-Hermes engines (omp/claude/codex) and other caveats:** these engines run
 with their own permission models; Botty's sandbox directive is advisory there,

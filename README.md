@@ -190,8 +190,11 @@ shell cannot close a child's stdin), so the prompt never appears in any command
 line. The copy-to-clipboard helper and the add-memory action use the same framed
 stdin transport, so what you copy and what gets remembered is not an argument
 either; only a random nonce is. Notification payloads are fixed copy, not answer
-text. Every command still accepts a positional form for direct CLI use, and each
-`--help` names it as the less private option: the widget never uses it.
+text. The three commands that carry free text (`ask`, `copy`, `add-memory`)
+still accept a positional form for direct CLI use, and their `--help` names it as
+the less private option; the widget never uses it. Commands that write skills
+(`create-skill`) take their text on the command line only, so do not run them
+where other local users can read `/proc`.
 
 **Agent output is bounded.** Subprocess output is streamed with hard caps, runs
 are killed by process group on timeout (no orphaned children), log reads tail

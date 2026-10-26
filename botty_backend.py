@@ -2813,7 +2813,14 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
 
     engine = get_active_engine()
     active_m = get_active_model_for_engine(engine)
-    selected_model = model or active_m.get("model", "")
+    if approved_scope:
+        # An approved run follows the engine that produced the card, not a
+        # caller-supplied override (argv-adjacent, and it would silently point the
+        # approved actions at a different model).
+        selected_model = active_m.get("model", "")
+        provider = active_m.get("provider") or None
+    else:
+        selected_model = model or active_m.get("model", "")
 
     # The directive and the continuity bridge are SESSION preambles: `--continue`
     # keeps the session history, so the model already has them. They are sent only
@@ -2823,6 +2830,12 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
     include_directive = True
     if engine == "hermes":
         include_directive = not hermes_session_has_preamble(HERMES_SESSION_NAME)
+    if approved_scope:
+        # The privileged run gets NO preamble of any kind. The continuity bridge
+        # is distilled history — it carries the caller's own earlier messages, so
+        # a caller could plant an instruction there and have it delivered inside a
+        # --yolo prompt the user never saw.
+        include_directive = False
 
     # Inject the continuity bridge: context recovered from the last compaction. This is the
     # only reliable way for the model to retain prior context across a Hermes session reset,

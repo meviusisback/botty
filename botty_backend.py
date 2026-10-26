@@ -620,6 +620,10 @@ def run_bounded_process(
         result["error"] = f"Failed to start process: {e}"
         return result
 
+    # From here on a process EXISTS: any failure below may have executed work, so
+    # the caller must not treat the empty result as "nothing ran".
+    result["spawned"] = True
+
     out_chunks: List[str] = []
     err_chunks: List[str] = []
     out_len = err_len = 0
@@ -2959,12 +2963,18 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
     ):
         append_botty_log("HERMES RESUME rejected creation flags; retrying without them")
         cmd = strip_hermes_creation_flags(cmd)
-        run = run_bounded_process(
-            cmd,
-            timeout_s=request_timeout_seconds,
-            stdin_text=stdin_text,
-            max_output_chars=AGENT_OUTPUT_CAP_CHARS,
-        )
+        try:
+            run = run_bounded_process(
+                cmd,
+                timeout_s=request_timeout_seconds,
+                stdin_text=stdin_text,
+                max_output_chars=AGENT_OUTPUT_CAP_CHARS,
+            )
+        except Exception:
+            # Same rule as the first spawn: it raised, so nothing was created.
+            if approval_claimed and not ran_output:
+                _unclaim_approved_proposal(str(approve_id))
+            raise
         ran_output = ran_output or bool(run.get("stdout"))
     if not run.get("ok") and not run.get("stdout") and not run.get("stderr"):
         err = run.get("error") or "Agent process failed to start."
@@ -2974,11 +2984,15 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         send_system_notification("error", "Botty — Execution Error", err, urgency="critical")
         # A run that never started must not consume the approval — but only if no
         # attempt produced output, or the payload would be runnable a second time.
-        if approval_claimed and not ran_output:
+        if approval_claimed and not ran_output and not run.get("spawned"):
             _unclaim_approved_proposal(str(approve_id))
         # Security (P0): this early return predates the try/finally below —
         # release the lock or the next ask wedges on "already processing".
         _release_ask_lock()
+        try:
+            query_tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
         return {"ok": False, "error": err}
 
     stdout_data = run.get("stdout", "")

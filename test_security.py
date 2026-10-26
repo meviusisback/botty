@@ -1161,6 +1161,64 @@ class TestSecurityHardening(unittest.TestCase):
             botty_backend.set_active_engine(prev)
         self.assertTrue(hist.called, "the failure was invisible in history")
 
+    def test_a_timed_out_run_keeps_the_card_spent(self):
+        """FR10-1: an empty result from a process that DID spawn (timeout, pipe
+        error) is not proof that nothing ran."""
+        self._seed_card()
+
+        def timeout_run(cmd, **kwargs):
+            return {"ok": False, "returncode": None, "stdout": "", "stderr": "",
+                    "timed_out": True, "output_truncated": False,
+                    "error": "Process timed out", "spawned": True}
+
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.run_bounded_process", side_effect=timeout_run), \
+                 mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.add_history_message"), \
+                 mock.patch("botty_backend.send_system_notification"), \
+                 mock.patch("botty_backend.update_encrypted_vault"):
+                botty_backend.ask("I approve", bypass_sandbox=True, approve_id="msg_p")
+        finally:
+            botty_backend.set_active_engine(prev)
+
+        self.assertIn("sandbox_approved_at", botty_backend.HISTORY_FILE.read_text(),
+                      "a process that had spawned handed the approval back")
+
+    def test_a_retry_that_never_started_refunds_the_card(self):
+        """FR10-2: the resume retry runs on a fresh spawn, so it needs the same
+        refund protection as the first attempt."""
+        self._seed_card()
+        calls = {"n": 0}
+
+        def flaky(cmd, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ok": False, "returncode": 1, "stdout": "",
+                        "stderr": "creation overrides are unsupported on resume",
+                        "timed_out": False, "output_truncated": False,
+                        "error": None, "spawned": False}
+            raise RuntimeError("retry spawn failed")
+
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.run_bounded_process", side_effect=flaky), \
+                 mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.add_history_message"), \
+                 mock.patch("botty_backend.send_system_notification"), \
+                 mock.patch("botty_backend.update_encrypted_vault"):
+                botty_backend.ask("I approve", bypass_sandbox=True, approve_id="msg_p")
+        finally:
+            botty_backend.set_active_engine(prev)
+
+        self.assertEqual(calls["n"], 2, "the retry did not run")
+        self.assertNotIn("sandbox_approved_at", botty_backend.HISTORY_FILE.read_text(),
+                         "a retry that never started burned the card")
+
 
 if __name__ == "__main__":
     unittest.main()

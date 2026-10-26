@@ -52,6 +52,9 @@ Panel {
   // Id of the last assistant message that is a REAL sandbox proposal. Legacy
   // rows detected heuristically carry no flag, so they have no approvable id:
   // the Approve button is hidden for them instead of doing nothing silently.
+  // Prompt waiting to be written to the backend's stdin once the process starts.
+  property string pendingStdinPayload: ""
+
   readonly property string pendingPermissionId: {
     var msgs = (root.historyData && root.historyData.messages) || []
     if (msgs.length === 0) return ""
@@ -374,8 +377,15 @@ Panel {
         cmd.push(String(approveId))
       }
     }
-    cmd.push("--")
-    cmd.push(q)
+    // The prompt travels on stdin, never in argv: on a host without hidepid any
+    // local process can read another process's command line, and the README
+    // promises this. Quickshell cannot close a child's stdin, so the payload is
+    // followed by a nonce line the backend stops at.
+    var stdinToken = "EOF-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now().toString(36)
+    cmd.push("--query-stdin")
+    cmd.push("--stdin-end")
+    cmd.push(stdinToken)
+    root.pendingStdinPayload = q + "\n" + stdinToken + "\n"
 
     askProc.command = cmd
     askProc.running = true
@@ -712,6 +722,13 @@ Panel {
 
   Process {
     id: askProc
+    stdinEnabled: true
+    onStarted: {
+      if (root.pendingStdinPayload.length > 0) {
+        askProc.write(root.pendingStdinPayload)
+        root.pendingStdinPayload = ""
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

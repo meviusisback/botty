@@ -6,6 +6,8 @@ test_compaction.py) so no real user data is touched.
 import errno
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -668,6 +670,78 @@ class TestSecurityHardening(unittest.TestCase):
                          f"the image path forged a prompt line:\n{prompt}")
         self.assertEqual(sum(1 for ln in lines if "Screenshot image:" in ln), 1,
                          f"the screen header gained lines:\n{prompt}")
+
+    # --- B1/S1: the prompt must never travel in argv ---
+
+    def test_read_framed_stdin(self):
+        """Quickshell cannot close a child's stdin, so the widget frames the
+        payload with a nonce line. Missing/short terminators must fail closed."""
+        import io
+
+        term = "EOF-abcdef12"
+        payload = "first line\nsecond line\n"
+        with mock.patch("sys.stdin", io.StringIO(payload + term + "\nafter\n")):
+            self.assertEqual(botty_backend.read_framed_stdin(term), payload)
+
+        with mock.patch("sys.stdin", io.StringIO(payload)):
+            with self.assertRaises(ValueError):
+                botty_backend.read_framed_stdin(term)
+
+        with mock.patch("sys.stdin", io.StringIO("x")):
+            with self.assertRaises(ValueError):
+                botty_backend.read_framed_stdin("short")
+
+    def test_cli_query_stdin_keeps_prompt_out_of_argv(self):
+        """End-to-end: run the real CLI with --query-stdin behind a PATH-shadowing
+        `hermes` stub that logs its argv. The prompt must appear in the engine's
+        stdin/file handoff but NEVER in any argv (no hidepid => argv is public)."""
+        marker = "MARKER-2f8ac1-private-question"
+        term = "EOF-testnonce1"
+        home = Path(self.test_dir.name) / "home"
+        (home / ".local" / "share" / "botty").mkdir(parents=True, exist_ok=True)
+        bin_dir = Path(self.test_dir.name) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        argv_log = Path(self.test_dir.name) / "hermes_argv.log"
+        prompt_log = Path(self.test_dir.name) / "hermes_prompt.log"
+        stub = bin_dir / "hermes"
+        # Logs its argv AND copies whatever --query-file points at, so both
+        # directions are proven: the prompt travels, the argv stays clean.
+        stub.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$@\" > {argv_log}\n"
+            "prev=''\n"
+            'for a in "$@"; do\n'
+            f'  if [ "$prev" = "--query-file" ]; then cp "$a" {prompt_log} 2>/dev/null; fi\n'
+            '  prev="$a"\n'
+            "done\n"
+            "echo stub-answer\n",
+            encoding="utf-8")
+        stub.chmod(0o755)
+
+        env = {
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+            "XDG_RUNTIME_DIR": str(Path(self.test_dir.name) / "rt"),
+            "XDG_CONFIG_HOME": str(Path(self.test_dir.name) / "cfg"),
+            "XDG_STATE_HOME": str(Path(self.test_dir.name) / "state"),
+        }
+        (Path(self.test_dir.name) / "rt").mkdir(exist_ok=True)
+        proc = subprocess.run(
+            [sys.executable, str(Path(botty_backend.__file__).resolve()), "ask",
+             "--query-stdin", "--stdin-end", term],
+            input=marker + "\n" + term + "\n",
+            capture_output=True, text=True, env=env, cwd=str(Path(self.test_dir.name)),
+            timeout=60,
+        )
+
+        self.assertTrue(argv_log.exists(), f"the engine was never spawned: {proc.stderr[-400:]}")
+        engine_argv = argv_log.read_text(encoding="utf-8")
+        self.assertNotIn(marker, engine_argv,
+                         "the prompt reached the engine's argv")
+        # The prompt must actually have travelled: the engine read it from the
+        # query file that the backend handed it.
+        self.assertTrue(prompt_log.exists(), "the prompt never reached the engine")
+        self.assertIn(marker, prompt_log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

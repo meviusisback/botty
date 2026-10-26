@@ -437,6 +437,42 @@ def redact_secrets(text: str) -> str:
 RAW_OUTPUT_PERSIST_CHARS = 60_000  # cap for raw_output stored in history/status
 AGENT_OUTPUT_CAP_CHARS = 2_000_000  # per stream hard cap for agent subprocesses
 
+QUERY_STDIN_MAX_CHARS = 1_000_000
+
+
+def read_framed_stdin(terminator: str, max_chars: int = QUERY_STDIN_MAX_CHARS) -> str:
+    """Read the prompt from stdin up to a terminator LINE.
+
+    Quickshell's Process can write to a child's stdin but cannot close it, so a
+    plain read-to-EOF would block forever. The widget therefore sends the prompt
+    followed by a random nonce line, which travels in argv (a nonce is not
+    sensitive) and cannot be produced by the prompt by accident.
+
+    This is what keeps the prompt out of `argv`: on a host without hidepid any
+    local process can read another process's command line, so the payload must
+    never be an argument.
+    """
+    term = str(terminator or "")
+    if not term or len(term) < 8:
+        raise ValueError("stdin terminator too short")
+    out = []
+    total = 0
+    saw_term = False
+    for line in sys.stdin:
+        if line.rstrip("\n") == term:
+            saw_term = True
+            break
+        out.append(line)
+        total += len(line)
+        if total > max_chars:
+            raise ValueError(f"stdin payload exceeds {max_chars} chars")
+    if not saw_term:
+        # A missing terminator means the two sides disagree: refuse rather than
+        # run a prompt that may be truncated or padded by whatever came next.
+        raise ValueError("stdin payload was not terminated")
+    return "".join(out)
+
+
 def cap_text(text: str, max_chars: int) -> str:
     """Truncate long text with an explicit marker (bounded storage/UI payloads)."""
     if not text or len(text) <= max_chars:
@@ -4128,6 +4164,8 @@ def main():
     ask_p.add_argument("--provider", dest="provider", default=None, help="Provider override")
     ask_p.add_argument("--bypass-sandbox", dest="bypass_sandbox", action="store_true", help="Bypass write sandboxing for this request")
     ask_p.add_argument("--approve-id", dest="approve_id", default=None, help="Id of the sandbox permission proposal the user approved (required with --bypass-sandbox)")
+    ask_p.add_argument("--query-stdin", dest="query_stdin", action="store_true", help="Read the prompt from stdin (keeps it out of argv)")
+    ask_p.add_argument("--stdin-end", dest="stdin_end", default=None, help="Terminator line for --query-stdin")
 
     inspect_p = subparsers.add_parser("inspect-file", help="Inspect file metadata")
     inspect_p.add_argument("path", help="Path to file")
@@ -4222,7 +4260,15 @@ def main():
     if not args.command or args.command == "status":
         print(json.dumps(get_status(), ensure_ascii=False))
     elif args.command == "ask":
-        res = ask(args.query, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider, bypass_sandbox=getattr(args, 'bypass_sandbox', False), approve_id=getattr(args, 'approve_id', None))
+        query_text = args.query
+        if getattr(args, "query_stdin", False):
+            try:
+                query_text = read_framed_stdin(getattr(args, "stdin_end", "") or "")
+            except Exception as e:
+                print(json.dumps({"ok": False, "error": f"Bad stdin payload: {e}"},
+                                 ensure_ascii=False))
+                return
+        res = ask(query_text, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider, bypass_sandbox=getattr(args, 'bypass_sandbox', False), approve_id=getattr(args, 'approve_id', None))
         print(json.dumps(res, ensure_ascii=False))
     elif args.command == "inspect-file":
         print(json.dumps(inspect_file(args.path), ensure_ascii=False))

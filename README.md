@@ -182,14 +182,16 @@ or skills directly: output is schema-validated and staged as proposals that you
 approve or reject one by one in the Memories tab. Nothing becomes a persistent
 instruction without your review.
 
-**No sensitive content in the engine's arguments.** Prompts, attachments, and
-conversation history reach the *engine* via stdin or owner-only files under
-`~/.local/share/botty` (0600/0700) — never in the engine's `argv`. One hop is
-weaker and is called out here rather than implied away: the widget hands the
-prompt (and any copied text) to the local `botty_backend.py` CLI as a
-command-line argument, so on a machine mounted without `hidepid` another local
-user could read it from `/proc` for the duration of the request. Notification
-payloads are fixed copy, not answer text.
+**No sensitive content in process arguments.** Prompts reach the engine via
+stdin or owner-only files under `~/.local/share/botty` (0600/0700) — never in the
+engine's `argv` — and the widget now hands the prompt to the local
+`botty_backend.py` CLI over stdin too (a nonce-terminated frame, because the
+shell cannot close a child's stdin), so the prompt never appears in any command
+line. Two smaller paths still pass their text as an argument, and are named here
+rather than implied away: the copy-to-clipboard helper and the add-memory
+action. On a machine mounted without `hidepid` another local user could read
+those from `/proc` for the duration of that command. Notification payloads are
+fixed copy, not answer text.
 
 **Agent output is bounded.** Subprocess output is streamed with hard caps, runs
 are killed by process group on timeout (no orphaned children), log reads tail

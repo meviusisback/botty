@@ -2369,6 +2369,23 @@ def _unclaim_approved_proposal(approve_id: str) -> None:
             return
 
 
+def _ask_refused(message: str, engine: str = "", model: str = "") -> Dict[str, Any]:
+    """Refuse a request the user can SEE.
+
+    The widget renders `history.json`; a JSON error on stdout is read by nobody.
+    A refusal that leaves the panel on "thinking" (or silently idle) is exactly
+    the class of defect this project keeps fixing.
+    """
+    set_status("error", headline="Request refused", last_error=message)
+    append_botty_log(f"ASK REFUSED: {message}")
+    try:
+        add_history_message("assistant", f"⚠️ {message}",
+                            model=model or None, engine=engine or None)
+    except Exception:
+        pass
+    return {"ok": False, "error": message}
+
+
 def _clear_pending_reset(state: Dict[str, Any]) -> None:
     state.pop("reset_pending", None)
     state.pop("reset_bridge", None)
@@ -2559,7 +2576,7 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
     _bump_history_rev(history)
     save_json_file(HISTORY_FILE, history)
 
-def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False, approve_id: Optional[str] = None) -> Dict[str, Any]:
+def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False, approve_id: Optional[str] = None) -> Dict[str, Any]:
     if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
         return {"ok": False, "error": "Empty query and no attachment or context provided."}
 
@@ -2571,8 +2588,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     # Revised-F1 execution scope: on the human-approved bypass re-run we execute a
     # DISTILLED, APPROVED PAYLOAD — the proposal the sandboxed run produced and the
     # user clicked Approve on — never the raw query, and never "whatever card happens
-    # to be newest". Resolved BEFORE _acquire_ask_lock(): a refusal here must not
-    # leave the ask slot claimed.
+    # to be newest". RESOLVED (read-only) after the ask slot is taken and CONSUMED
+    # only just before the run: a refusal must not burn the card, and a failure
+    # during prompt assembly must not either.
     #
     # Binding the approval to the clicked card is the point. Walking the history
     # backwards for the newest `sandbox_request` message meant an injected card that
@@ -2580,19 +2598,20 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     # approved the card they could actually see.
     if not _acquire_ask_lock():
         # Before the approval is claimed: a busy bot must not burn a card.
-        return {"ok": False, "error": "Botty is already processing a request."}
+        return _ask_refused("Botty is already processing a request. Wait for the "
+                            "current answer, or press Stop.")
 
     approved_scope = ""
     approval_claimed = False
     if bypass_sandbox:
         if not approve_id:
             _release_ask_lock()
-            return {"ok": False,
-                    "error": "Sandbox bypass refused: the approved proposal id is missing."}
+            return _ask_refused("Sandbox bypass refused: the approved card id is "
+                                "missing, so there is nothing to execute.")
         approved_scope, refusal = _resolve_approved_proposal(str(approve_id))
         if refusal:
             _release_ask_lock()
-            return {"ok": False, "error": f"Sandbox bypass refused: {refusal}"}
+            return _ask_refused(f"Sandbox bypass refused: {refusal}")
 
     set_status("working", headline="Botty is thinking…", last_query=query)
 
@@ -2903,9 +2922,12 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     if bypass_sandbox:
         if not _consume_approved_proposal(str(approve_id)):
             _release_ask_lock()
-            return {"ok": False,
-                    "error": "Sandbox bypass refused: that approval was already used. "
-                             "Re-run the task sandboxed for a fresh card."}
+            # The card vanished (cleared/compacted) or was consumed by another
+            # request: say which, and never leave the panel on "working".
+            return _ask_refused(
+                "Sandbox bypass refused: that card is gone from the conversation or "
+                "was already approved. Re-run the task sandboxed for a fresh card.",
+                engine=engine, model=selected_model)
         approval_claimed = True
 
     run = run_bounded_process(
@@ -3077,6 +3099,41 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
                 _spawn_detached_compaction(auto_compact_count)
 
 # ── Dynamic Per-Engine Models & Providers Discovery ────────────────────────────
+
+def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None,
+        screen_context: bool = False, situation_context: bool = False,
+        model: Optional[str] = None, provider: Optional[str] = None,
+        bypass_sandbox: bool = False, approve_id: Optional[str] = None) -> Dict[str, Any]:
+    """Entry point guard: an exception must not leave the ask slot claimed.
+
+    Prompt assembly (status write, query file, chmod, history) runs while the
+    slot is held. Without this, a raise there wedges every later request on
+    "already processing" and can leave an approval consumed for a run that never
+    started.
+    """
+    args = (query, image_path, file_path, screen_context, situation_context,
+            model, provider, bypass_sandbox, approve_id)
+    try:
+        return _ask_body(*args)
+    except Exception as exc:  # noqa: BLE001 - deliberate catch-all at the boundary
+        detail = f"{type(exc).__name__}: {exc}"
+        append_botty_log(f"ERROR: ask() raised {detail}")
+        if approve_id:
+            try:
+                _unclaim_approved_proposal(str(approve_id))
+            except Exception:
+                pass
+        try:
+            _release_ask_lock()
+        except Exception:
+            pass
+        try:
+            set_status("error", headline="Botty hit an internal error", last_error=detail)
+            add_history_message("assistant", f"⚠️ Botty hit an internal error: {detail}")
+        except Exception:
+            pass
+        return {"ok": False, "error": f"internal error: {detail}"}
+
 
 def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, Any]:
     """Returns dynamic provider and model choices checked strictly against each agent's real config."""

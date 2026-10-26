@@ -947,11 +947,18 @@ class TestSecurityHardening(unittest.TestCase):
         src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
         self.assertFalse("Text.RichText" in src, "a text block was switched to rich text")
         self.assertFalse("Text.StyledText" in src, "a text block was switched to styled text")
-        texts = len(re.findall(r"(?<![\w.])Text\s*\{", src))
-        guarded = src.count("textFormat: Text.PlainText")
-        self.assertEqual(texts, guarded, "a Text block renders rich text")
-        edits = len(re.findall(r"(?<![\w.])TextEdit\s*\{", src))
-        self.assertEqual(edits, src.count("textFormat: TextEdit.PlainText"))
+        for kind, fmt in (("Text", "Text.PlainText"), ("TextEdit", "TextEdit.PlainText")):
+            for start in (m.end() for m in re.finditer(r"(?<![\w.])%s\s*\{" % kind, src)):
+                depth, i = 1, start
+                while i < len(src) and depth:
+                    if src[i] == "{":
+                        depth += 1
+                    elif src[i] == "}":
+                        depth -= 1
+                    i += 1
+                body = src[start:i]
+                self.assertIn("textFormat: " + fmt, body,
+                              "a %s block renders rich text" % kind)
 
     def test_clear_is_hidden_not_merely_disabled(self):
         """Y7: the shared Button draws no disabled state, so `enabled: false`
@@ -968,7 +975,7 @@ class TestSecurityHardening(unittest.TestCase):
         """Y7/Y2: resolving early is fine, consuming early is not — anything that
         fails between them would burn the card."""
         src = (Path(botty_backend.__file__).resolve().parent / "botty_backend.py").read_text(encoding="utf-8")
-        body = src[src.index("def ask("):]
+        body = src[src.index("def _ask_body("):]
         self.assertLess(body.index("_acquire_ask_lock()"),
                         body.index("_resolve_approved_proposal("),
                         "the card must not be resolved before the ask slot")
@@ -1001,9 +1008,12 @@ class TestSecurityHardening(unittest.TestCase):
         src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
         body = src[src.index("function copyText("):]
         body = body[:body.index("function compactMemoryNow(")]
-        self.assertIn("if (copyProc.running)", body)
+        self.assertIn("if (root.copyBusy || copyProc.running)", body)
         self.assertIn("queuedCopyText = text", body)
-        self.assertIn("onRunningChanged", src[src.index("id: copyProc"):])
+        proc = src[src.index("id: copyProc"):]
+        self.assertIn("onRunningChanged", proc)
+        self.assertIn("root.copyText(next)", proc, "the queued copy is never re-issued")
+        self.assertIn("root.copyBusy = false", proc)
         # and the frame is written only when the child actually starts
         self.assertIn("onStarted", src[src.index("id: copyProc"):])
 
@@ -1027,6 +1037,42 @@ class TestSecurityHardening(unittest.TestCase):
         scope, refusal = botty_backend._resolve_approved_proposal("msg_p")
         self.assertEqual(scope, "")
         self.assertIn("already used", refusal)
+
+    def test_a_refusal_does_not_hold_the_ask_slot(self):
+        """Z4: every refusal must release the slot, or the next request wedges on
+        "already processing" until the shell is restarted."""
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.add_history_message") as hist:
+                res = botty_backend.ask("x", bypass_sandbox=True, approve_id="missing-card")
+                self.assertTrue(hist.called, "the refusal was invisible to the user")
+                self.assertFalse(res.get("ok"))
+                self.assertFalse(botty_backend.LOCK_FILE.exists(),
+                                 "a refusal left the ask slot claimed")
+                # and a normal call can proceed afterwards
+                self.assertTrue(botty_backend._acquire_ask_lock())
+                botty_backend._release_ask_lock()
+        finally:
+            botty_backend.set_active_engine(prev)
+
+    def test_an_exception_inside_ask_releases_the_slot(self):
+        """Z8: the boundary guard exists because assembly can raise."""
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.set_status", side_effect=RuntimeError("boom")), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.add_history_message"):
+                res = botty_backend.ask("x")
+        finally:
+            botty_backend.set_active_engine(prev)
+        self.assertFalse(res.get("ok"))
+        self.assertIn("internal error", res.get("error", ""))
+        self.assertFalse(botty_backend.LOCK_FILE.exists(),
+                         "an exception left the ask slot claimed")
 
 
 if __name__ == "__main__":

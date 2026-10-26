@@ -58,6 +58,10 @@ Panel {
   property string pendingMemPayload: ""
   property string queuedCopyText: ""
   property var queuedMem: null
+  // `Process.running` only reports true on a later event-loop turn, so it cannot
+  // guard the turn in which the command is handed over.
+  property bool copyBusy: false
+  property bool memBusy: false
 
   readonly property string pendingPermissionId: {
     var msgs = (root.historyData && root.historyData.messages) || []
@@ -475,10 +479,11 @@ Panel {
     // One Process, one frame: writing a second payload while the first child is
     // starting would give it a nonce its command line does not carry, and the
     // backend would refuse a frame it cannot trust. Queue the newer text instead.
-    if (copyProc.running) {
+    if (root.copyBusy || copyProc.running) {
       root.queuedCopyText = text
       return
     }
+    root.copyBusy = true
     // The text goes over stdin: on a host without hidepid argv is readable by any
     // local process, and what gets copied is often the whole answer.
     var tok = root.newStdinToken()
@@ -497,10 +502,11 @@ Panel {
 
   function addMemoryNow(text, isUser, fromModel) {
     if (!text || !text.trim()) return
-    if (addMemProc.running) {
+    if (root.memBusy || addMemProc.running) {
       root.queuedMem = { text: text, isUser: !!isUser, fromModel: !!fromModel }
       return
     }
+    root.memBusy = true
     var cmd = ["python3", root.scriptPath(), "add-memory"]
     if (isUser) cmd.push("--user")
     if (fromModel) cmd.push("--from-model")
@@ -1181,7 +1187,9 @@ Panel {
       }
     }
     onRunningChanged: {
-      if (!running && root.queuedMem !== null) {
+      if (running) return
+      root.memBusy = false
+      if (root.queuedMem !== null) {
         var next = root.queuedMem
         root.queuedMem = null
         root.addMemoryNow(next.text, next.isUser, next.fromModel)
@@ -1206,7 +1214,9 @@ Panel {
       }
     }
     onRunningChanged: {
-      if (!running && root.queuedCopyText.length > 0) {
+      if (running) return
+      root.copyBusy = false
+      if (root.queuedCopyText.length > 0) {
         var next = root.queuedCopyText
         root.queuedCopyText = ""
         root.copyText(next)
@@ -2483,7 +2493,7 @@ Panel {
                           }
 
                           Text {
-                            visible: modelData.sandbox_approved_at === true
+                            visible: !!modelData.sandbox_approved_at
                             textFormat: Text.PlainText
                             text: "Approval already used — re-run the task for a fresh card."
                             font.family: root.fontFamily

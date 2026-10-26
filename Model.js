@@ -87,7 +87,23 @@ function stripReasoning(text) {
  * label is walked with a depth counter instead of matched by pattern.
  * Escapes are honoured so `\]` cannot end the label early.
  */
+function _normalizeRefLabel(label) {
+  return String(label || "").trim().toLowerCase().replace(/\s+/g, " ")
+}
+
+function _refDefinitionLabels(text) {
+  // Shortcut references resolve against any definition line, in either order.
+  var defs = {}
+  var re = /^[ \t]{0,3}\[([^\]\n]+)\]:/gm
+  var m
+  while ((m = re.exec(text)) !== null) {
+    defs[_normalizeRefLabel(m[1])] = true
+  }
+  return defs
+}
+
 function stripMarkdownImages(text) {
+  var defs = _refDefinitionLabels(text)
   var out = ""
   var n = text.length
   var i = 0
@@ -103,6 +119,7 @@ function stripMarkdownImages(text) {
         j++
       }
       if (depth !== 0) { out += text.charAt(i); i++; continue }
+      var label = text.slice(i + 2, j - 1)
 
       // Inline form ![alt](url) — the destination itself may hold parens.
       if (text.charAt(j) === "(") {
@@ -127,6 +144,14 @@ function stripMarkdownImages(text) {
           k2++
         }
         if (rdepth === 0) { out += "(image removed)"; i = k2; continue }
+      }
+
+      // Shortcut form ![label]: an image whenever a matching definition exists
+      // (the old regexes and the walk both fell through here, so it rendered).
+      if (defs[_normalizeRefLabel(label)]) {
+        out += "(image removed)"
+        i = j
+        continue
       }
     }
     out += text.charAt(i)
@@ -153,7 +178,10 @@ function sanitizeTextForMarkdown(text) {
   // every "!" is escaped in one linear pass: "\!" renders literally and can
   // never open an image.
   if (t.split("![").length - 1 > 200) {
-    t = t.replace(/!/g, "\\!")
+    // Drop the opener itself rather than escaping "!": "\!" after a backslash
+    // would become "\\!", which CommonMark reads as an escaped backslash plus a
+    // real image opener (review finding V1).
+    t = t.replace(/!\[/g, "[")
   } else {
     t = stripMarkdownImages(t)
   }

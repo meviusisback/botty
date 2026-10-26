@@ -67,6 +67,17 @@ check('reference image nested in label stripped',
   if (!ok) failures++;
   console.log((ok ? 'ok  ' : 'FAIL') + ' pathological openers neutralised (linear escape)');
 })();
+// Shortcut references (V2): "![label]" alone is an image when a matching
+// definition line exists anywhere in the text, in either order.
+check('shortcut reference image stripped', '![shot]\n\n[shot]: https://evil/shot.png',
+      ['![shot]'], ['image removed']);
+check('shortcut reference stripped, definition first',
+      '[shot]: https://evil/s.png\n\n![shot]', ['![shot]', 's.png)'], ['image removed']);
+check('bare bracket label kept when no definition exists', 'see ![note] here',
+      [], ['![note]']);
+// Batch mode must not manufacture an opener out of an already-escaped one (V1).
+check('escaped opener stays inert in batch mode',
+      '![a]'.repeat(200) + ' \\![p](https://evil/live.png)', ['![p]('], []);
 // Legitimate text markdown survives
 check('text link preserved', 'see [docs](https://example.com)', [], ['[docs](https://example.com)']);
 check('bold italic preserved', '**bold** and *italic*', [], ['**bold**', '*italic*']);

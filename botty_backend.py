@@ -1948,7 +1948,9 @@ def format_situation_prompt(ctx: Dict[str, Any]) -> str:
             if git:
                 br = _untrusted_inline(git.get("branch", ""), 120)
                 cc = git.get("changed_count", 0)
-                git_str = f" (git: {br}" + (f", {cc} changed" if cc else ", clean") + ")"
+                git_str = (f" (git: {br}"
+                           + (f", {_untrusted_inline(cc, 20)} changed" if cc else ", clean")
+                           + ")")
                 
             cmd = _untrusted_inline(t.get("cmd", ""), 300)
             
@@ -2604,7 +2606,8 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         win_title = _untrusted_inline(win.get("title", ""), 200)
         win_class = _untrusted_inline(win.get("class", ""), 60)
         win_info = f"{win_class} — '{win_title}'" if (win_class or win_title) else "Active Workspace / Screen"
-        img_info = f" (Screenshot image: {target_image})" if target_image else ""
+        img_info = (f" (Screenshot image: {_untrusted_inline(target_image, 400)})"
+                    if target_image else "")
         prompt_parts.append(
             f"[SCREEN CONTEXT ATTACHED: {win_info}{img_info}]\n"
             f"Note for Agent: You have access to this screen context and local capabilities to perform tasks on this machine. "

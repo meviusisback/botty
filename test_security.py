@@ -6,6 +6,7 @@ test_compaction.py) so no real user data is touched.
 import errno
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -938,6 +939,94 @@ class TestSecurityHardening(unittest.TestCase):
         with mock.patch("botty_backend.read_framed_stdin", return_value="from stdin") as rf:
             self.assertEqual(botty_backend._text_from_args(D()), "from stdin")
         rf.assert_called_once_with("EOF-abc12345")
+
+    def test_every_text_block_is_plain_text(self):
+        """Y6: after the plain-text switch the invariant is not "the old renderer
+        is gone" — it is that EVERY text item declares a plain format. A RichText
+        block added tomorrow would have passed the old test."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        self.assertFalse("Text.RichText" in src, "a text block was switched to rich text")
+        self.assertFalse("Text.StyledText" in src, "a text block was switched to styled text")
+        texts = len(re.findall(r"(?<![\w.])Text\s*\{", src))
+        guarded = src.count("textFormat: Text.PlainText")
+        self.assertEqual(texts, guarded, "a Text block renders rich text")
+        edits = len(re.findall(r"(?<![\w.])TextEdit\s*\{", src))
+        self.assertEqual(edits, src.count("textFormat: TextEdit.PlainText"))
+
+    def test_clear_is_hidden_not_merely_disabled(self):
+        """Y7: the shared Button draws no disabled state, so `enabled: false`
+        still looks clickable — the fix is `visible:`."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        # Scoped to the Clear button: other controls legitimately use `enabled`
+        # (they stay visible but inert), the point here is that Clear is hidden.
+        i = src.index("onClicked: root.clearChat()")
+        window = src[max(0, i - 400):i]
+        self.assertIn("visible: !root.isProcessing", window)
+        self.assertFalse("enabled: !root.isProcessing" in window)
+
+    def test_approval_is_claimed_only_just_before_the_run(self):
+        """Y7/Y2: resolving early is fine, consuming early is not — anything that
+        fails between them would burn the card."""
+        src = (Path(botty_backend.__file__).resolve().parent / "botty_backend.py").read_text(encoding="utf-8")
+        body = src[src.index("def ask("):]
+        self.assertLess(body.index("_acquire_ask_lock()"),
+                        body.index("_resolve_approved_proposal("),
+                        "the card must not be resolved before the ask slot")
+        self.assertLess(body.index("_consume_approved_proposal("),
+                        body.index("run = run_bounded_process("),
+                        "the approval must be consumed before the run")
+        # and both must sit after everything that can fail during assembly
+        self.assertGreater(body.index("_consume_approved_proposal("),
+                           body.index("set_status(\"working\""),
+                           "consuming before prompt assembly burns the card")
+
+    def test_framed_text_keeps_its_exact_content(self):
+        """Y4: the frame adds one newline before the nonce; it must not become
+        part of what gets copied or remembered."""
+        class D:
+            text_stdin = True
+            stdin_end = "EOF-abc12345"
+            text = None
+        with mock.patch("botty_backend.read_framed_stdin", return_value="hello\n"):
+            self.assertEqual(botty_backend._text_from_args(D()), "hello")
+        with mock.patch("botty_backend.read_framed_stdin", return_value="hello"):
+            self.assertEqual(botty_backend._text_from_args(D()), "hello")
+        with mock.patch("botty_backend.read_framed_stdin", return_value="a\nb\n"):
+            self.assertEqual(botty_backend._text_from_args(D()), "a\nb")
+
+    def test_a_second_copy_is_queued_not_overwritten(self):
+        """Y1: one Process means one frame. A copy that lands while the first is
+        still starting must not overwrite the payload and hand the running child
+        a nonce its command line does not carry."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        body = src[src.index("function copyText("):]
+        body = body[:body.index("function compactMemoryNow(")]
+        self.assertIn("if (copyProc.running)", body)
+        self.assertIn("queuedCopyText = text", body)
+        self.assertIn("onRunningChanged", src[src.index("id: copyProc"):])
+        # and the frame is written only when the child actually starts
+        self.assertIn("onStarted", src[src.index("id: copyProc"):])
+
+    def test_consuming_the_same_approval_twice_is_refused(self):
+        """Y: the consume step is the load-bearing half of R6 — the resolve step
+        refuses first, but only this one stamps under the lock."""
+        botty_backend.HISTORY_FILE.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"id": "msg_p", "role": "assistant", "sandbox_request": True,
+                          "content": "proposal", "attachments": [], "actions": []}]}))
+        self.assertTrue(botty_backend._consume_approved_proposal("msg_p"))
+        self.assertFalse(botty_backend._consume_approved_proposal("msg_p"))
+        self.assertFalse(botty_backend._consume_approved_proposal("nope"))
+
+    def test_resolving_a_spent_card_is_refused(self):
+        botty_backend.HISTORY_FILE.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"id": "msg_p", "role": "assistant", "sandbox_request": True,
+                          "content": "proposal", "attachments": [], "actions": [],
+                          "sandbox_approved_at": 1700000000}]}))
+        scope, refusal = botty_backend._resolve_approved_proposal("msg_p")
+        self.assertEqual(scope, "")
+        self.assertIn("already used", refusal)
 
 
 if __name__ == "__main__":

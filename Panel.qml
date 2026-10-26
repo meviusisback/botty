@@ -56,6 +56,8 @@ Panel {
   property string pendingStdinPayload: ""
   property string pendingCopyPayload: ""
   property string pendingMemPayload: ""
+  property string queuedCopyText: ""
+  property var queuedMem: null
 
   readonly property string pendingPermissionId: {
     var msgs = (root.historyData && root.historyData.messages) || []
@@ -470,6 +472,13 @@ Panel {
 
   function copyText(text) {
     if (!text) return
+    // One Process, one frame: writing a second payload while the first child is
+    // starting would give it a nonce its command line does not carry, and the
+    // backend would refuse a frame it cannot trust. Queue the newer text instead.
+    if (copyProc.running) {
+      root.queuedCopyText = text
+      return
+    }
     // The text goes over stdin: on a host without hidepid argv is readable by any
     // local process, and what gets copied is often the whole answer.
     var tok = root.newStdinToken()
@@ -488,6 +497,10 @@ Panel {
 
   function addMemoryNow(text, isUser, fromModel) {
     if (!text || !text.trim()) return
+    if (addMemProc.running) {
+      root.queuedMem = { text: text, isUser: !!isUser, fromModel: !!fromModel }
+      return
+    }
     var cmd = ["python3", root.scriptPath(), "add-memory"]
     if (isUser) cmd.push("--user")
     if (fromModel) cmd.push("--from-model")
@@ -1167,6 +1180,13 @@ Panel {
         root.pendingMemPayload = ""
       }
     }
+    onRunningChanged: {
+      if (!running && root.queuedMem !== null) {
+        var next = root.queuedMem
+        root.queuedMem = null
+        root.addMemoryNow(next.text, next.isUser, next.fromModel)
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -1183,6 +1203,13 @@ Panel {
       if (root.pendingCopyPayload.length > 0) {
         copyProc.write(root.pendingCopyPayload)
         root.pendingCopyPayload = ""
+      }
+    }
+    onRunningChanged: {
+      if (!running && root.queuedCopyText.length > 0) {
+        var next = root.queuedCopyText
+        root.queuedCopyText = ""
+        root.copyText(next)
       }
     }
   }
@@ -2450,7 +2477,8 @@ Panel {
                             // backend refuses it, so the button would lie.
                             visible: !modelData.sandbox_approved_at
                             onClicked: {
-                              root.approveSandboxBypass(modelData.id)
+                              root.approveSandboxBypass(
+                                    modelData.sandbox_request === true ? modelData.id : "")
                             }
                           }
 

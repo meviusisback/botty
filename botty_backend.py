@@ -462,7 +462,12 @@ def _text_from_args(args) -> str:
         term = getattr(args, "stdin_end", None)
         if not term:
             raise ValueError("--text-stdin requires --stdin-end")
-        return read_framed_stdin(str(term))
+        payload = read_framed_stdin(str(term))
+        # The frame always adds one newline before the nonce line; remove exactly
+        # that one so the text is what the user had.
+        if payload.endswith("\n"):
+            payload = payload[:-1]
+        return payload
     text = getattr(args, "text", None)
     if text is None:
         raise ValueError("missing text: pass a positional or --text-stdin/--stdin-end")
@@ -2307,13 +2312,11 @@ def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
 
 
 @_synchronized
-def _claim_approved_proposal(approve_id: str):
-    """Resolve AND consume a sandbox proposal. Returns (scope, refusal).
+def _resolve_approved_proposal(approve_id: str):
+    """Read a sandbox proposal without consuming it. Returns (scope, refusal).
 
-    One approval is good for ONE execution: replaying an old card long after the
-    user's intent passed is exactly what an injected answer would want, and every
-    historical card keeps a live Approve button. The claim happens under the
-    history lock so two concurrent bypasses cannot both take the same proposal.
+    Read-only so the prompt can be assembled from the approved text before
+    anything is written: if assembly fails, the card must still be usable.
     """
     hist = load_json_file(HISTORY_FILE, {"messages": []})
     msgs = hist.get("messages", []) if isinstance(hist, dict) else []
@@ -2327,11 +2330,31 @@ def _claim_approved_proposal(approve_id: str):
         if m.get("sandbox_approved_at"):
             return "", ("that approval was already used. Re-run the task "
                         "sandboxed for a fresh card.")
-        m["sandbox_approved_at"] = int(time.time())
-        save_json_file(HISTORY_FILE, hist)
         return str(m.get("content", "")), ""
     return "", ("that proposal is no longer in the conversation. Re-run the task "
                 "sandboxed and approve the new card.")
+
+
+@_synchronized
+def _consume_approved_proposal(approve_id: str) -> bool:
+    """Mark an approval as used. False if it vanished or was already used.
+
+    One approval is good for ONE execution: replaying an old card long after the
+    user's intent passed is exactly what an injected answer would want. Stamping
+    under the history lock keeps two concurrent bypasses from taking the same
+    proposal.
+    """
+    hist = load_json_file(HISTORY_FILE, {"messages": []})
+    msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+    for m in msgs:
+        if not isinstance(m, dict) or str(m.get("id", "")) != str(approve_id):
+            continue
+        if m.get("sandbox_approved_at"):
+            return False
+        m["sandbox_approved_at"] = int(time.time())
+        save_json_file(HISTORY_FILE, hist)
+        return True
+    return False
 
 
 @_synchronized
@@ -2566,11 +2589,10 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             _release_ask_lock()
             return {"ok": False,
                     "error": "Sandbox bypass refused: the approved proposal id is missing."}
-        approved_scope, refusal = _claim_approved_proposal(str(approve_id))
+        approved_scope, refusal = _resolve_approved_proposal(str(approve_id))
         if refusal:
             _release_ask_lock()
             return {"ok": False, "error": f"Sandbox bypass refused: {refusal}"}
-        approval_claimed = True
 
     set_status("working", headline="Botty is thinking…", last_query=query)
 
@@ -2874,6 +2896,17 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
                 cmd.extend(["-m", selected_model])
             if provider:
                 cmd.extend(["--provider", provider])
+
+    # Consume the approval here, not when it was resolved: everything in between
+    # can still fail (status write, query file, prompt assembly), and a failure
+    # there must leave the card usable.
+    if bypass_sandbox:
+        if not _consume_approved_proposal(str(approve_id)):
+            _release_ask_lock()
+            return {"ok": False,
+                    "error": "Sandbox bypass refused: that approval was already used. "
+                             "Re-run the task sandboxed for a fresh card."}
+        approval_claimed = True
 
     run = run_bounded_process(
         cmd,
@@ -4422,6 +4455,7 @@ def main():
         try:
             mem_text = _text_from_args(args)
         except ValueError as exc:
+            set_status("error", headline="Memory not saved", last_error=f"add-memory: {exc}")
             print(json.dumps({"ok": False, "error": f"add-memory: {exc}"}, ensure_ascii=False))
             return
         print(json.dumps(add_memory(mem_text, is_user_fact=args.user, from_model=args.from_model), ensure_ascii=False))
@@ -4438,6 +4472,7 @@ def main():
         try:
             copy_text = _text_from_args(args)
         except ValueError as exc:
+            set_status("error", headline="Copy failed", last_error=f"copy: {exc}")
             print(json.dumps({"ok": False, "error": f"copy: {exc}"}, ensure_ascii=False))
             return
         print(json.dumps(copy_to_clipboard(copy_text), ensure_ascii=False))

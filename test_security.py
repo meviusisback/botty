@@ -870,6 +870,10 @@ class TestSecurityHardening(unittest.TestCase):
         src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
         self.assertIn("m.sandbox_approved_at", src)
         self.assertIn("visible: !modelData.sandbox_approved_at", src)
+        # Z7: the "already used" label tested `=== true` against an integer stamp
+        # and therefore never appeared.
+        self.assertIn("visible: !!modelData.sandbox_approved_at", src)
+        self.assertFalse("sandbox_approved_at === true" in src)
 
     def test_failed_run_does_not_burn_the_approval(self):
         """X3: a run that never started must leave the card retryable."""
@@ -949,11 +953,24 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertFalse("Text.StyledText" in src, "a text block was switched to styled text")
         for kind, fmt in (("Text", "Text.PlainText"), ("TextEdit", "TextEdit.PlainText")):
             for start in (m.end() for m in re.finditer(r"(?<![\w.])%s\s*\{" % kind, src)):
-                depth, i = 1, start
+                depth, i, quote = 1, start, None
                 while i < len(src) and depth:
-                    if src[i] == "{":
+                    ch = src[i]
+                    if quote:
+                        if ch == "\\":      # escaped char inside the literal
+                            i += 2
+                            continue
+                        if ch == quote:
+                            quote = None
+                    elif ch in "\"'":
+                        quote = ch
+                    elif ch == "/" and src[i:i + 2] == "//":
+                        nl = src.find("\n", i)
+                        i = len(src) if nl < 0 else nl
+                        continue
+                    elif ch == "{":
                         depth += 1
-                    elif src[i] == "}":
+                    elif ch == "}":
                         depth -= 1
                     i += 1
                 body = src[start:i]
@@ -1073,6 +1090,48 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertIn("internal error", res.get("error", ""))
         self.assertFalse(botty_backend.LOCK_FILE.exists(),
                          "an exception left the ask slot claimed")
+
+    def test_a_finished_run_does_not_hand_the_approval_back(self):
+        """W1: the boundary must not un-claim a card whose payload already ran,
+        or the same approved command can be executed twice."""
+        botty_backend.HISTORY_FILE.write_text(json.dumps({
+            "session_id": "botty-widget",
+            "messages": [{"id": "msg_p", "role": "assistant", "sandbox_request": True,
+                          "content": "🔒 SANDBOX PERMISSION REQUIRED: rm -rf ~/scratch",
+                          "attachments": [], "actions": []}]}))
+
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            # The exception escapes from the spawn itself, i.e. AFTER the approval
+            # was consumed: we cannot know whether the payload started, so the card
+            # must stay spent.
+            with mock.patch("botty_backend.run_bounded_process",
+                            side_effect=RuntimeError("spawn blew up")), \
+                 mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.add_history_message"), \
+                 mock.patch("botty_backend.send_system_notification"), \
+                 mock.patch("botty_backend.update_encrypted_vault"):
+                res = botty_backend.ask("I approve", bypass_sandbox=True, approve_id="msg_p")
+        finally:
+            botty_backend.set_active_engine(prev)
+
+        self.assertFalse(res.get("ok"), res)
+
+        self.assertIn("sandbox_approved_at", botty_backend.HISTORY_FILE.read_text(),
+                      "a finished run handed the approval back")
+
+    def test_approval_banner_outlives_later_messages(self):
+        """W5: the banner looked only at the LAST message, so any row written after
+        the card (a refusal, an answer) hid it. Wiring assertion: the real proof is
+        the headless quickshell probe the reviewer ran."""
+        src = (Path(botty_backend.__file__).resolve().parent / "Panel.qml").read_text(encoding="utf-8")
+        body = src[src.index("readonly property string pendingPermissionId"):]
+        body = body[:body.index("\n  property int lastMessageCount")]
+        self.assertIn("msgs.length - 21", body, "the banner no longer scans backwards")
+        self.assertNotIn("msgs[msgs.length - 1]", body,
+                         "the banner only considers the last message")
 
 
 if __name__ == "__main__":

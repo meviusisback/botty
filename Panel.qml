@@ -66,9 +66,15 @@ Panel {
   readonly property string pendingPermissionId: {
     var msgs = (root.historyData && root.historyData.messages) || []
     if (msgs.length === 0) return ""
-    var m = msgs[msgs.length - 1]
-    if (!m || m.sandbox_request !== true || m.sandbox_approved_at) return ""
-    return String(m.id || "")
+    // The newest ACTIONABLE proposal, not simply the last message: a refusal row
+    // or any other answer landing after the card must not hide the banner.
+    for (var i = msgs.length - 1; i >= 0 && i > msgs.length - 21; i--) {
+      var m = msgs[i]
+      if (!m || m.role !== "assistant" || m.sandbox_request !== true) continue
+      if (m.sandbox_approved_at) return ""
+      return String(m.id || "")
+    }
+    return ""
   }
   property int lastMessageCount: 0
   property int lastReadMessageCount: 0

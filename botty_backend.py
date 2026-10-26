@@ -14,6 +14,7 @@ import re
 import time
 import glob
 import subprocess
+import traceback
 import shutil
 import sqlite3
 import argparse
@@ -2578,7 +2579,8 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
 
 def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False, approve_id: Optional[str] = None) -> Dict[str, Any]:
     if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
-        return {"ok": False, "error": "Empty query and no attachment or context provided."}
+        return _ask_refused("Nothing to send: the message is empty and no attachment, "
+                            "image or screen context was provided.")
 
     # Before claiming the ask slot, so the "is an ask live?" check inside can see the
     # truth: finish a session reset that a compaction had to defer (otherwise Hermes
@@ -3117,12 +3119,11 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         return _ask_body(*args)
     except Exception as exc:  # noqa: BLE001 - deliberate catch-all at the boundary
         detail = f"{type(exc).__name__}: {exc}"
-        append_botty_log(f"ERROR: ask() raised {detail}")
-        if approve_id:
-            try:
-                _unclaim_approved_proposal(str(approve_id))
-            except Exception:
-                pass
+        # W6: without the stack this is visible but undiagnosable.
+        append_botty_log(f"ERROR: ask() raised {detail}\n{traceback.format_exc()}")
+        # Only the slot is released here. Rolling the approval back is the job of
+        # the branch that knows the run never started: an exception AFTER the
+        # payload executed must not hand the card back for a second run.
         try:
             _release_ask_lock()
         except Exception:

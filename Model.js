@@ -103,7 +103,6 @@ function stripMarkdownImages(text) {
         j++
       }
       if (depth !== 0) { out += text.charAt(i); i++; continue }
-      var alt = text.slice(i + 2, j - 1)
 
       // Inline form ![alt](url) — the destination itself may hold parens.
       if (text.charAt(j) === "(") {
@@ -116,7 +115,7 @@ function stripMarkdownImages(text) {
           else if (c === ")") pdepth--
           k++
         }
-        if (pdepth === 0) { out += "[" + alt + " — image removed]"; i = k; continue }
+        if (pdepth === 0) { out += "(image removed)"; i = k; continue }
       }
 
       // Reference form ![alt][ref] (the definition line stays inert).
@@ -127,7 +126,7 @@ function stripMarkdownImages(text) {
           if (text.charAt(k2) === "]") rdepth--
           k2++
         }
-        if (rdepth === 0) { out += "[" + alt + " — image removed]"; i = k2; continue }
+        if (rdepth === 0) { out += "(image removed)"; i = k2; continue }
       }
     }
     out += text.charAt(i)
@@ -149,7 +148,15 @@ function sanitizeTextForMarkdown(text) {
 
   // Strip markdown images: inline ![alt](url) and reference ![alt][ref], both by
   // depth-counted label walk so bracketed alt text cannot slip through.
-  t = stripMarkdownImages(t)
+  // The walk is O(n^2) on pathological input (thousands of unclosed "![" — a
+  // crafted answer froze the panel for ~19 s at 160k chars), so past a threshold
+  // every "!" is escaped in one linear pass: "\!" renders literally and can
+  // never open an image.
+  if (t.split("![").length - 1 > 200) {
+    t = t.replace(/!/g, "\\!")
+  } else {
+    t = stripMarkdownImages(t)
+  }
   // Reference definitions `[id]: <url>` that remain are inert: with every
   // ![alt][id] form stripped above, no image node can reference them. They stay
   // so legitimate reference-style text links `[text][id]` keep working.

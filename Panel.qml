@@ -49,6 +49,15 @@ Panel {
   })
 
   property var historyData: ({ session_id: "botty-widget", messages: [] })
+  // Id of the last assistant message that is a REAL sandbox proposal. Legacy
+  // rows detected heuristically carry no flag, so they have no approvable id:
+  // the Approve button is hidden for them instead of doing nothing silently.
+  readonly property string pendingPermissionId: {
+    var msgs = (root.historyData && root.historyData.messages) || []
+    if (msgs.length === 0) return ""
+    var m = msgs[msgs.length - 1]
+    return (m && m.sandbox_request === true) ? String(m.id || "") : ""
+  }
   property int lastMessageCount: 0
   property int lastReadMessageCount: 0
   property int unreadCount: 0
@@ -297,13 +306,7 @@ Panel {
   // also renders for legacy rows detected heuristically (no sandbox_request flag);
   // those have no approvable id and the backend refuses a bypass without one, so
   // they surface as "re-run the task" instead of executing something unvetted.
-  function lastPendingPermissionId() {
-    var msgs = (root.historyData && root.historyData.messages) || []
-    if (msgs.length === 0) return ""
-    var m = msgs[msgs.length - 1]
-    if (!m || m.sandbox_request !== true) return ""
-    return String(m.id || "")
-  }
+  function lastPendingPermissionId() { return root.pendingPermissionId }
 
   function approveSandboxBypass(messageId) {
     // The approval is bound to the card the user clicked: the id travels with the
@@ -2375,7 +2378,7 @@ Panel {
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             onClicked: {
-                              root.approveSandboxBypass(modelData.id)
+                              root.approveSandboxBypass(modelData.sandbox_request === true ? modelData.id : "")
                             }
                           }
 
@@ -2571,9 +2574,21 @@ Panel {
                   selected: true
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
+                  visible: root.pendingPermissionId !== ""
                   onClicked: {
-                    root.approveSandboxBypass(root.lastPendingPermissionId())
+                    root.approveSandboxBypass(root.pendingPermissionId)
                   }
+                }
+
+                Text {
+                  visible: root.pendingPermissionId === ""
+                  text: "No approval id on this card — re-run the task to get a fresh proposal."
+                  textFormat: Text.PlainText
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.space(10)
+                  color: root.dim
+                  Layout.fillWidth: true
+                  wrapMode: Text.Wrap
                 }
 
                 Button {

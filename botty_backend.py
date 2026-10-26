@@ -1861,15 +1861,21 @@ UNTRUSTED_NOTE = (
 
 
 def _untrusted_inline(value, limit: int = 200) -> str:
-    """Collapse an untrusted value so it cannot forge prompt structure.
+    """Collapse an untrusted value onto ONE line.
 
-    A newline ends the field it is embedded in, and a sentinel like
-    [END CONTEXT] / [SYSTEM DIRECTIVE] only parses while its brackets survive —
-    so both are neutralised. Length is capped: a window title is a title.
+    A newline is what lets a value forge prompt structure: it ends the field it
+    is embedded in and can start a line that reads as a directive. Collapsing
+    newlines/tabs removes that, so the value can never add a LINE.
+
+    Brackets are deliberately NOT rewritten: window titles, shell commands
+    ('test [ -d x ]'), git branches and file paths legitimately contain them,
+    and rewriting the path handed to the model produced a path to a file that
+    does not exist. What remains possible is ambiguity WITHIN one line (a quoted
+    field, a bracketed sentinel inline) — that is accepted as a low-severity
+    residual to keep the data faithful.
     """
     s = str(value if value is not None else "")
     s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    s = s.replace("[", "(").replace("]", ")")
     s = " ".join(s.split())
     return s[:limit]
 
@@ -2431,7 +2437,9 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
             return {"ok": False,
                     "error": "Sandbox bypass refused: that proposal is no longer in the "
                              "conversation. Re-run the task sandboxed and approve the new card."}
-        if not approved_msg.get("sandbox_request") or not str(approved_msg.get("content", "")).strip():
+        if (approved_msg.get("sandbox_request") is not True
+                or approved_msg.get("role") != "assistant"
+                or not str(approved_msg.get("content", "")).strip()):
             return {"ok": False,
                     "error": "Sandbox bypass refused: that message is not a sandbox "
                              "permission proposal."}
@@ -2591,7 +2599,13 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
                 f"{_fenced_prompt_block(preview, fext)}\n[END ATTACHED FILE]\n"
             )
         else:
-            prompt_parts.append(f"[ATTACHED DOCUMENT: {fname} (Path: {fpath}, Size: {attached_file_info['size_str']})]\n{_UNTRUSTED_NOTE}\nPlease inspect and work with this file using your terminal and file tools.\n[END ATTACHED DOCUMENT]\n")
+            prompt_parts.append(
+                f"[ATTACHED DOCUMENT: {_untrusted_inline(fname, 120)} "
+                f"(Path: {_untrusted_inline(fpath, 400)}, "
+                f"Size: {_untrusted_inline(attached_file_info['size_str'], 40)})]\n"
+                f"{_UNTRUSTED_NOTE}\nPlease inspect and work with this file using "
+                f"your terminal and file tools.\n[END ATTACHED DOCUMENT]\n"
+            )
 
     if approved_scope:
         # The privileged run's instruction IS the approved proposal — bounded,

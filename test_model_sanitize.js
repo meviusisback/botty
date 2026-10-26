@@ -47,6 +47,26 @@ check('parens inside image url stripped', '![x](https://evil/a(1).png)',
       ['https://evil/a(1).png'], ['image removed']);
 check('plain bracket text kept', 'see [note] then [docs](https://example.com)',
       [], ['[note]', '[docs](https://example.com)']);
+// The label is NOT re-emitted (it used to be): an image nested inside the label
+// came back as a live node after sanitizing — a real bypass found in review.
+check('nested image in label stripped',
+      '![![z](https://evil/nested.png)](https://evil/outer.png)',
+      ['nested.png', 'outer.png', '![z]('], ['image removed']);
+check('reference image nested in label stripped',
+      '![![z](https://evil/n3.png)][ref]', ['n3.png', '![z]('], ['image removed']);
+
+// Pathological input: thousands of unclosed "![" made the label walk quadratic
+// (4.5 s at 80k chars, ~19 s at 160k) — one crafted answer could freeze the
+// panel. Past the threshold every "!" is escaped in a single linear pass.
+(function () {
+  const BS = String.fromCharCode(92);
+  const out = sanitize('!['.repeat(40000));
+  const total = out.split('![').length - 1;
+  const escaped = out.split(BS + '![').length - 1;
+  const ok = total === escaped;
+  if (!ok) failures++;
+  console.log((ok ? 'ok  ' : 'FAIL') + ' pathological openers neutralised (linear escape)');
+})();
 // Legitimate text markdown survives
 check('text link preserved', 'see [docs](https://example.com)', [], ['[docs](https://example.com)']);
 check('bold italic preserved', '**bold** and *italic*', [], ['**bold**', '*italic*']);

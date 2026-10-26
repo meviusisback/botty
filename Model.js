@@ -79,6 +79,63 @@ function stripReasoning(text) {
  *   Panel.qml's onLinkActivated allows http(s) schemes only.
  * Escaping keeps stray angle-bracket text visible instead of dropping it.
  */
+/**
+ * Removes every markdown image form, including alt/label text with BALANCED
+ * brackets. A bracketed alt (`![build [beta]](url)`) defeats a `[^\]]*` regex:
+ * the class stops at the inner `]`, the whole pattern fails, and the image
+ * reaches the renderer — which then fetches the remote URL on display. So the
+ * label is walked with a depth counter instead of matched by pattern.
+ * Escapes are honoured so `\]` cannot end the label early.
+ */
+function stripMarkdownImages(text) {
+  var out = ""
+  var n = text.length
+  var i = 0
+  while (i < n) {
+    if (text.charAt(i) === "!" && text.charAt(i + 1) === "[") {
+      var j = i + 2
+      var depth = 1
+      while (j < n && depth > 0) {
+        var ch = text.charAt(j)
+        if (ch === "\\") { j += 2; continue }
+        if (ch === "[") depth++
+        else if (ch === "]") depth--
+        j++
+      }
+      if (depth !== 0) { out += text.charAt(i); i++; continue }
+      var alt = text.slice(i + 2, j - 1)
+
+      // Inline form ![alt](url) — the destination itself may hold parens.
+      if (text.charAt(j) === "(") {
+        var k = j + 1
+        var pdepth = 1
+        while (k < n && pdepth > 0) {
+          var c = text.charAt(k)
+          if (c === "\\") { k += 2; continue }
+          if (c === "(") pdepth++
+          else if (c === ")") pdepth--
+          k++
+        }
+        if (pdepth === 0) { out += "[" + alt + " — image removed]"; i = k; continue }
+      }
+
+      // Reference form ![alt][ref] (the definition line stays inert).
+      if (text.charAt(j) === "[") {
+        var k2 = j + 1
+        var rdepth = 1
+        while (k2 < n && rdepth > 0) {
+          if (text.charAt(k2) === "]") rdepth--
+          k2++
+        }
+        if (rdepth === 0) { out += "[" + alt + " — image removed]"; i = k2; continue }
+      }
+    }
+    out += text.charAt(i)
+    i++
+  }
+  return out
+}
+
 function sanitizeTextForMarkdown(text) {
   if (!text) return ""
   var t = String(text)
@@ -90,10 +147,9 @@ function sanitizeTextForMarkdown(text) {
     return "__INLINE_CODE_" + (inlineCodes.length - 1) + "__"
   })
 
-  // Strip markdown images: inline ![alt](url) and reference ![alt][ref].
-  // (No /s flag needed: [^)] and [^\]] already match newlines.)
-  t = t.replace(/!\[([^\]]*)\]\(([^)]*)\)/g, "[$1 — image removed]")
-  t = t.replace(/!\[([^\]]*)\]\[([^\]]*)\]/g, "[$1 — image removed]")
+  // Strip markdown images: inline ![alt](url) and reference ![alt][ref], both by
+  // depth-counted label walk so bracketed alt text cannot slip through.
+  t = stripMarkdownImages(t)
   // Reference definitions `[id]: <url>` that remain are inert: with every
   // ![alt][id] form stripped above, no image node can reference them. They stay
   // so legitimate reference-style text links `[text][id]` keep working.

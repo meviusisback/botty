@@ -36,6 +36,17 @@ check('self-closing img escaped', '<img src="https://evil/x.png"/>', ['<img'], [
 // Inline + reference-style markdown images stripped (remote-image fetch vector)
 check('inline md image stripped', 'look ![puppy](https://evil/p.png) here', ['![puppy](', 'https://evil/p.png)'], ['image removed']);
 check('ref md image stripped', '![puppy][pic]\n\n[pic]: https://evil/p.png', ['![puppy][pic]'], ['image removed']);
+// Bracketed alt/label text defeated the old `[^\]]*` class: it stopped at the inner
+// `]`, the pattern failed, and the image reached the renderer (remote fetch on
+// display). Labels are now walked with a depth counter instead of a pattern.
+check('bracketed alt image stripped', '![build [beta]](https://evil/x.png)',
+      ['![build', 'https://evil/x.png'], ['image removed']);
+check('nested bracketed alt stripped', '![a [b] c](https://evil/v.png)',
+      ['![a [b]', 'https://evil/v.png'], ['image removed']);
+check('parens inside image url stripped', '![x](https://evil/a(1).png)',
+      ['https://evil/a(1).png'], ['image removed']);
+check('plain bracket text kept', 'see [note] then [docs](https://example.com)',
+      [], ['[note]', '[docs](https://example.com)']);
 // Legitimate text markdown survives
 check('text link preserved', 'see [docs](https://example.com)', [], ['[docs](https://example.com)']);
 check('bold italic preserved', '**bold** and *italic*', [], ['**bold**', '*italic*']);

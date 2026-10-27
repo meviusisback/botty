@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meviusisback.botty",
   "name": "Botty",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": "meviusisback",
   "license": "MIT",
   "description": "Desktop AI Agent assistant widget powered by Hermes profile Botty with screen awareness, multimodal media context, persistent memory, and native Omarchy desktop actions.",

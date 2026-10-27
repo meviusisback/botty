@@ -1370,6 +1370,61 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertNotIn("MODEL-SENTINEL", joined)
         self.assertNotIn("PROVIDER-SENTINEL", joined)
 
+    def test_an_approved_run_does_not_resume_the_main_session(self):
+        """Hancore finding (medium): removing the bridge from the prompt is not
+        isolation — `--continue botty-widget` still brings every earlier turn,
+        including untrusted content read during sandboxed runs, into a --yolo run.
+        The approved run gets its own empty session."""
+        self._seed_card("🔒 SANDBOX PERMISSION REQUIRED: rm -rf ~/scratch")
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return {"ok": True, "returncode": 0, "stdout": "done", "stderr": "",
+                    "timed_out": False, "output_truncated": False, "error": None,
+                    "spawned": True}
+
+        prev = botty_backend.get_active_engine()
+        botty_backend.set_active_engine("hermes")
+        try:
+            with mock.patch("botty_backend.run_bounded_process", side_effect=fake_run), \
+                 mock.patch("botty_backend.set_status"), \
+                 mock.patch("botty_backend.append_botty_log"), \
+                 mock.patch("botty_backend.add_history_message"), \
+                 mock.patch("botty_backend.send_system_notification"), \
+                 mock.patch("botty_backend.update_encrypted_vault"):
+                botty_backend.ask("please proceed", bypass_sandbox=True, approve_id="msg_p")
+        finally:
+            botty_backend.set_active_engine(prev)
+
+        joined = " ".join(seen.get("cmd", []))
+        self.assertIn("--yolo", joined)
+        self.assertNotIn(botty_backend.HERMES_SESSION_NAME, joined,
+                         "the privileged run resumed the main session")
+        self.assertIn("botty-approved-", joined)
+
+    def test_a_normal_run_still_resumes_the_main_session(self):
+        """The isolation must not cost continuity on ordinary asks."""
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = list(cmd)
+            return {"ok": True, "returncode": 0, "stdout": "ok", "stderr": "",
+                    "timed_out": False, "output_truncated": False, "error": None,
+                    "spawned": True}
+
+        with mock.patch("botty_backend.run_bounded_process", side_effect=fake_run), \
+             mock.patch("botty_backend.set_status"), \
+             mock.patch("botty_backend.append_botty_log"), \
+             mock.patch("botty_backend.add_history_message"), \
+             mock.patch("botty_backend.send_system_notification"), \
+             mock.patch("botty_backend.update_encrypted_vault"):
+            botty_backend.ask("list the files here")
+
+        joined = " ".join(seen.get("cmd", []))
+        self.assertIn(botty_backend.HERMES_SESSION_NAME, joined)
+        self.assertNotIn("botty-approved-", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

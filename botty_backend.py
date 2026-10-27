@@ -2919,16 +2919,36 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         # Hermes rejects creation flags on the resume path ("creation
         # overrides are unsupported on resume"), so they are only passed when
         # the session does not exist yet and will actually be created.
-        is_resume = hermes_session_exists(HERMES_SESSION_NAME)
-        cmd = [
-            "hermes",
-            "-p", "botty",
-            "chat",
-            "-Q",
-            "--query-file", str(query_tmp),
-            "--continue", HERMES_SESSION_NAME,
-            "--create-if-missing",
-        ]
+        if approved_scope:
+            # An approved run must not inherit ANY prior context. The main session
+            # carries everything earlier sandboxed turns read (files, screen,
+            # attachments, the caller's own words), and this run holds --yolo: that
+            # content plus a bypassed gate is precisely the escalation the approval
+            # exists to prevent. A dedicated, empty session per approval keeps the
+            # run inside the approved scope while still letting it continue across
+            # its own turns.
+            approved_session = f"botty-approved-{int(time.time())}-{os.urandom(3).hex()}"
+            cmd = [
+                "hermes",
+                "-p", "botty",
+                "chat",
+                "-Q",
+                "--query-file", str(query_tmp),
+                "--continue", approved_session,
+                "--create-if-missing",
+            ]
+            is_resume = False
+        else:
+            is_resume = hermes_session_exists(HERMES_SESSION_NAME)
+            cmd = [
+                "hermes",
+                "-p", "botty",
+                "chat",
+                "-Q",
+                "--query-file", str(query_tmp),
+                "--continue", HERMES_SESSION_NAME,
+                "--create-if-missing",
+            ]
         if not is_resume:
             cmd.extend(["--max-turns", "15", "--run-budget", "200"])
         # Security: --yolo bypasses Hermes's dangerous-command approval gate. It is added

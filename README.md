@@ -171,8 +171,10 @@ config.
 
 When a task needs writes, the sandboxed agent proposes concrete actions and
 Botty shows an approval card. Clicking **Approve** runs ONE follow-up that may
-carry `--yolo`, and its prompt is the human-approved proposal itself — the
-original query and any attachment/screen content are not re-inlined into that
+carry `--yolo` in a **fresh, empty agent session** — it inherits no earlier turns,
+so nothing read during the sandboxed run is still in context — and its prompt is
+the human-approved proposal itself: the original query, attachments, screen
+content, the continuity bridge and any model override are not part of that
 privileged run. This window is a single explicit trust decision: the model may
 still see earlier turns of the conversation via `--continue`, so treat it as
 "one approved execution", not as a boundary against a malicious file.

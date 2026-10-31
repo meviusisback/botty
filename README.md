@@ -1,87 +1,76 @@
-# Botty — Omarchy Desktop Agent Assistant Bar Widget
+<div align="center">
 
-![](infographic.png)
+# Botty
 
-**Botty** is an interactive, native Omarchy bar widget and desktop assistant powered by the Hermes Agent profile `botty`, with support for OMP, Claude Code, and Codex. It integrates directly into your top bar to provide instant ambient screen awareness, universal file & document context, persistent memory, continuous learning, model switching, and desktop automation actions.
+**Your Omarchy bar widget for agentic work.** Instant screen awareness, file and voice context, model switching and persistent memory — chat with Hermes, OMP, Claude Code or Codex without leaving your top bar.
 
----
+[![License: MIT](https://img.shields.io/github/license/meviusisback/botty)](LICENSE)
+![Linux](https://img.shields.io/badge/linux-supported-1793d1)
 
-## ✨ Features
+![Botty in the top bar](preview.png)
 
-- 🐼 **Native Omarchy Bar Widget**: Status-aware bar icon that indicates live state:
-  - **Ready / Done**: Steady Panda glyph (`🐼`) in theme foreground.
-  - **Thinking / Processing**: Animated pulsing spinner (`󰑐`) in accent blue.
-  - **Prompt / Waiting**: Amber lightbulb / prompt indicator (`󰌵`).
-  - **Error / Alert**: Urgent red glyph (`󰅚`).
-- 󰹑 **Ambient Visual Screen Awareness**: Captures active Hyprland windows and attaches visual screenshots directly for multimodal models (zero raw OCR dump clutter).
-- 󰐕 **Universal File & Context Attachments (`+`)**:
-  - **Consolidated `+` Button**: Attach any code file (`.py`, `.js`, `.rs`, `.json`, `.toml`, etc.), document (`.pdf`, `.docx`, `.md`, `.txt`, `.csv`), or media file directly into your prompt.
-  - **Floating Native File Chooser**: Automatically floats and centers on top of the widget without disturbing your tiling window layout.
-  - **Right-Click Clipboard Paste**: Right-click `+` to instantly attach a screenshot from your clipboard.
-- 🎙️ **Voice Dictation**: Click `󰍬` next to Send to record audio with PipeWire and transcribe locally via `voxtype` (Whisper).
-- 󰒓 **Multi-Agent & Model Switching**:
-  - **Agent Engine Switcher**: Toggle between **Hermes Agent (Botty)**, **OMP (Oh My Pi)**, **Claude Code**, and **OpenAI Codex**.
-  - **Active Provider Filter**: Shows only configured inference providers with populated API keys (`OpenCode Go`, `OpenRouter`, `Ollama Local`, etc.).
-  - **Searchable Model Catalog**: Browse and switch among hundreds of models with real-time config synchronization.
-- 󰋚 **Continuous Learning, Memory Management & Encryption**:
-  - **Single-Click Memory Deletion**: Delete and cancel stored facts directly from the `󰋚 Memories` tab.
-  - **Local Memory Vault Backup**: AES-256 encrypted backup copy with an obfuscation-grade machine-derived key. The real protection is owner-only `0600`/`0700` POSIX permissions — source memories and chat history remain plaintext on disk; do not treat the vault as confidentiality.
-- 󰘦 **Desktop Automation Actions**: Runs terminal commands, manages files, and interacts with Hyprland and system apps.
+![Botty feature overview](infographic.png)
 
----
+</div>
 
-## ⌨️ Global Keyboard Shortcuts
+## Why it exists
 
-Botty registers the IPC handlers, but the keybinds live in your Hyprland
-bindings file (e.g. `~/.config/hypr/bindings.lua` on Omarchy). Add:
+The loop is always the same: **read** what's on screen, **decide** what to ask, **delegate** to the right agent. Botty keeps all three in one bar widget — no terminal juggling, no pasting screenshots, no losing the thread while the model thinks.
 
-```lua
-o.bind("SUPER + A", "Toggle Botty", "omarchy-shell -q meviusisback.botty toggle")
-o.bind("SUPER + SHIFT + A", "Botty with window context", "omarchy-shell -q meviusisback.botty situationContext")
-```
-
-| Shortcut | Action | Description |
+| Read | Decide | Delegate |
 |---|---|---|
-| **`SUPER + A`** | **Toggle Botty** | Opens/closes Botty and auto-focuses the chat input immediately. |
-| **`SUPER + SHIFT + A`** | **Ask with Window Context** | Captures the active window screenshot, attaches it as visual context, opens Botty, and focuses the chat input for typing. |
+| Ambient Hyprland window capture attached as visual context | Status-aware bar icon: ready, thinking, waiting, error | Hermes, OMP, Claude Code or Codex engines, switchable in Settings |
+| Universal `+` attachments: code, docs, media, clipboard screenshots | Searchable model catalog filtered to your configured providers | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
+| Persistent memory tab with single-click deletion | Voice dictation via local Whisper (`voxtype`) | Desktop automation actions: terminal, files, Hyprland, system apps |
 
----
+## What it does
 
-## 🚀 Installation & Window Rules
+- **Native Omarchy bar widget.** Status-aware icon: steady panda when ready/done, pulsing spinner while thinking, amber prompt indicator, urgent red on error.
+- **Ambient visual screen awareness.** Captures active Hyprland windows and attaches screenshots directly for multimodal models — no raw OCR dump clutter.
+- **Universal file and context attachments (`+`).** One button for code files, documents and media; the file chooser floats centered without disturbing your tiling layout. Right-click `+` to attach a clipboard screenshot instantly.
+- **Voice dictation.** Record with PipeWire and transcribe locally via `voxtype` (Whisper).
+- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **Claude Code** and **OpenAI Codex**; the model catalog shows only providers with populated API keys.
+- **Continuous learning and memory.** Single-click memory deletion from the Memories tab; AES-256 encrypted local vault backup (owner-only `0600`/`0700` permissions are the real protection — sources stay plaintext on disk).
+- **Desktop automation actions.** Runs terminal commands, manages files, and interacts with Hyprland and system apps.
 
-### 1. Prerequisite: a Hermes profile named `botty`
+## Install
 
-Botty drives the Hermes Agent CLI (`hermes`) using a profile named `botty` —
-without it, the engine shows as unavailable. If you don't have one yet:
+1. Create the Hermes profile Botty drives (the engine shows as unavailable without it):
 
 ```bash
 hermes profile create botty
 ```
 
-Install the engine's own tools (`hermes`, plus `ffmpeg`, `grim`, `wl-clipboard`,
-`openssl` for the vault backup) and, for voice dictation, `voxtype` with a
-local Whisper model.
+Install the engine's own tools (`hermes`, plus `ffmpeg`, `grim`, `wl-clipboard`, `openssl`) and, for voice dictation, `voxtype` with a local Whisper model.
 
-### 2. Install the Plugin
+2. Install the plugin:
 
 ```bash
 omarchy plugin add https://github.com/meviusisback/botty --enable
 ```
 
-Omarchy clones the plugin into `~/.config/omarchy/plugins/meviusisback.botty/`
-and enables the bar widget.
+3. Add keybinds to your Hyprland bindings file (e.g. `~/.config/hypr/bindings.lua`) and floating file-dialog rules to `~/.config/hypr/hyprland.lua` (see Usage), then:
 
-### 3. Optional Keybinds & Floating File Dialogs
+```bash
+hyprctl reload
+omarchy restart shell
+```
 
-Add to your Hyprland bindings file (e.g. `~/.config/hypr/bindings.lua`):
+## Usage
+
+| Key | Does |
+|---|---|
+| `SUPER + A` | Toggle Botty — opens/closes the widget and auto-focuses the chat input |
+| `SUPER + SHIFT + A` | Ask with window context — captures the active window, attaches it, opens Botty focused |
+
+Bindings (add to `~/.config/hypr/bindings.lua`):
 
 ```lua
 o.bind("SUPER + A", "Toggle Botty", "omarchy-shell -q meviusisback.botty toggle")
 o.bind("SUPER + SHIFT + A", "Botty with window context", "omarchy-shell -q meviusisback.botty situationContext")
 ```
 
-Add to your `~/.config/hypr/hyprland.lua` to float, center, and size file
-dialogs on top of the widget:
+Floating file dialogs (add to `~/.config/hypr/hyprland.lua`):
 
 ```lua
 o.window({ title = ".*Attach File.*" }, { float = true, center = true, size = { 740, 500 }, stay_focused = true })
@@ -89,18 +78,7 @@ o.window({ title = ".*(Open File|Select File|Choose File|Open Folder|Save File).
 o.window("xdg-desktop-portal.*", { float = true, center = true, size = { 740, 500 } })
 ```
 
-### 4. Reload Omarchy Shell & Hyprland
-
-```bash
-hyprctl reload
-omarchy restart shell
-```
-
-### Request timeout
-
-Botty allows long-running agent requests to complete before reporting a timeout.
-The default request timeout is **600 seconds**. Override it in Botty's existing
-JSON configuration file at `~/.local/share/botty/config.json`:
+Long-running requests get **600 seconds** by default before a timeout is reported. Override it in `~/.local/share/botty/config.json` (other keys may sit alongside it):
 
 ```json
 {
@@ -108,34 +86,7 @@ JSON configuration file at `~/.local/share/botty/config.json`:
 }
 ```
 
-The value is a positive number of seconds. Invalid or non-positive values use
-the 600-second default. Other Botty configuration keys may be kept alongside
-this setting.
-
----
-
-## 🧹 Removal
-
-```bash
-omarchy plugin remove meviusisback.botty
-```
-
-This removes the plugin from the bar and deletes
-`~/.config/omarchy/plugins/meviusisback.botty/`. To also wipe Botty's own data
-(chat history, memories, captures), remove:
-
-```bash
-rm -rf ~/.local/share/botty
-```
-
-Your Hermes profile (`~/.hermes/profiles/botty`) is a separate Hermes resource
-and is not touched by the plugin; remove it manually if you want a full purge.
-
----
-
-## 📦 Requirements
-
-**Runtime (required by the default Hermes engine):**
+## Requirements
 
 | Dependency | Purpose |
 |---|---|
@@ -147,88 +98,59 @@ and is not touched by the plugin; remove it manually if you want a full purge.
 | `openssl` | AES-256 vault backup |
 | `ffmpeg` (PulseAudio/PipeWire input) | Voice dictation recording |
 
-**Optional engines (switch in Settings):** `omp` (Oh My Pi), `claude` (Claude Code), `codex` (OpenAI Codex).
+Optional engines (switch in Settings): `omp`, `claude`, `codex`. Optional voice: [`voxtype`](https://github.com/NousResearch/voxtype) with a local Whisper model. Non-Omarchy Hyprland setups work if the binaries exist, but notifications and summons rely on Omarchy's shell helpers (`omarchy-shell`, `omarchy-notification-send`).
 
-**Optional voice:** [`voxtype`](https://github.com/NousResearch/voxtype) with a local Whisper model.
+## Configuration
 
-Non-Omarchy Hyprland setups work if the above binaries exist, but the widget's
-notifications and summons rely on Omarchy's shell helpers (`omarchy-shell`,
-`omarchy-notification-send`).
+Widget settings (Omarchy plugin settings UI, defaults from `manifest.json`):
 
----
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `refreshIntervalSec` | integer 1–30 | `2` | How often the widget polls for status updates |
+| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph vs status-text ticker in the bar |
+| `showStatusInBar` | boolean | `true` | Status badges and activity dots on the bar icon |
 
-## 🔐 Security Model
+Agent request timeout lives in `~/.local/share/botty/config.json` as `request_timeout_seconds` (positive seconds, default `600`; invalid values fall back to the default).
 
-**Sandbox Mode (Hermes engine) is technically enforced, with one explicit
-human-approved execution window.** Sandboxed runs launch `hermes` WITHOUT
-`--yolo`, so Hermes's own approval gate applies: single-query (`-Q`) runs
-default to *deny* for dangerous commands (`approvals.single_query_mode`), which
-technically blocks writes and state-changing commands regardless of what
-attached files, screens, or window text say. Botty surfaces a warning if your
-`botty` profile config weakens this (`single_query_mode: approve`,
-`approvals.mode: off`, or a broad allowlist) — enforcement depends on that
-config.
+## How it works
 
-When a task needs writes, the sandboxed agent proposes concrete actions and
-Botty shows an approval card. Clicking **Approve** runs ONE follow-up that may
-carry `--yolo` in a **fresh, empty agent session** — it inherits no earlier turns,
-so nothing read during the sandboxed run is still in context — and its prompt is
-the human-approved proposal itself: the original query, attachments, screen
-content, the continuity bridge and any model override are not part of that
-privileged run. This window is a single explicit trust decision: the model may
-still see earlier turns of the conversation via `--continue`, so treat it as
-"one approved execution", not as a boundary against a malicious file.
+**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is the human-approved proposal itself.
 
-**Learning is proposal-gated.** Compaction never writes model-derived memories
-or skills directly: output is schema-validated and staged as proposals that you
-approve or reject one by one in the Memories tab. Nothing becomes a persistent
-instruction without your review.
+| Layer | Guarantee |
+|---|---|
+| Prompt transport | Prompts travel via stdin or owner-only files (`0600`/`0700`), never in process `argv` |
+| Learning | Compaction output is staged as proposals you approve one by one — nothing becomes memory or skill without review |
+| Rendering | Agent text is plain text (no markdown/HTML), so crafted answers can't trigger remote loads or spoofed chrome |
+| Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
+| Non-Hermes engines | Refused outright while Sandbox Mode is on; with it off they run under their own permission models |
 
-**No sensitive content in process arguments.** Prompts reach the engine via
-stdin or owner-only files under `~/.local/share/botty` (0600/0700) — never in the
-engine's `argv` — and the widget now hands the prompt to the local
-`botty_backend.py` CLI over stdin too (a nonce-terminated frame, because the
-shell cannot close a child's stdin), so the prompt never appears in any command
-line. The copy-to-clipboard helper and the add-memory action use the same framed
-stdin transport, so what you copy and what gets remembered is not an argument
-either; only a random nonce is. Notification payloads are fixed copy, not answer
-text. The three commands that carry free text (`ask`, `copy`, `add-memory`)
-still accept a positional form for direct CLI use, and their `--help` names it as
-the less private option; the widget never uses it. Commands that write skills
-(`create-skill`) take their text on the command line only, so do not run them
-where other local users can read `/proc`.
+## Docs
 
-**Agent output is bounded.** Subprocess output is streamed with hard caps, runs
-are killed by process group on timeout (no orphaned children), log reads tail
-from the end of the file, and database reads are limited. Rendered agent text
-is displayed as **plain text** — no markdown and no HTML is parsed — so a crafted
-answer cannot trigger a remote-image request, a link handler or spoofed chrome;
-the sanitiser runs as a second layer. The cost is real: links in an answer are
-not clickable, copy them if you need them.
+- [FIX_SUMMARY.md](FIX_SUMMARY.md) — what the context/compaction hardening changed and why
+- [BUG_ANALYSIS.md](BUG_ANALYSIS.md) — the original failure analysis behind that fix
 
-**Non-Hermes engines (omp/claude/codex) and other caveats:** while Sandbox Mode
-is on, a request on any engine other than Hermes is refused outright — those
-engines have no approval gate Botty can drive, so there is nothing to enforce.
-With Sandbox Mode off they run with their own permission models, and Botty adds
-no containment of its own. Process-group kills do not reach grandchildren that
-detach into their own session. Log files grow on disk; only the read side is
-capped.
+## Contributing
 
-**Memory files are writable by any process running as you.** Model-initiated
-memory writes are staged as proposals for review, but that staging exists to stop
-the *model* from editing memory on its own — it is not a barrier against local
-processes. `USER.md`, `MEMORY.md` and `history.json` are ordinary owner-only
-files (`0600`), and anything running under your user account can write them
-directly. Treat the staging as a review workflow, not as integrity protection.
+```bash
+python -m pytest test_security.py test_compaction.py test_context_preamble.py  # backend suites
+node test_model_sanitize.js   # Model.js sanitizer, pure JS, no Qt needed
+./redeploy-botty.sh           # copy Panel.qml + botty_backend.py to the installed plugin and restart the shell
+```
 
-**Memory Vault is an obfuscation-grade backup, not confidentiality.** The vault
-key is derived from publicly readable machine identifiers, and the vault is a
-redundant copy — source memories and chat history stay plaintext on disk. The
-actual access control is owner-only POSIX permissions (`0600` files, `0700`
-dirs) under `~/.local/share/botty`.
+## Removal
 
----
+```bash
+omarchy plugin remove meviusisback.botty
+```
 
-## 📄 License
+This removes the plugin from the bar and deletes `~/.config/omarchy/plugins/meviusisback.botty/`. To also wipe Botty's own data (chat history, memories, captures):
 
-MIT License © 2026 meviusisback
+```bash
+rm -rf ~/.local/share/botty
+```
+
+Your Hermes profile (`~/.hermes/profiles/botty`) is a separate Hermes resource and is not touched; remove it manually for a full purge.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

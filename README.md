@@ -20,7 +20,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 | Read | Decide | Delegate |
 |---|---|---|
 | Ambient Hyprland window capture attached as visual context | Status-aware bar icon: ready, thinking, waiting, error | Hermes, OMP, Claude Code or Codex engines, switchable in Settings |
-| Universal `+` attachments: code, docs, media, clipboard screenshots | Searchable model catalog filtered to your configured providers | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
+| Universal `+` attachments: code, docs, media, clipboard screenshots | Searchable model catalog (on the Hermes engine, only providers with a key) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
 | Persistent memory tab with single-click deletion | Voice dictation via local Whisper (`voxtype`) | Desktop automation actions: terminal, files, Hyprland, system apps |
 
 ## What it does
@@ -29,7 +29,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 - **Ambient visual screen awareness.** Captures active Hyprland windows and attaches screenshots directly for multimodal models — no raw OCR dump clutter.
 - **Universal file and context attachments (`+`).** One button for code files, documents and media; the file chooser floats centered without disturbing your tiling layout. Right-click `+` to attach a clipboard screenshot instantly.
 - **Voice dictation.** Record with PipeWire and transcribe locally via `voxtype` (Whisper).
-- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **Claude Code** and **OpenAI Codex**; the model catalog shows only providers with populated API keys.
+- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **Claude Code** and **OpenAI Codex**; on the Hermes engine the model catalog lists only providers whose API key is present in `~/.hermes/.env` (the OMP, Claude Code and Codex lists come from their own local caches or fixed provider lists).
 - **Continuous learning and memory.** Single-click memory deletion from the Memories tab; AES-256 encrypted local vault backup (owner-only `0600`/`0700` permissions are the real protection — sources stay plaintext on disk).
 - **Desktop automation actions.** Runs terminal commands, manages files, and interacts with Hyprland and system apps.
 

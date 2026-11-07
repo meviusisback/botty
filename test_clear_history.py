@@ -291,12 +291,153 @@ class TestClearHistoryHonestReset(unittest.TestCase):
         self.assertNotIn("clear_reset_pending", st)
 
     def test_compaction_finalize_requires_history_flock(self):
-        # Fail loud instead of a silent lost update for a lockless caller.
+        # Fail loud instead of a silent lost update for a lockless caller —
+        # a real RuntimeError, not an assert (asserts vanish under python -O).
         with mock.patch.object(botty_backend, "reset_hermes_session",
                                return_value=self._ok_reset()):
             self.assertFalse(getattr(botty_backend._lock_state, "held", False))
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(RuntimeError):
                 botty_backend._finalize_compaction_reset()
+
+    def test_compaction_finalize_arms_retry_without_preexisting_pending(self):
+        # Normal compaction (no prior defer, no clear): a failed reset must arm
+        # reset_pending so the committed prune's session reset is retried —
+        # this pins the ARM line itself (seeding reset_pending would mask it).
+        self._write_json(botty_backend.COMPACTION_STATE_FILE, {})
+        self._run_finalize(self._fail_reset())
+        st = self._state()
+        self.assertTrue(st.get("reset_pending"))
+        self.assertNotIn("reset_bridge", st)
+        self.assertNotIn("clear_reset_pending", st)
+
+    def test_compactor_nondeferred_branch_wires_finalize(self):
+        # The gate only matters if the compactor branch actually calls it:
+        # reverting the call site to the old ungated inline pair must fail here
+        # (integration-level pin; the unit tests call the helper directly).
+        src = Path(botty_backend.__file__).read_text(encoding="utf-8")
+        self.assertIn("\n                _finalize_compaction_reset()", src)
+        self.assertNotIn("\n                reset_hermes_session(HERMES_SESSION_NAME)", src)
+
+    # -- review round-1 fixes (P1 + P2s) ------------------------------------
+
+    def test_clear_history_arm_write_failure_changes_nothing(self):
+        # P1: if the guard cannot be armed, NOTHING may be wiped and the CLI
+        # must still get an honest JSON dict (no escaping exception).
+        real_save = botty_backend.save_json_file
+
+        def failing_save(path, data):
+            if Path(path) == botty_backend.COMPACTION_STATE_FILE:
+                raise OSError("No space left on device")
+            return real_save(path, data)
+
+        with mock.patch.object(botty_backend, "reset_hermes_session",
+                               return_value=self._fail_reset()), \
+             mock.patch.object(botty_backend, "save_json_file", side_effect=failing_save):
+            res = botty_backend.clear_history()   # must not raise
+
+        self.assertFalse(res.get("ok"))
+        self.assertFalse(res.get("history_cleared"))
+        self.assertFalse(res.get("session_reset"))
+        self.assertIn("message", res)
+        # Nothing changed: chat intact, bridge intact, guard never armed.
+        msgs = self._history()["messages"]
+        self.assertEqual(len(msgs), 2)
+        self.assertEqual(msgs[0]["content"], "private question")
+        self.assertTrue(botty_backend.CONTEXT_BRIDGE_FILE.exists())
+        st = self._state()
+        self.assertNotIn("reset_pending", st)
+        self.assertNotIn("clear_reset_pending", st)
+        self.assertEqual(st.get("clear_epoch"), 7)   # arm never landed
+
+    def test_clear_history_wipe_failure_rolls_back_guard(self):
+        # P1 sibling: the wipe itself fails after the guard was armed — roll
+        # the guard back so the intact chat is not paused, and report honestly.
+        real_save = botty_backend.save_json_file
+
+        def failing_save(path, data):
+            if Path(path) == botty_backend.HISTORY_FILE:
+                raise OSError("No space left on device")
+            return real_save(path, data)
+
+        with mock.patch.object(botty_backend, "reset_hermes_session",
+                               return_value=self._fail_reset()), \
+             mock.patch.object(botty_backend, "save_json_file", side_effect=failing_save):
+            res = botty_backend.clear_history()   # must not raise
+
+        self.assertFalse(res.get("ok"))
+        self.assertFalse(res.get("history_cleared"))
+        msgs = self._history()["messages"]
+        self.assertEqual(len(msgs), 2)             # wipe rolled back / never landed
+        self.assertTrue(botty_backend.CONTEXT_BRIDGE_FILE.exists())
+        st = self._state()
+        self.assertNotIn("reset_pending", st)      # guard rolled back
+        self.assertNotIn("clear_reset_pending", st)
+
+    def test_ask_guard_runs_after_ask_lock(self):
+        # Ordering IS the race fix: a clear that starts between a pre-lock
+        # guard read and lock acquisition would arm the flag under us. Pin the
+        # call order (and the release-before-refusal) so moving the guard
+        # above _acquire_ask_lock fails here.
+        events = []
+
+        def acquire():
+            events.append("acquire")
+            return True
+
+        def incomplete():
+            events.append("incomplete")
+            return True    # guard fires -> refusal, no spawn
+
+        def release():
+            events.append("release")
+
+        with mock.patch.object(botty_backend, "_acquire_ask_lock", side_effect=acquire), \
+             mock.patch.object(botty_backend, "_clear_reset_incomplete",
+                               side_effect=incomplete), \
+             mock.patch.object(botty_backend, "_release_ask_lock", side_effect=release), \
+             mock.patch.object(botty_backend, "run_bounded_process",
+                               side_effect=AssertionError("spawned hermes")):
+            res = botty_backend._ask_body("hello")
+
+        self.assertFalse(res.get("ok"))
+        self.assertEqual(events, ["acquire", "incomplete", "release"])
+
+    def test_clear_reset_incomplete_reentrant_when_lock_held(self):
+        # If the caller already holds the flock, taking a SECOND descriptor
+        # would self-deadlock (flock is per open file description): the helper
+        # must read directly instead of re-locking.
+        events = []
+        orig_acq = botty_backend._exclusive_file_lock
+        orig_rel = botty_backend._release_file_lock
+        orig_load = botty_backend.load_json_file
+
+        def acq():
+            events.append("acquire")
+            return orig_acq()
+
+        def rel(fh):
+            events.append("release")
+            orig_rel(fh)
+
+        def load(path, default=None):
+            events.append("read")
+            return orig_load(path, default)
+
+        self._write_json(botty_backend.COMPACTION_STATE_FILE,
+                         {"clear_reset_pending": True})
+        botty_backend._lock_state.held = True   # simulate caller holding it
+        try:
+            with mock.patch.object(botty_backend, "_exclusive_file_lock",
+                                   side_effect=acq), \
+                 mock.patch.object(botty_backend, "_release_file_lock",
+                                   side_effect=rel), \
+                 mock.patch.object(botty_backend, "load_json_file", side_effect=load):
+                result = botty_backend._clear_reset_incomplete()
+        finally:
+            botty_backend._lock_state.held = False
+
+        self.assertTrue(result)
+        self.assertEqual(events, ["read"])   # no second flock descriptor
 
 
 if __name__ == "__main__":

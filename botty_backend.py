@@ -1234,14 +1234,25 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
         elif event_type == "complete":
             glyph = "󰄬"
 
-        # Notification copy
+        # Notification copy: STATIC for every event. Notification argv is
+        # world-readable (hidepid is off), so caller-supplied text — error
+        # messages derived from engine stderr, which can carry conversation
+        # fragments — must never ride it (security class 13; found by the
+        # filing gate's canary probe). The detail lives in the widget
+        # (status.last_error), the chat and botty.log; the notification only
+        # points at it.
         if event_type == "blocked":
             clean_title = "🔒 Sandbox Permission Required"
             clean_msg = "Botty halted write operations. Click to open Botty and choose Approve or Deny."
         elif event_type == "complete":
             clean_title = "󰄬 Botty — Done"
+            clean_msg = "Botty finished your request. Open the widget for the full response."
         elif event_type == "error":
             clean_title = "󰅚 Botty — Error"
+            clean_msg = "Botty hit an error. Open the widget for the details."
+        else:
+            clean_title = "Botty"
+            clean_msg = "Open the widget for details."
 
         summon_cmd = "omarchy-shell shell summon meviusisback.botty"
 

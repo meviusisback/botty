@@ -606,6 +606,58 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertTrue(str(wav).startswith(str(rt)), wav)
         self.assertEqual(os.stat(wav.parent).st_mode & 0o777, 0o700)
 
+    def test_notification_argv_is_static_copy(self):
+        """Class 13: notification argv is world-readable (hidepid off), so no
+        caller-supplied text — error messages derived from engine stderr, which
+        can carry conversation fragments — may ride it. Found by the filing
+        gate's canary probe; the copy must be static for EVERY event type,
+        including unknown ones."""
+        canary = "CANARY-argv-never-9f3a71d2"
+        recorded = []
+
+        class _Dummy:
+            returncode = 0
+            def poll(self): return 0
+            def wait(self, *a, **k): return 0
+            def communicate(self, *a, **k): return (b"", b"")
+            def kill(self): pass
+
+        def fake_popen(cmd, *a, **k):
+            recorded.append(list(cmd))
+            return _Dummy()
+
+        with mock.patch.object(subprocess, "Popen", side_effect=fake_popen), \
+             mock.patch.object(
+                 botty_backend.shutil, "which",
+                 return_value="/usr/bin/omarchy-notification-send"):
+            # shutil.which pinned so the deterministic Popen branch runs on
+            # ANY host — without the binary the notify-send fallback dispatch
+            # lives in a listener thread using subprocess.run (round-2
+            # filesystem review: assertion was host-dependent/racy).
+            for event in ("complete", "blocked", "error", "some-future-event"):
+                botty_backend.send_system_notification(
+                    event, f"title {canary}", f"message {canary}", urgency="normal")
+
+        self.assertTrue(recorded, "no notification was dispatched")
+        flat = json.dumps(recorded, ensure_ascii=False)
+        self.assertNotIn(canary, flat)
+        # The static detail line must actually be there for the real events.
+        self.assertIn("Open the widget", flat)
+
+    def test_run_bounded_process_delivers_stdin_payload(self):
+        """Class 13 transport: stdin_text must actually reach the child over the
+        binary pipe. A str write raised TypeError and the old bare except
+        swallowed it, silently sending an EMPTY prompt to claude -p, codex exec
+        and hermes --query-file - (found by the filing gate's canary probe)."""
+        canary = "CANARY-stdin-delivery-9f3a71d2"
+        stub = Path(self.test_dir.name) / "echo_stdin.sh"
+        stub.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+        stub.chmod(0o755)
+        res = botty_backend.run_bounded_process([str(stub)], stdin_text=canary,
+                                                 timeout_s=10)
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("stdout", "").strip(), canary)
+
     def test_bypass_requires_a_real_proposal_flag(self):
         """R5: truthiness made `sandbox_request: "false"` or `1` approvable, so any
         assistant message could be executed with --yolo. No test covered the three

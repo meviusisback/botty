@@ -641,9 +641,16 @@ def run_bounded_process(
     try:
         if stdin_text is not None and proc.stdin:
             try:
-                proc.stdin.write(stdin_text)
-            except Exception:
-                pass
+                # Binary pipe: writing a str raises TypeError, which the bare
+                # except below used to swallow — silently delivering an EMPTY
+                # prompt to every stdin-based transport (claude -p, codex exec,
+                # hermes --query-file -). Encode explicitly; a failed write is
+                # logged instead of vanishing.
+                payload = (stdin_text.encode("utf-8")
+                           if isinstance(stdin_text, str) else stdin_text)
+                proc.stdin.write(payload)
+            except Exception as e:
+                append_botty_log(f"STDIN WRITE ERROR: {str(e)}")
             try:
                 proc.stdin.close()
             except Exception:
@@ -1234,14 +1241,25 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
         elif event_type == "complete":
             glyph = "󰄬"
 
-        # Notification copy
+        # Notification copy: STATIC for every event. Notification argv is
+        # world-readable (hidepid is off), so caller-supplied text — error
+        # messages derived from engine stderr, which can carry conversation
+        # fragments — must never ride it (security class 13; found by the
+        # filing gate's canary probe). The detail lives in the widget
+        # (status.last_error), the chat and botty.log; the notification only
+        # points at it.
         if event_type == "blocked":
             clean_title = "🔒 Sandbox Permission Required"
             clean_msg = "Botty halted write operations. Click to open Botty and choose Approve or Deny."
         elif event_type == "complete":
             clean_title = "󰄬 Botty — Done"
+            clean_msg = "Botty finished your request. Open the widget for the full response."
         elif event_type == "error":
             clean_title = "󰅚 Botty — Error"
+            clean_msg = "Botty hit an error. Open the widget for the details."
+        else:
+            clean_title = "Botty"
+            clean_msg = "Open the widget for details."
 
         summon_cmd = "omarchy-shell shell summon meviusisback.botty"
 
@@ -2394,19 +2412,97 @@ def _ask_refused(message: str, engine: str = "", model: str = "") -> Dict[str, A
 def _clear_pending_reset(state: Dict[str, Any]) -> None:
     state.pop("reset_pending", None)
     state.pop("reset_bridge", None)
+    # Clear Chat's ask guard: only a reset that actually SUCCEEDED (or a
+    # successful clear) may disarm it — see _fence_and_arm_reset_retry.
+    state.pop("clear_reset_pending", None)
 
 
-def _clear_pending_reset_and_bump_epoch(state: Dict[str, Any]) -> None:
-    """Clear Chat invalidates a deferred compaction — flag AND fence.
+def _fence_and_arm_reset_retry(state: Dict[str, Any]) -> None:
+    """Clear Chat could not reset the session: fence, drop the wiped bridge,
+    arm a BRIDGE-LESS retry plus the ask guard — all in one locked write.
 
-    Dropping `reset_pending` alone is not enough: a compaction that already
-    committed its history prune can arm a NEW pending reset after this runs, and
-    its `reset_bridge` describes the conversation the user just wiped. The epoch
-    is the fence the compactor checks before arming, so it is bumped in the same
-    locked write that drops the flag.
+    `reset_bridge` must not survive (it describes the conversation just
+    wiped); the epoch bump keeps a compactor that already committed its prune
+    from arming a fresh bridge afterwards; `reset_pending` without a bridge
+    makes the next turn's _apply_pending_reset() retry ONLY the session reset
+    and rewrite no context file; `clear_reset_pending` is what the ask guard
+    reads until a reset actually succeeds (marketplace finding #13663).
     """
-    _clear_pending_reset(state)
+    state.pop("reset_bridge", None)
     state["clear_epoch"] = int(state.get("clear_epoch", 0) or 0) + 1
+    state["reset_pending"] = True
+    state["clear_reset_pending"] = True
+
+
+def _keep_reset_retry_armed(state: Dict[str, Any]) -> None:
+    """A compaction's session reset failed: keep the retry armed, never spend it.
+
+    Drops `reset_bridge` — the same discard the success path performs — because
+    this branch already wrote the fresh bridge straight to CONTEXT_BRIDGE_FILE
+    and a later successful _apply_pending_reset() would otherwise overwrite it
+    with the older deferred summary. `clear_reset_pending` (a Clear Chat guard)
+    is deliberately untouched: popping it here would disarm the ask guard
+    without a successful reset — the leak the #13663 review found in the old
+    unconditional _clear_pending_reset() call at this site.
+    """
+    state.pop("reset_bridge", None)
+    state["reset_pending"] = True
+
+
+def _clear_reset_incomplete() -> bool:
+    """True while a Clear Chat's session reset is armed but has not succeeded.
+
+    Takes the history flock around the read: clear_history() checks
+    _ask_live() once at entry and then holds this lock for its whole body, so
+    an unlocked read is torn-free but unordered — it could observe the state
+    BEFORE a concurrent clear armed the flags and let this ask continue with
+    `--continue botty-widget` on the un-reset session. With the blocking read,
+    clear-first makes us wait and read the armed flag; ask-first makes the
+    clear's _ask_live() see our live ask lock and refuse to run.
+    """
+    fh = None
+    was_held = getattr(_lock_state, "held", False)
+    try:
+        # Re-entrant: if the calling thread already holds the flock, locking a
+        # second descriptor would self-deadlock (flock is per open file
+        # description) — read directly instead (review P2, latent).
+        if not was_held:
+            fh = _exclusive_file_lock()
+            _lock_state.held = True
+        state = load_json_file(COMPACTION_STATE_FILE, {})
+        return isinstance(state, dict) and state.get("clear_reset_pending") is True
+    finally:
+        if fh is not None:
+            _lock_state.held = was_held
+            _release_file_lock(fh)
+
+
+def _finalize_compaction_reset() -> None:
+    """Reset the Hermes session after a committed prune; spend an armed retry
+    only if the reset actually succeeded.
+
+    Caller must hold the history flock (the compactor's non-deferred branch
+    does, via its _fh + _lock_state.held): _compaction_state_update_locked
+    requires it, and a lockless caller would silently risk the lost update the
+    docstrings here warn about — hence the fail-loud guard. A real raise, not
+    an assert: asserts are stripped under python -O / PYTHONOPTIMIZE (review P2).
+    """
+    if not getattr(_lock_state, "held", False):
+        raise RuntimeError("_finalize_compaction_reset requires the history flock")
+    res = reset_hermes_session(HERMES_SESSION_NAME)
+    if isinstance(res, dict) and not res.get("ok"):
+        # A transient sqlite failure must NOT spend the only retry: keep the
+        # flag armed (and any clear_reset_pending guard) and say so, instead
+        # of logging a success that did not happen.
+        append_botty_log(
+            f"COMPACTION: session reset failed "
+            f"({res.get('error') or 'unknown error'}); retry stays armed")
+        _compaction_state_update_locked(mutate=_keep_reset_retry_armed)
+        return
+    # An armed pending reset is now spent: leaving it would make the next ask
+    # reset the *new* session again and overwrite the fresh bridge with the old
+    # summary (the model would get a stale COMPACTED CONTEXT block).
+    _compaction_state_update_locked(mutate=_clear_pending_reset)
 
 
 def _apply_pending_reset() -> bool:
@@ -2522,14 +2618,66 @@ def clear_history() -> Dict[str, Any]:
     # answer would resurrect the cleared session on completion.
     if _ask_live():
         return {"ok": False, "error": "Botty is processing a request. Wait for the answer, then clear."}
-    old_rev = int(load_json_file(HISTORY_FILE, {}).get("rev", 0) or 0)
+    # Prep BEFORE any state change (round-2 P1/P2): snapshot the compaction
+    # state so a failure before the wipe lands can restore it VERBATIM — a
+    # retry clear must not disarm a guard an EARLIER failed clear armed, drop
+    # a deferred compaction retry, or keep its own epoch bump while reporting
+    # "Nothing was changed" — and parse the prior rev defensively so a corrupt
+    # history file can never raise AFTER the guard is armed (the CLI would
+    # print no JSON). load_json_file never raises; clear_history holds the
+    # flock for its whole body, so the snapshot/restore pair is race-free.
+    state_before = load_json_file(COMPACTION_STATE_FILE, {})
+    try:
+        prior = load_json_file(HISTORY_FILE, {})
+        old_rev = int(prior.get("rev", 0) or 0) if isinstance(prior, dict) else 0
+    except Exception:
+        # Wiping replaces the file wholesale, so a corrupt rev starts at 0.
+        old_rev = 0
+    # Arm the fence + ask guard BEFORE anything is wiped (review P1): if this
+    # write fails, abort with an honest refusal while NOTHING has changed, so
+    # no later write failure can leave a wiped history unguarded. The epoch
+    # bump happens here — one write, one bump — and the disarm below only
+    # drops the flags.
+    try:
+        _compaction_state_update_locked(mutate=_fence_and_arm_reset_retry)
+    except Exception as e:
+        append_botty_log(f"CLEAR: could not arm the reset guard: {e}")
+        msg = f"Could not prepare the clear: {e}. Nothing was changed."
+        try:
+            # The widget reads no JSON: without this the badge never moves
+            # and a failed Clear is silent in the UI (project doctrine —
+            # _ask_refused: a silent failure is the defect class we fix).
+            set_status("error", headline="Clear failed", last_error=msg)
+        except Exception:
+            pass
+        return {"ok": False, "history_cleared": False, "session_reset": False,
+                "error": msg, "message": msg}
     history = {
         "session_id": "botty-widget",
         "messages": [],
         "rev": old_rev + 1
     }
-    save_json_file(HISTORY_FILE, history)
-    reset_hermes_session("botty-widget")
+    try:
+        save_json_file(HISTORY_FILE, history)
+    except Exception as e:
+        # The wipe failed: restore the PRE-ARM state verbatim (this body holds
+        # the flock), so a retry clear leaves a guard an EARLIER failed clear
+        # armed, a deferred compaction retry and the epoch exactly as they
+        # were — a blanket _clear_pending_reset here would disarm them while
+        # history is already wiped (round-2 P1).
+        try:
+            save_json_file(COMPACTION_STATE_FILE, state_before)
+        except Exception as e2:
+            append_botty_log(f"CLEAR: state restore after failed wipe also failed: {e2}")
+        append_botty_log(f"CLEAR: could not wipe history: {e}")
+        msg = f"Could not clear the chat: {e}. Nothing was changed."
+        try:
+            set_status("error", headline="Clear failed", last_error=msg)
+        except Exception:
+            pass
+        return {"ok": False, "history_cleared": False, "session_reset": False,
+                "error": msg, "message": msg}
+    reset_res = reset_hermes_session("botty-widget")
     # The continuity bridge describes the conversation that was just cleared.
     # Leaving it in place would re-inject stale "prior context" into the next
     # session, once per turn, for a conversation the user explicitly wiped.
@@ -2537,13 +2685,40 @@ def clear_history() -> Dict[str, Any]:
         CONTEXT_BRIDGE_FILE.unlink(missing_ok=True)
     except OSError:
         pass
-    # Same stale-context problem one level up: a compaction that had to defer its
-    # session reset keeps the summary + verbatim tail in `reset_bridge`, and the
-    # next ask() would write that file back and prepend it to the prompt —
-    # resubmitting the conversation the user just cleared. Drop it here, and bump
-    # the epoch in the same locked write so a compactor that already committed its
-    # prune cannot arm a fresh pending reset AFTER this point.
-    _compaction_state_update_locked(mutate=_clear_pending_reset_and_bump_epoch)
+    if not (isinstance(reset_res, dict) and reset_res.get("ok")):
+        # The visible chat is empty but the Hermes session still holds the
+        # wiped conversation, and the next ask would resume it with
+        # `--continue botty-widget` — the exact #13663 leak. The guard was
+        # armed BEFORE the wipe (top of this function), so there is no state
+        # write left on this path — only best-effort presentation, each
+        # wrapped so the honest return below is always reached (review P1).
+        err = str((reset_res or {}).get("error") or "unknown error")
+        msg = (f"History cleared, but the Hermes session reset failed: {err}. "
+               "It will be retried before the next message; until then "
+               "messages are paused so the cleared conversation cannot come "
+               "back to the model.")
+        try:
+            add_history_message("assistant", f"⚠️ {msg}")
+        except Exception:
+            pass
+        try:
+            # Early return: the idle status below must NOT overwrite this error.
+            set_status("error", headline="Chat cleared, session reset failed",
+                       last_error=msg)
+            append_botty_log(f"CLEAR: {msg}")
+        except Exception:
+            pass
+        return {"ok": False, "history_cleared": True, "session_reset": False,
+                "error": msg, "message": msg}
+    # Reset succeeded: disarm the guard we armed above (the epoch fence is
+    # already in place — this write only drops the flags).
+    try:
+        _compaction_state_update_locked(mutate=_clear_pending_reset)
+    except Exception as e:
+        # The clear itself succeeded; the still-armed guard self-heals on the
+        # next ask's _apply_pending_reset() retry (reset_pending is armed and
+        # the session is already clean, so the retry is a harmless no-op).
+        append_botty_log(f"CLEAR: could not disarm the reset guard: {e}")
     set_status("idle", headline="Ready", last_query="", last_answer="", last_error="")
     return {"ok": True, "message": "History cleared and session reset"}
 
@@ -2606,6 +2781,21 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         # Before the approval is claimed: a busy bot must not burn a card.
         return _ask_refused("Botty is already processing a request. Wait for the "
                             "current answer, or press Stop.")
+
+    # Clear Chat armed a session-reset retry that has not succeeded: running
+    # `--continue botty-widget` now would send the conversation the user just
+    # wiped back to the model (marketplace finding #13663). Checked under the
+    # ask lock (a clear that has not started yet then sees this ask as live and
+    # refuses to run) and, inside the helper, under the history flock (a clear
+    # already mid-body is waited out and its armed flag is read).
+    if _clear_reset_incomplete():
+        _release_ask_lock()
+        return _ask_refused(
+            "Your chat was cleared, but the Hermes session reset is still "
+            "failing, so messages are paused: continuing would send the "
+            "cleared conversation back to the model. The reset is retried "
+            "before every message; chatting resumes as soon as the database "
+            "recovers.")
 
     approved_scope = ""
     approval_claimed = False
@@ -4322,12 +4512,11 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
                     except Exception as e:
                         append_botty_log(f"Context bridge write error: {str(e)}")
 
-                # 5. Reset Hermes session context in SQLite state.db
-                reset_hermes_session(HERMES_SESSION_NAME)
-                # An armed pending reset is now spent: leaving it would make the next ask
-                # reset the *new* session again and overwrite the fresh bridge with the old
-                # summary (the model would get a stale COMPACTED CONTEXT block).
-                _compaction_state_update_locked(mutate=_clear_pending_reset)
+                # 5. Reset Hermes session context in SQLite state.db, and
+                # spend an armed pending reset ONLY if the reset succeeded
+                # (a failure keeps the retry — and any clear_reset_pending
+                # ask guard — armed instead of silently disarming it).
+                _finalize_compaction_reset()
         finally:
             if _fh is not None:
                 _lock_state.held = _was_held

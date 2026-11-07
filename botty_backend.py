@@ -2618,6 +2618,21 @@ def clear_history() -> Dict[str, Any]:
     # answer would resurrect the cleared session on completion.
     if _ask_live():
         return {"ok": False, "error": "Botty is processing a request. Wait for the answer, then clear."}
+    # Prep BEFORE any state change (round-2 P1/P2): snapshot the compaction
+    # state so a failure before the wipe lands can restore it VERBATIM — a
+    # retry clear must not disarm a guard an EARLIER failed clear armed, drop
+    # a deferred compaction retry, or keep its own epoch bump while reporting
+    # "Nothing was changed" — and parse the prior rev defensively so a corrupt
+    # history file can never raise AFTER the guard is armed (the CLI would
+    # print no JSON). load_json_file never raises; clear_history holds the
+    # flock for its whole body, so the snapshot/restore pair is race-free.
+    state_before = load_json_file(COMPACTION_STATE_FILE, {})
+    try:
+        prior = load_json_file(HISTORY_FILE, {})
+        old_rev = int(prior.get("rev", 0) or 0) if isinstance(prior, dict) else 0
+    except Exception:
+        # Wiping replaces the file wholesale, so a corrupt rev starts at 0.
+        old_rev = 0
     # Arm the fence + ask guard BEFORE anything is wiped (review P1): if this
     # write fails, abort with an honest refusal while NOTHING has changed, so
     # no later write failure can leave a wiped history unguarded. The epoch
@@ -2628,9 +2643,15 @@ def clear_history() -> Dict[str, Any]:
     except Exception as e:
         append_botty_log(f"CLEAR: could not arm the reset guard: {e}")
         msg = f"Could not prepare the clear: {e}. Nothing was changed."
+        try:
+            # The widget reads no JSON: without this the badge never moves
+            # and a failed Clear is silent in the UI (project doctrine —
+            # _ask_refused: a silent failure is the defect class we fix).
+            set_status("error", headline="Clear failed", last_error=msg)
+        except Exception:
+            pass
         return {"ok": False, "history_cleared": False, "session_reset": False,
                 "error": msg, "message": msg}
-    old_rev = int(load_json_file(HISTORY_FILE, {}).get("rev", 0) or 0)
     history = {
         "session_id": "botty-widget",
         "messages": [],
@@ -2639,15 +2660,21 @@ def clear_history() -> Dict[str, Any]:
     try:
         save_json_file(HISTORY_FILE, history)
     except Exception as e:
-        # The wipe failed: roll the guard back so the intact chat is not
-        # paused. If even the rollback fails the guard stays armed — the next
-        # ask's _apply_pending_reset() retries and clears it (self-healing).
+        # The wipe failed: restore the PRE-ARM state verbatim (this body holds
+        # the flock), so a retry clear leaves a guard an EARLIER failed clear
+        # armed, a deferred compaction retry and the epoch exactly as they
+        # were — a blanket _clear_pending_reset here would disarm them while
+        # history is already wiped (round-2 P1).
         try:
-            _compaction_state_update_locked(mutate=_clear_pending_reset)
+            save_json_file(COMPACTION_STATE_FILE, state_before)
         except Exception as e2:
-            append_botty_log(f"CLEAR: rollback after failed wipe also failed: {e2}")
+            append_botty_log(f"CLEAR: state restore after failed wipe also failed: {e2}")
         append_botty_log(f"CLEAR: could not wipe history: {e}")
         msg = f"Could not clear the chat: {e}. Nothing was changed."
+        try:
+            set_status("error", headline="Clear failed", last_error=msg)
+        except Exception:
+            pass
         return {"ok": False, "history_cleared": False, "session_reset": False,
                 "error": msg, "message": msg}
     reset_res = reset_hermes_session("botty-widget")

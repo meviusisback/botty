@@ -348,10 +348,13 @@ class TestClearHistoryHonestReset(unittest.TestCase):
         self.assertNotIn("reset_pending", st)
         self.assertNotIn("clear_reset_pending", st)
         self.assertEqual(st.get("clear_epoch"), 7)   # arm never landed
+        # The badge must move: the widget reads no JSON (round-2 QML finding).
+        self.assertEqual(botty_backend.get_status().get("state"), "error")
 
     def test_clear_history_wipe_failure_rolls_back_guard(self):
-        # P1 sibling: the wipe itself fails after the guard was armed — roll
-        # the guard back so the intact chat is not paused, and report honestly.
+        # P1 sibling: the wipe itself fails after the guard was armed — the
+        # PRE-ARM state is restored verbatim (no guard when there was none),
+        # and the failure is reported honestly with a visible badge.
         real_save = botty_backend.save_json_file
 
         def failing_save(path, data):
@@ -367,11 +370,57 @@ class TestClearHistoryHonestReset(unittest.TestCase):
         self.assertFalse(res.get("ok"))
         self.assertFalse(res.get("history_cleared"))
         msgs = self._history()["messages"]
-        self.assertEqual(len(msgs), 2)             # wipe rolled back / never landed
+        self.assertEqual(len(msgs), 2)             # wipe never landed
         self.assertTrue(botty_backend.CONTEXT_BRIDGE_FILE.exists())
         st = self._state()
-        self.assertNotIn("reset_pending", st)      # guard rolled back
+        self.assertNotIn("reset_pending", st)      # pre-arm state restored
         self.assertNotIn("clear_reset_pending", st)
+        self.assertEqual(st.get("clear_epoch"), 7)  # arm's bump rolled back
+        self.assertEqual(botty_backend.get_status().get("state"), "error")
+
+    def test_clear_history_wipe_failure_restores_preexisting_guard(self):
+        # Round-2 P1: a RETRY clear whose wipe fails must leave the guard an
+        # EARLIER failed clear armed — and its deferred compaction retry and
+        # epoch — exactly as they were. A blanket clear would disarm them
+        # while history is already wiped: the next ask would resume the
+        # cleared session (#13663).
+        self._write_json(botty_backend.COMPACTION_STATE_FILE,
+                         {"reset_pending": True, "reset_bridge": "deferred summary",
+                          "clear_epoch": 7, "clear_reset_pending": True})
+        snapshot = self._state()
+        real_save = botty_backend.save_json_file
+
+        def failing_save(path, data):
+            if Path(path) == botty_backend.HISTORY_FILE:
+                raise OSError("No space left on device")
+            return real_save(path, data)
+
+        with mock.patch.object(botty_backend, "reset_hermes_session",
+                               return_value=self._fail_reset()), \
+             mock.patch.object(botty_backend, "save_json_file", side_effect=failing_save):
+            res = botty_backend.clear_history()   # must not raise
+
+        self.assertFalse(res.get("ok"))
+        self.assertFalse(res.get("history_cleared"))
+        self.assertEqual(self._state(), snapshot)  # byte-for-byte semantics
+        self.assertTrue(botty_backend.CONTEXT_BRIDGE_FILE.exists())
+        msgs = self._history()["messages"]
+        self.assertEqual(len(msgs), 2)
+
+    def test_clear_history_corrupt_history_rev_never_escapes(self):
+        # Round-2 P2: old_rev is parsed BEFORE the arm and defensively — a
+        # corrupt rev must not raise after the guard is armed (CLI would
+        # print no JSON). Wiping replaces the file wholesale, so rev starts 0.
+        self._write_json(botty_backend.HISTORY_FILE,
+                         {"session_id": "botty-widget", "rev": "not-a-number",
+                          "messages": [{"role": "user", "content": "hi"}]})
+        with mock.patch.object(botty_backend, "reset_hermes_session",
+                               return_value=self._ok_reset()):
+            res = botty_backend.clear_history()   # must not raise
+        self.assertTrue(res.get("ok"), res)
+        hist = self._history()                    # wiped and parseable again
+        self.assertEqual(hist["messages"], [])
+        self.assertEqual(self._state().get("clear_epoch"), 8)
 
     def test_ask_guard_runs_after_ask_lock(self):
         # Ordering IS the race fix: a clear that starts between a pre-lock

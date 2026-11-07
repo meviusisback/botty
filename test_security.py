@@ -626,7 +626,14 @@ class TestSecurityHardening(unittest.TestCase):
             recorded.append(list(cmd))
             return _Dummy()
 
-        with mock.patch.object(subprocess, "Popen", side_effect=fake_popen):
+        with mock.patch.object(subprocess, "Popen", side_effect=fake_popen), \
+             mock.patch.object(
+                 botty_backend.shutil, "which",
+                 return_value="/usr/bin/omarchy-notification-send"):
+            # shutil.which pinned so the deterministic Popen branch runs on
+            # ANY host — without the binary the notify-send fallback dispatch
+            # lives in a listener thread using subprocess.run (round-2
+            # filesystem review: assertion was host-dependent/racy).
             for event in ("complete", "blocked", "error", "some-future-event"):
                 botty_backend.send_system_notification(
                     event, f"title {canary}", f"message {canary}", urgency="normal")

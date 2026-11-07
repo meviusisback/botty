@@ -1465,7 +1465,9 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: (promptInput && promptInput.activeFocus) || (newMemInput && newMemInput.activeFocus) || (modelSearchInput && modelSearchInput.activeFocus)
+      blocked: (promptInput && promptInput.activeFocus)
+        || (newMemLoader.item && newMemLoader.item.inputActiveFocus)
+        || (modelSearchLoader.item && modelSearchLoader.item.activeFocus)
 
       onMoveRequested: function(dx, dy) {
         if (root.currentView === "chat" && dy !== 0) {
@@ -1479,9 +1481,9 @@ Panel {
         if (root.currentView === "chat" && promptInput) {
           promptInput.forceActiveFocus()
           promptInput.text = promptInput.text + t
-        } else if (root.currentView === "settings" && modelSearchInput) {
-          modelSearchInput.forceActiveFocus()
-          modelSearchInput.text = modelSearchInput.text + t
+        } else if (root.currentView === "settings" && modelSearchLoader.item) {
+          modelSearchLoader.item.forceActiveFocus()
+          modelSearchLoader.item.text = modelSearchLoader.item.text + t
         }
       }
 
@@ -3351,33 +3353,43 @@ Panel {
             }
           }
 
-          // New Memory Input
-          RowLayout {
+          // New Memory Input — instantiated only while the Memories view is
+          // current, so a hidden view holds no native text input that the shell
+          // could hand a Wayland clipboard offer to.
+          Loader {
+            id: newMemLoader
             Layout.fillWidth: true
-            spacing: Style.space(6)
+            active: root.currentView === "memories"
+            sourceComponent: Component {
+              RowLayout {
+                anchors.fill: parent
+                spacing: Style.space(6)
+                readonly property bool inputActiveFocus: newMemInput.activeFocus
 
-            TextField {
-              id: newMemInput
-              implicitHeight: Style.space(32)
-              Layout.fillWidth: true
-              placeholderText: "Teach Botty a fact to remember permanently…"
-              onAccepted: {
-                if (text.trim()) {
-                  root.addMemoryNow(text, false)
-                  text = ""
+                TextField {
+                  id: newMemInput
+                  implicitHeight: Style.space(32)
+                  Layout.fillWidth: true
+                  placeholderText: "Teach Botty a fact to remember permanently…"
+                  onAccepted: {
+                    if (text.trim()) {
+                      root.addMemoryNow(text, false)
+                      text = ""
+                    }
+                  }
                 }
-              }
-            }
 
-            Button {
-              iconText: "󰄬"
-              text: "Remember"
-              implicitHeight: Style.space(32)
-              selected: true
-              onClicked: {
-                if (newMemInput.text.trim()) {
-                  root.addMemoryNow(newMemInput.text, false)
-                  newMemInput.text = ""
+                Button {
+                  iconText: "󰄬"
+                  text: "Remember"
+                  implicitHeight: Style.space(32)
+                  selected: true
+                  onClicked: {
+                    if (newMemInput.text.trim()) {
+                      root.addMemoryNow(newMemInput.text, false)
+                      newMemInput.text = ""
+                    }
+                  }
                 }
               }
             }
@@ -3717,14 +3729,21 @@ Panel {
                 Item { Layout.fillWidth: true }
               }
 
-              TextField {
-                id: modelSearchInput
-                implicitHeight: Style.space(32)
+              Loader {
+                id: modelSearchLoader
                 Layout.fillWidth: true
-                placeholderText: "🔍 Search models under " + settingsViewItem.currentProviderObj.name + "…"
-                font.pixelSize: Style.font.body
-                text: root.modelSearchFilter
-                onTextChanged: root.modelSearchFilter = text
+                active: root.currentView === "settings"
+                sourceComponent: Component {
+                  TextField {
+                    id: modelSearchInput
+                    anchors.fill: parent
+                    implicitHeight: Style.space(32)
+                    placeholderText: "🔍 Search models under " + settingsViewItem.currentProviderObj.name + "…"
+                    font.pixelSize: Style.font.body
+                    text: root.modelSearchFilter
+                    onTextChanged: root.modelSearchFilter = text
+                  }
+                }
               }
 
               ScrollView {

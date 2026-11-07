@@ -641,9 +641,16 @@ def run_bounded_process(
     try:
         if stdin_text is not None and proc.stdin:
             try:
-                proc.stdin.write(stdin_text)
-            except Exception:
-                pass
+                # Binary pipe: writing a str raises TypeError, which the bare
+                # except below used to swallow — silently delivering an EMPTY
+                # prompt to every stdin-based transport (claude -p, codex exec,
+                # hermes --query-file -). Encode explicitly; a failed write is
+                # logged instead of vanishing.
+                payload = (stdin_text.encode("utf-8")
+                           if isinstance(stdin_text, str) else stdin_text)
+                proc.stdin.write(payload)
+            except Exception as e:
+                append_botty_log(f"STDIN WRITE ERROR: {str(e)}")
             try:
                 proc.stdin.close()
             except Exception:

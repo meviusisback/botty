@@ -637,6 +637,20 @@ class TestSecurityHardening(unittest.TestCase):
         # The static detail line must actually be there for the real events.
         self.assertIn("Open the widget", flat)
 
+    def test_run_bounded_process_delivers_stdin_payload(self):
+        """Class 13 transport: stdin_text must actually reach the child over the
+        binary pipe. A str write raised TypeError and the old bare except
+        swallowed it, silently sending an EMPTY prompt to claude -p, codex exec
+        and hermes --query-file - (found by the filing gate's canary probe)."""
+        canary = "CANARY-stdin-delivery-9f3a71d2"
+        stub = Path(self.test_dir.name) / "echo_stdin.sh"
+        stub.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+        stub.chmod(0o755)
+        res = botty_backend.run_bounded_process([str(stub)], stdin_text=canary,
+                                                 timeout_s=10)
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("stdout", "").strip(), canary)
+
     def test_bypass_requires_a_real_proposal_flag(self):
         """R5: truthiness made `sandbox_request: "false"` or `1` approvable, so any
         assistant message could be executed with --yolo. No test covered the three

@@ -3359,7 +3359,7 @@ Panel {
           Loader {
             id: newMemLoader
             Layout.fillWidth: true
-            active: root.currentView === "memories"
+            active: root.opened && root.currentView === "memories"
             sourceComponent: Component {
               RowLayout {
                 anchors.fill: parent
@@ -3732,7 +3732,7 @@ Panel {
               Loader {
                 id: modelSearchLoader
                 Layout.fillWidth: true
-                active: root.currentView === "settings"
+                active: root.opened && root.currentView === "settings"
                 sourceComponent: Component {
                   TextField {
                     id: modelSearchInput

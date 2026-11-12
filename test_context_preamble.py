@@ -172,7 +172,12 @@ class TestContextPreamble(unittest.TestCase):
 
     def test_unrestricted_mode_line_when_sandbox_is_off(self):
         prompt = self._run_ask_capture(sandboxed=False)
-        self.assertIn("[MODE: UNRESTRICTED", prompt)
+        # Round 4: a Sandbox-Mode-off run carries no --yolo, so the mode line must
+        # NOT promise ungated writes; it must name the engine gate and the approval
+        # path instead.
+        self.assertIn("[MODE: UNSANDBOXED", prompt)
+        self.assertNotIn("are not gated", prompt)
+        self.assertIn("can come back as a denial", prompt)
         self.assertNotIn("[MODE: SANDBOXED", prompt)
         # Sandbox Mode off is not an approval, and the line must not say it is.
         self.assertNotIn("the user approved execution", prompt)

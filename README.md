@@ -20,7 +20,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 | Read | Decide | Delegate |
 |---|---|---|
 | Ambient Hyprland window capture attached as visual context | Status-aware bar icon: ready, thinking, waiting, error | Hermes, OMP, Claude Code or Codex engines, switchable in Settings |
-| Universal `+` attachments: code, docs, media, clipboard screenshots | Searchable model catalog (on the Hermes engine, only providers with a key) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
+| Universal `+` attachments: code, docs, media, clipboard screenshots | Searchable model catalog (on the Hermes engine: providers named in your config keys, the provider in use, and `ollama` when configured) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
 | Persistent memory tab with single-click deletion | Voice dictation via local Whisper (`voxtype`) | Desktop automation actions: terminal, files, Hyprland, system apps |
 
 ## What it does
@@ -118,10 +118,11 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 
 | Layer | Guarantee |
 |---|---|
-| Prompt transport | Prompts travel via stdin or owner-only files (`0600`/`0700`), never in process `argv` |
+| Prompt transport | Everything the widget sends travels via stdin or an owner-only file (`0600`/`0700`), never in process `argv` |
 | Learning | Compaction output is staged as proposals you approve one by one — nothing becomes memory or skill without review |
 | Rendering | Agent text is plain text (no markdown/HTML), so crafted answers can't trigger remote loads or spoofed chrome |
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
+| Manual CLI | The shell verbs still take their payload as positional arguments (`ask QUERY`, `copy TEXT`, `add-memory TEXT`, `create-skill ...`), so a hand-typed invocation is visible in `ps`; the widget never uses those forms |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
 | Non-Hermes engines | Refused outright while Sandbox Mode is on; with it off they run under their own permission models |
 | Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |

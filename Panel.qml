@@ -617,7 +617,8 @@ Panel {
       root.releasePromptFocus()
     }
   }
-  readonly property string bottyDataDir: (Quickshell.env("HOME") || "/home/alberto") + "/.local/share/botty"
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+  readonly property string bottyDataDir: homeDir ? homeDir + "/.local/share/botty" : ""
 
   FileView {
     id: statusFileView
@@ -3925,7 +3926,7 @@ Panel {
 
                     Text {
                       textFormat: Text.PlainText
-                      text: root.sandboxMode ? "Sandboxed Write Protection: ACTIVE" : "Sandboxed Write Protection: UNRESTRICTED"
+                      text: root.sandboxMode ? "Sandboxed Write Protection: ACTIVE" : "Sandboxed Write Protection: ENGINE GATE"
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       font.bold: true
@@ -3940,7 +3941,7 @@ Panel {
                         ? (root.hermesEnforcement === "enforced"
                             ? "Hermes engine: writes technically denied until you approve. Full read access active."
                             : "WARNING: sandbox NOT enforced — your Hermes profile config weakens it (" + root.hermesEnforcement + ")")
-                        : "Agent can directly modify files & execute workstation commands."
+                        : "No approval card is shown and no bypass is granted: the Hermes engine still applies its own gate, so a dangerous write can be denied. A denied action can still be approved through the card."
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
                       color: root.sandboxMode && root.hermesEnforcement !== "enforced" ? "#F59E0B" : root.dim
@@ -3950,7 +3951,7 @@ Panel {
                   }
 
                   Button {
-                    text: root.sandboxMode ? "Disable (Unlock)" : "Enable (Lock)"
+                    text: root.sandboxMode ? "Disable Sandbox Mode" : "Enable (Lock)"
                     iconText: root.sandboxMode ? "󰒄" : "󰒃"
                     implicitHeight: Style.space(32)
                     fontSize: Style.space(10)

@@ -35,7 +35,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 
 ## Install
 
-1. Create the Hermes profile Botty drives (the engine shows as unavailable without it):
+1. Create the Hermes profile Botty drives — the engine appears once the `hermes` binary is on `PATH`, but asks fail without that profile, so create it before the first request:
 
 ```bash
 hermes profile create botty
@@ -61,7 +61,7 @@ omarchy restart shell
 | Key | Does |
 |---|---|
 | `SUPER + A` | Toggle Botty — opens/closes the widget and auto-focuses the chat input |
-| `SUPER + SHIFT + A` | Ask with window context — captures the active window, attaches it, opens Botty focused |
+| `SUPER + SHIFT + A` | Ask with window context — attaches the active window's app, title and folder as text (no screenshot), opens Botty focused |
 
 Bindings (add to `~/.config/hypr/bindings.lua`):
 
@@ -114,7 +114,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 
 ## How it works
 
-**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is the human-approved proposal itself.
+**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window — and that enforcement depends on the profile's own approval gate (`approvals.single_query_mode`, `approvals.mode`, `command_allowlist`); when that config weakens the gate, Botty says so instead of claiming a boundary it cannot enforce.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is the human-approved proposal itself.
 
 | Layer | Guarantee |
 |---|---|
@@ -124,6 +124,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
 | Non-Hermes engines | Refused outright while Sandbox Mode is on; with it off they run under their own permission models |
+| Sandbox Mode off | Every Hermes turn is launched with `--yolo` and is not gated: there is no approval card in that mode |
 
 ## Docs
 

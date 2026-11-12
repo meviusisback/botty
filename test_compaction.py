@@ -226,7 +226,8 @@ class TestCompactionAndDistillation(unittest.TestCase):
         skill_file = self.hermes_skills_dir / "hyprland-monitors" / "SKILL.md"
         self.assertTrue(skill_file.exists())
         content = skill_file.read_text(encoding="utf-8")
-        self.assertIn("name: hyprland-monitors", content)
+        # name is quoted so YAML keeps it a string ("yes"/"on"/"123" are not)
+        self.assertIn('name: "hyprland-monitors"', content)
         self.assertIn("hyprctl monitors", content)
 
         skills = botty_backend.get_skills()

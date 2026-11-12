@@ -61,6 +61,11 @@ class TestSecurityHardening(unittest.TestCase):
         botty_backend.COMPACTION_STATE_FILE = self.data_dir / "compaction_state.json"
         botty_backend.VOICE_PID_FILE = self.data_dir / "voice.pid"
         botty_backend.SCREENSHOT_DIR = self.data_dir / "captures"
+        # The profile config is written by set_model(): leaving it pointed at the
+        # live profile made running the suite rewrite the user's real model
+        # setting (test_security round-2 review).
+        self.orig["HERMES_CONFIG_FILE"] = botty_backend.HERMES_CONFIG_FILE
+        botty_backend.HERMES_CONFIG_FILE = self.data_dir / "profile_config.yaml"
 
     def tearDown(self):
         for name, val in self.orig.items():
@@ -1506,6 +1511,33 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertEqual(len(left), botty_backend.MAX_CAPTURES)
         self.assertNotIn(made[0], left)
         self.assertIn(made[-1], left)
+
+    def test_flow_style_approvals_config_is_not_reported_as_enforced(self):
+        # A valid YAML flow mapping switched the gate off; the line-anchored
+        # regexes missed it and the UI claimed "enforced".
+        cfg = botty_backend.HERMES_CONFIG_FILE
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("approvals: {single_query_mode: approve, mode: off}\n", encoding="utf-8")
+        res = botty_backend.hermes_approval_enforcement()
+        self.assertNotEqual(res["effective"], "enforced", res)
+
+    def test_unparsable_approvals_config_is_unknown_never_enforced(self):
+        # With a real YAML loader absent and a flow-style mapping present, the
+        # honest answer is "unknown"; claiming "enforced" was the finding.
+        cfg = botty_backend.HERMES_CONFIG_FILE
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text("approvals: {single_query_mode: deny}\n", encoding="utf-8")
+        res = botty_backend.hermes_approval_enforcement()
+        self.assertIn(res["effective"],
+                      ("enforced", "unknown: approvals config could not be parsed"),
+                      res)
+
+    def test_skill_frontmatter_survives_control_characters(self):
+        res = botty_backend.create_skill("yes", "has a DEL \x7f and C1 \u0086 char", "body")
+        self.assertTrue(res["ok"], res)
+        text = (Path(res["path"]) / "SKILL.md").read_text(encoding="utf-8")
+        self.assertNotIn("\x7f", text)
+        self.assertIn('name: "yes"', text)
 
     def test_mode_line_does_not_claim_an_approval_that_never_happened(self):
         sandboxed = botty_backend.build_mode_line(True)

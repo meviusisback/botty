@@ -424,9 +424,9 @@ Panel {
     root.situationData = null
     root.fetchHistory()
     root.scrollChatToEnd()
-    Qt.callLater(function() { 
+    Qt.callLater(function() {
       root.scrollChatToEnd()
-      if (promptInput) promptInput.forceActiveFocus() 
+      root.focusPrompt()
     })
   }
 
@@ -440,6 +440,16 @@ Panel {
     clipProc.running = true
   }
 
+  // The only way the composer may take the keyboard. The chat view is hidden,
+  // not destroyed, so an unguarded forceActiveFocus() from any other view (or
+  // from a closed popup) silently hands the keyboard to an input the user
+  // cannot see — which happened from Clear Chat, dictation, sendQuery and every
+  // IPC verb.
+  function focusPrompt() {
+    if (!root.opened || root.currentView !== "chat") return
+    if (promptInput) promptInput.forceActiveFocus()
+  }
+
   function clearChat() {
     // The backend refuses to clear while a request is live (an in-flight answer
     // would resurrect the session). Do not fire a command that will be refused
@@ -448,7 +458,7 @@ Panel {
     clearProc.command = ["python3", root.scriptPath(), "clear"]
     clearProc.running = true
     root.lastMessageCount = 0
-    Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+    Qt.callLater(root.focusPrompt)
   }
   function selectEngine(engineId) {
     root.rawStatus.active_engine = engineId
@@ -501,7 +511,7 @@ Panel {
     copyProc.command = ["python3", root.scriptPath(), "copy", "--text-stdin", "--stdin-end", tok]
     copyProc.running = true
     if (root.currentView === "chat") {
-      Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+      Qt.callLater(function() { root.focusPrompt() })
     }
   }
 
@@ -561,7 +571,7 @@ Panel {
     repeat: false
     onTriggered: {
       if (root.opened && root.currentView === "chat" && promptInput) {
-        promptInput.forceActiveFocus()
+        root.focusPrompt()
       }
     }
   }
@@ -571,11 +581,7 @@ Panel {
       root.unreadCount = 0
       root.lastReadMessageCount = (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
       focusTimer.start()
-      Qt.callLater(function() {
-        if (root.currentView === "chat" && promptInput) {
-          promptInput.forceActiveFocus()
-        }
-      })
+      Qt.callLater(function() { root.focusPrompt() })
     } else if (promptInput) {
       // Closing hides the window but leaves the prompt alive; drop its focus so
       // a closed popup never holds a keyboard grab through the bar.
@@ -586,16 +592,14 @@ Panel {
   onIsProcessingChanged: {
     if (!isProcessing && root.opened && root.currentView === "chat" && promptInput) {
       focusTimer.start()
-      Qt.callLater(function() { promptInput.forceActiveFocus() })
+      Qt.callLater(function() { root.focusPrompt() })
     }
   }
 
   onCurrentViewChanged: {
     if (currentView === "chat") {
       focusTimer.start()
-      Qt.callLater(function() {
-        if (promptInput) promptInput.forceActiveFocus()
-      })
+      Qt.callLater(function() { root.focusPrompt() })
     } else if (promptInput) {
       // Leaving the chat view hides it but does not destroy it, and focus
       // survives on the hidden prompt; drop it so typing reaches the visible
@@ -1084,7 +1088,7 @@ Panel {
           if (data && data.ok && data.text) {
             var current = promptInput.text.trim()
             promptInput.text = current.length > 0 ? (current + " " + data.text) : data.text
-            promptInput.forceActiveFocus()
+            root.focusPrompt()
           }
         } catch (e) {}
       }
@@ -1249,12 +1253,14 @@ Panel {
   IpcHandler {
     enabled: true
     target: root.ipcTarget
-    function open(): void { root.open(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
+    function open(): void { root.open(); focusTimer.start(); Qt.callLater(function() { root.focusPrompt() }) }
     function close(): void { root.close() }
-    function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
+    function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { root.focusPrompt() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
-    function captureAndAsk(query: string): void { root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
+    // The sibling verbs switch to the chat view first; without it the query ran
+    // behind whatever view was current and the answer was never shown.
+    function ask(query: string): void { root.currentView = "chat"; root.open(); focusTimer.start(); root.sendQuery(query, "", false, false) }
+    function captureAndAsk(query: string): void { root.currentView = "chat"; root.open(); focusTimer.start(); root.sendQuery(query, "", false, true) }
     function situationContext(): void {
       root.currentView = "chat"
       if (root.opened && root.situationContextEnabled) {
@@ -1266,7 +1272,7 @@ Panel {
           root.toggle()
         }
         focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+        Qt.callLater(function() { root.focusPrompt() })
       }
     }
     function captureWindowContext(): void {
@@ -1284,7 +1290,7 @@ Panel {
           root.toggle()
         }
         focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+        Qt.callLater(function() { root.focusPrompt() })
       }
     }
     function attach(path: string): void { root.attachFileNow(path) }
@@ -1294,12 +1300,12 @@ Panel {
   IpcHandler {
     enabled: true
     target: "botty"
-    function open(): void { if (!root.opened) root.toggle(); focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) }
+    function open(): void { if (!root.opened) root.toggle(); focusTimer.start(); Qt.callLater(function() { root.focusPrompt() }) }
     function close(): void { if (root.opened) root.toggle() }
-    function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() }) } }
+    function toggle(): void { root.toggle(); if (root.opened) { focusTimer.start(); Qt.callLater(function() { root.focusPrompt() }) } }
     function refresh(): void { root.fetchStatus(); root.fetchHistory() }
-    function ask(query: string): void { if (!root.opened) root.toggle(); focusTimer.start(); root.sendQuery(query, "", false, false) }
-    function captureAndAsk(query: string): void { if (!root.opened) root.toggle(); focusTimer.start(); root.sendQuery(query, "", false, true) }
+    function ask(query: string): void { root.currentView = "chat"; if (!root.opened) root.toggle(); focusTimer.start(); root.sendQuery(query, "", false, false) }
+    function captureAndAsk(query: string): void { root.currentView = "chat"; if (!root.opened) root.toggle(); focusTimer.start(); root.sendQuery(query, "", false, true) }
     function situationContext(): void {
       root.currentView = "chat"
       if (root.opened && root.situationContextEnabled) {
@@ -1311,7 +1317,7 @@ Panel {
           root.toggle()
         }
         focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+        Qt.callLater(function() { root.focusPrompt() })
       }
     }
     function captureWindowContext(): void {
@@ -1329,7 +1335,7 @@ Panel {
           root.toggle()
         }
         focusTimer.start()
-        Qt.callLater(function() { if (promptInput) promptInput.forceActiveFocus() })
+        Qt.callLater(function() { root.focusPrompt() })
       }
     }
     function attach(path: string): void { root.attachFileNow(path) }
@@ -1411,8 +1417,10 @@ Panel {
         text: Model.statusIcon(root.rawStatus.state)
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
-        color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
-        opacity: root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
+        color: root.showStatusInBar
+          ? Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
+          : root.foreground
+        opacity: root.showStatusInBar && root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
       }
 
       Text {
@@ -1427,7 +1435,7 @@ Panel {
       }
 
       Rectangle {
-        visible: (!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error"
+        visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error")
         width: Style.space(6)
         height: Style.space(6)
         radius: width / 2
@@ -1475,7 +1483,7 @@ Panel {
         focusTimer.start()
         Qt.callLater(function() {
           if (root.currentView === "chat" && promptInput) {
-            promptInput.forceActiveFocus()
+            root.focusPrompt()
           }
         })
       }
@@ -1504,7 +1512,7 @@ Panel {
 
       onTextKey: function(t) {
         if (root.currentView === "chat" && promptInput) {
-          promptInput.forceActiveFocus()
+          root.focusPrompt()
           promptInput.text = promptInput.text + t
         } else if (root.currentView === "settings" && modelSearchLoader.item) {
           modelSearchLoader.item.forceActiveFocus()
@@ -1705,7 +1713,7 @@ Panel {
         MouseArea {
           anchors.fill: parent
           z: -1
-          onClicked: if (promptInput) promptInput.forceActiveFocus()
+          onClicked: root.focusPrompt()
         }
         ColumnLayout {
           anchors.fill: parent
@@ -1760,25 +1768,25 @@ Panel {
                 if (event.key === Qt.Key_Up) {
                   root.scrollChat(-1)
                   event.accepted = true
-                  if (promptInput) promptInput.forceActiveFocus()
+                  root.focusPrompt()
                   return
                 }
                 if (event.key === Qt.Key_Down) {
                   root.scrollChat(1)
                   event.accepted = true
-                  if (promptInput) promptInput.forceActiveFocus()
+                  root.focusPrompt()
                   return
                 }
                 if (event.key === Qt.Key_PageUp) {
                   root.scrollChat(-4)
                   event.accepted = true
-                  if (promptInput) promptInput.forceActiveFocus()
+                  root.focusPrompt()
                   return
                 }
                 if (event.key === Qt.Key_PageDown) {
                   root.scrollChat(4)
                   event.accepted = true
-                  if (promptInput) promptInput.forceActiveFocus()
+                  root.focusPrompt()
                   return
                 }
                 if (event.key === Qt.Key_Escape) {
@@ -1787,7 +1795,7 @@ Panel {
                   return
                 }
                 if (event.text && event.text.length > 0 && promptInput && !promptInput.activeFocus) {
-                  promptInput.forceActiveFocus()
+                  root.focusPrompt()
                   promptInput.text = promptInput.text + event.text
                   event.accepted = true
                   return
@@ -2211,7 +2219,7 @@ Panel {
                               return
                             }
                             if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
-                              promptInput.forceActiveFocus()
+                              root.focusPrompt()
                               promptInput.text = promptInput.text + event.text
                               event.accepted = true
                               return
@@ -2316,7 +2324,7 @@ Panel {
                                   return
                                 }
                                 if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
-                                  promptInput.forceActiveFocus()
+                                  root.focusPrompt()
                                   promptInput.text = promptInput.text + event.text
                                   event.accepted = true
                                   return
@@ -2391,7 +2399,7 @@ Panel {
                           return
                         }
                         if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
-                          promptInput.forceActiveFocus()
+                          root.focusPrompt()
                           promptInput.text = promptInput.text + event.text
                           event.accepted = true
                           return
@@ -2622,7 +2630,7 @@ Panel {
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
                   root.scrollChatToEnd()
-                  if (promptInput) promptInput.forceActiveFocus()
+                  root.focusPrompt()
                 }
               }
             }

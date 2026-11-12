@@ -1171,13 +1171,42 @@ def hermes_approval_enforcement() -> Dict[str, Any]:
     except Exception:
         return result
 
+    # Prefer a real YAML parse: the line-anchored regexes below miss valid
+    # flow-style configs such as `approvals: {single_query_mode: deny, mode: off}`
+    # and then reported "enforced" for a profile that has the gate switched off.
+    approvals = None
+    parsed_ok = False
+    try:
+        import yaml  # optional: Hermes ships it, but never require it
+
+        doc = yaml.safe_load(text) or {}
+        approvals = doc.get("approvals") if isinstance(doc, dict) else None
+        parsed_ok = isinstance(approvals, dict)
+        if approvals is None and isinstance(doc, dict):
+            parsed_ok = True  # no approvals block at all -> Hermes defaults
+    except Exception:
+        parsed_ok = False
+
     def _yamlish_value(pattern: str) -> Optional[str]:
         m = re.search(pattern, text, re.IGNORECASE)
         return m.group(1).strip().strip("'\"") if m else None
 
-    single_q = _yamlish_value(r"single_query_mode\s*:\s*([^\s#]+)")
-    mode = _yamlish_value(r"(?m)^\s*mode\s*:\s*([^\s#]+)")
-    allow = _yamlish_value(r"command_allowlist\s*:\s*(\[[^\]]*\]|[^\s#]+)")
+    if parsed_ok:
+        single_q = approvals.get("single_query_mode") if isinstance(approvals, dict) else None
+        mode = approvals.get("mode") if isinstance(approvals, dict) else None
+        allow = approvals.get("command_allowlist") if isinstance(approvals, dict) else None
+        single_q = str(single_q) if single_q is not None else None
+        mode = str(mode) if mode is not None else None
+        allow = str(allow) if allow is not None else None
+    elif re.search(r"(?m)^\s*approvals\s*:\s*\{", text):
+        # A flow-style approvals mapping we cannot parse: the honest answer is
+        # "not verified", never "enforced".
+        result["effective"] = "unknown: approvals config could not be parsed"
+        return result
+    else:
+        single_q = _yamlish_value(r"single_query_mode\s*:\s*([^\s#]+)")
+        mode = _yamlish_value(r"(?m)^\s*mode\s*:\s*([^\s#]+)")
+        allow = _yamlish_value(r"command_allowlist\s*:\s*(\[[^\]]*\]|[^\s#]+)")
 
     weakeners = []
     if single_q and single_q.lower() in ("approve", "off", "allow", "yes"):
@@ -3187,11 +3216,13 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             ]
         if not is_resume:
             cmd.extend(["--max-turns", "15", "--run-budget", "200"])
-        # Security: --yolo bypasses Hermes's dangerous-command approval gate. It is added
-        # ONLY on the explicitly user-approved bypass run (is_sandboxed False, reached only
-        # via the Approve button on a sandbox permission card). Sandboxed runs never carry
-        # it, so Hermes's single-query approval gate (approvals.single_query_mode, default
-        # deny) technically blocks writes/state changes regardless of prompt content.
+        # Security: --yolo bypasses Hermes's dangerous-command approval gate. It is
+        # added when the run is not sandboxed, which covers BOTH the card-approved
+        # bypass run and the case where the user turned Sandbox Mode off entirely
+        # (approved_scope then stays empty: no card was shown). Sandboxed runs never
+        # carry it, so Hermes's single-query approval gate (approvals.single_query_mode,
+        # default deny) blocks writes/state changes regardless of prompt content.
+        # The README states the sandbox-off consequence in the same words.
         if not is_sandboxed:
             cmd.append("--yolo")
         # Never on an approved run: the proposal is the whole prompt.
@@ -3955,7 +3986,10 @@ def _yaml_quoted(value: str, max_len: int) -> str:
     (\\", \\n, \\\\, \\uXXXX), so a description carrying a quote or a newline can
     no longer close the scalar and inject extra frontmatter keys.
     """
-    return json.dumps((value or "").replace("\r", " ").strip()[:max_len], ensure_ascii=False)
+    # ensure_ascii=True: json.dumps otherwise emits DEL/C1 control characters
+    # literally, which a YAML double-quoted scalar forbids (the file would not
+    # parse at all).
+    return json.dumps((value or "").replace("\r", " ").strip()[:max_len], ensure_ascii=True)
 
 
 def create_skill(name: str, description: str, instructions: str) -> Dict[str, Any]:
@@ -3968,7 +4002,7 @@ def create_skill(name: str, description: str, instructions: str) -> Dict[str, An
     
     skill_file = skill_dir / "SKILL.md"
     body = f"""---
-name: {clean_name}
+name: {json.dumps(clean_name)}
 description: {_yaml_quoted(description, MAX_PROPOSAL_SKILL_DESC_CHARS)}
 ---
 
@@ -4036,7 +4070,7 @@ def _write_approved_skill(name: str, description: str, instructions: str) -> Dic
 
     skill_file = skill_dir / "SKILL.md"
     body = f"""---
-name: {clean_name}
+name: {json.dumps(clean_name)}
 description: {_yaml_quoted(description, MAX_PROPOSAL_SKILL_DESC_CHARS)}
 ---
 

@@ -2522,7 +2522,10 @@ Panel {
                         }
 
                         Text {
-                          text: "Writes are technically blocked while Sandbox Mode is active. Approving executes ONLY the proposed changes listed above — the agent may not take new actions. Verify every listed path and command yourself before approving."
+                          text: (root.sandboxMode
+                            ? "Writes are technically blocked while Sandbox Mode is active. "
+                            : "Sandbox Mode is off, so the engine's own gate is what refused this write. ")
+                            + "Approving executes ONLY the proposed changes listed above — the agent may not take new actions. Verify every listed path and command yourself before approving."
                           textFormat: Text.PlainText
                           font.family: root.fontFamily
                           font.pixelSize: Style.space(10)
@@ -2732,7 +2735,7 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Permission Required for Sandbox Bypass"
+                    text: root.sandboxMode ? "Permission Required for Sandbox Bypass" : "Permission Required for a Write"
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     font.bold: true
@@ -2741,7 +2744,9 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: "Botty halted file/system writes. Choose an action below. Verify every proposed path and command before approving."
+                    text: root.sandboxMode
+                      ? "Botty halted file/system writes. Choose an action below. Verify every proposed path and command before approving."
+                      : "The agent asked for a write it is not allowed to perform by itself. Approving runs one explicit bypass for the proposed changes only; verify every path and command first."
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
                     color: root.foreground
@@ -2970,7 +2975,7 @@ Panel {
                   ? (root.hermesEnforcement === "enforced"
                       ? "Sandbox: ACTIVE — writes technically denied until you approve (Hermes approval gate)"
                       : "Sandbox: ACTIVE but NOT enforced — your Hermes profile config weakens it (" + root.hermesEnforcement + ")")
-                  : "Sandbox: OFF (unrestricted writes — click to enable)"
+                  : "Sandbox: OFF — no approval card is shown and no bypass is granted; the Hermes engine still applies its own gate, so a dangerous write can be denied (click to enable Sandbox Mode)"
                 selected: root.sandboxMode
                 implicitHeight: Style.space(32)
                 implicitWidth: Style.space(32)

@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1586,3 +1587,52 @@ class TestSecurityHardening(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRoundSixHardening(unittest.TestCase):
+    """Findings from the fifth reviewer round, pinned."""
+
+    def test_model_block_create_branch_quotes_a_yaml_indicator(self):
+        text = botty_backend._update_hermes_config_model("keep: 1\n", "@cf/meta/llama-3-8b", "cloudflare")
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("yaml not installed")
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["model"]["default"], "@cf/meta/llama-3-8b")
+        self.assertEqual(doc["model"]["provider"], "cloudflare")
+
+    def test_yaml_scalar_round_trips_an_astral_code_point(self):
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("yaml not installed")
+        value = "x\U0001F600y"
+        self.assertEqual(yaml.safe_load("k: " + botty_backend._yaml_scalar(value))["k"], value)
+
+    def test_engine_ids_with_a_leading_yaml_indicator_are_refused(self):
+        for bad in ("@cf/meta/x", "~", "#tagged", "*anchor"):
+            self.assertFalse(botty_backend._valid_engine_id(bad), bad)
+        self.assertTrue(botty_backend._valid_engine_id("claude-sonnet-4"))
+
+    def test_closed_pipes_stay_inside_the_deadline(self):
+        # A child that closes stdout and stderr and keeps running used to get 5 s of
+        # its own after the budget, reported as an ordinary exit code.
+        started = time.monotonic()
+        res = botty_backend.run_bounded_process(
+            [sys.executable, "-c",
+             "import os, time; os.close(1); os.close(2); time.sleep(30)"],
+            timeout_s=1.0)
+        self.assertLess(time.monotonic() - started, 2.5)
+        self.assertTrue(res.get("timed_out"), res)
+
+    def test_private_file_is_owner_only_at_creation(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            target = os.path.join(d, "prompt.txt")
+            old = os.umask(0o000)
+            try:
+                botty_backend._write_private_file(Path(target), "secret")
+            finally:
+                os.umask(old)
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0o600)

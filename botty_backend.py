@@ -786,8 +786,12 @@ def run_bounded_process(
                 break
 
         try:
-            rc = proc.wait(timeout=5)
+            # Inside the deadline: a child that closed both pipes used to get 5 s of
+            # its own past the budget, and the timeout was reported as an ordinary
+            # exit code.
+            rc = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except Exception:
+            timed_out = True
             _kill_process_group(proc)
             rc = proc.wait() if proc.poll() is None else proc.returncode
         if stdin_error and not "".join(out_chunks).strip():
@@ -1563,7 +1567,10 @@ def _yaml_scalar(value: str) -> str:
     unsafe_start = set("~@*&!%|>?,-[]{}\\#`")
     if _YAML_PLAIN_SAFE.match(text) and text[0] not in unsafe_start:
         return text
-    return json.dumps(text)
+    # Not json.dumps: it writes astral code points as a UTF-16 surrogate pair, which
+    # yaml.safe_load reads back as two lone surrogates. _yaml_quoted() escapes the
+    # same characters the way round 4 already fixed for the skill frontmatter.
+    return _yaml_quoted(text, 400)
 
 
 def _update_hermes_config_model(content: str, model_id: str, provider_id: str) -> str:
@@ -1576,13 +1583,13 @@ def _update_hermes_config_model(content: str, model_id: str, provider_id: str) -
             model_idx = i
             model_indent = len(line) - len(line.lstrip())
             break
+    model_id = _yaml_scalar(model_id)
+    provider_id = _yaml_scalar(provider_id)
     if model_idx is None:
         lines.append("model:")
         lines.append(f"  default: {model_id}")
         lines.append(f"  provider: {provider_id}")
         return "\n".join(lines) + "\n"
-    model_id = _yaml_scalar(model_id)
-    provider_id = _yaml_scalar(provider_id)
     base_indent = " " * (model_indent + 2)
     found_default = False
     found_provider = False
@@ -1872,7 +1879,7 @@ def get_hermes_task_traces(session_id: Optional[str] = None, limit: int = 20) ->
                             parsed_tool_calls.append({
                                 "id": tc.get("id", str(m_id)),
                                 "name": fn_name,
-                                "arguments": fn_args
+                                "arguments": _redact_obj(fn_args)
                             })
                 except Exception:
                     pass
@@ -3326,8 +3333,7 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         # omp's documented file transport: MESSAGES prefixed with @ read the file,
         # so argv carries only an owner-only path, never prompt/attachment text.
         omp_prompt_file = BOTTY_DATA_DIR / "current_omp_prompt.txt"
-        omp_prompt_file.write_text(final_prompt, encoding="utf-8")
-        secure_file_permissions(omp_prompt_file)
+        _write_private_file(omp_prompt_file, final_prompt)
         cmd.extend(["--", "@" + str(omp_prompt_file)])
     elif engine == "claude":
         cmd = ["claude", "-p", "--append-system-prompt", BOTTY_AGENT_DIRECTIVE]
@@ -3521,6 +3527,10 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             elif "Created skill" in line or "Skill installed" in line:
                 actions.append({"type": "skill", "text": line.strip()})
 
+        if output_truncated and cleaned_response:
+            # The cap is 2 MB: an answer cut there must say so, not look complete.
+            cleaned_response += ("\n\n[Output truncated: the engine produced more than "
+                                 + f"{AGENT_OUTPUT_CAP_CHARS:,} characters.]")
         raw_output_saved = redact_secrets(cap_text(stdout_data or "", RAW_OUTPUT_PERSIST_CHARS))
         append_botty_log(f"RESPONSE [{engine}/{selected_model}] ({t_duration:.1f}s): {cleaned_response[:140]}..." + (" [OUTPUT TRUNCATED]" if output_truncated else ""))
 
@@ -3703,7 +3713,7 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
         if HERMES_CONFIG_FILE.exists():
             try:
                 cfg_text = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
-                if "ollama:" in cfg_text:
+                if re.search(r"(?m)^\s*ollama\s*:", cfg_text):
                     active_provider_ids.add("ollama")
             except Exception:
                 pass
@@ -3885,7 +3895,13 @@ _ENGINE_ID_RE = re.compile(r"^[A-Za-z0-9._:/@+~#-]{1,120}$")
 def _valid_engine_id(value: str) -> bool:
     """Model/provider ids are written into YAML config by string substitution, so
     they must not be able to inject keys or newlines (B6)."""
-    return bool(_ENGINE_ID_RE.match(str(value or "")))
+    text = str(value or "")
+    if not _ENGINE_ID_RE.match(text):
+        return False
+    # A leading YAML indicator is refused as well: quoting makes it survive, but an
+    # id that needs quoting is not an id, and refusing keeps the write path from
+    # depending on the quoting being right.
+    return text[:1] not in "~@#*&!%|>?,-[]{}`'\""
 
 
 def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Optional[str] = None) -> Dict[str, Any]:

@@ -1533,11 +1533,46 @@ class TestSecurityHardening(unittest.TestCase):
                       res)
 
     def test_skill_frontmatter_survives_control_characters(self):
-        res = botty_backend.create_skill("yes", "has a DEL \x7f and C1 \u0086 char", "body")
+        res = botty_backend.create_skill("yes", "has a DEL \x7f and C1 \u0086 char \U0001F43C", "body")
         self.assertTrue(res["ok"], res)
         text = (Path(res["path"]) / "SKILL.md").read_text(encoding="utf-8")
         self.assertNotIn("\x7f", text)
         self.assertIn('name: "yes"', text)
+        # The scalar must load back as the original string, emoji included: an
+        # astral character escaped as a UTF-16 surrogate pair loads as lone
+        # surrogates and cannot be encoded.
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("PyYAML not installed")
+        front = text.split("---")[1]
+        loaded = yaml.safe_load(front)
+        self.assertEqual(loaded["description"], "has a DEL \x7f and C1 \u0086 char \U0001F43C")
+        self.assertEqual(loaded["name"], "yes")
+
+    def test_unquoted_yaml_booleans_are_read_as_the_weakening_they_are(self):
+        # PyYAML (YAML 1.1) turns an unquoted off/no into False; stringifying it
+        # made "mode: off" - the plainest weakening - report "enforced".
+        cfg = botty_backend.HERMES_CONFIG_FILE
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        for text in ("approvals:\n  mode: off\n",
+                     "approvals: {mode: off}\n",
+                     "approvals:\n  mode: off\n  single_query_mode: deny\n",
+                     "approvals:\n  single_query_mode: approve\n"):
+            cfg.write_text(text, encoding="utf-8")
+            res = botty_backend.hermes_approval_enforcement()
+            self.assertNotEqual(res["effective"], "enforced", (text, res))
+
+    def test_sandbox_off_directive_does_not_claim_an_approval(self):
+        # The directive and the mode line must tell the same story: with Sandbox
+        # Mode simply off nobody approved anything.
+        sandbox_off = botty_backend.build_sandbox_directive(False, approved_run=False)
+        self.assertNotIn("EXPLICIT USER APPROVAL", sandbox_off)
+        self.assertIn("Nobody approved", sandbox_off)
+        approved = botty_backend.build_sandbox_directive(False, approved_run=True)
+        self.assertIn("EXPLICIT USER APPROVAL", approved)
+        self.assertIn("SANDBOXED WRITE MODE", botty_backend.build_sandbox_directive(True))
+
 
     def test_mode_line_does_not_claim_an_approval_that_never_happened(self):
         sandboxed = botty_backend.build_mode_line(True)

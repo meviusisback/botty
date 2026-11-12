@@ -450,6 +450,17 @@ Panel {
     if (promptInput) promptInput.forceActiveFocus()
   }
 
+  // Qt keeps focus on an item whose ancestor was hidden, and clearing it without
+  // naming a new target leaves the popup with NO focus item, so Escape and the
+  // panel keys stop working. Hand the keyboard to the catcher.
+  function releasePromptFocus() {
+    if (promptInput) promptInput.focus = false
+    if (typeof textBlock !== "undefined" && textBlock) textBlock.focus = false
+    if (typeof codeBlock !== "undefined" && codeBlock) codeBlock.focus = false
+    if (typeof fallbackTextBlock !== "undefined" && fallbackTextBlock) fallbackTextBlock.focus = false
+    if (root.opened && keyCatcher) keyCatcher.forceActiveFocus()
+  }
+
   function clearChat() {
     // The backend refuses to clear while a request is live (an in-flight answer
     // would resurrect the session). Do not fire a command that will be refused
@@ -578,14 +589,16 @@ Panel {
 
   onOpenedChanged: {
     if (opened) {
+      // SUPER+A is documented as "opens the widget and focuses the chat input":
+      // returning to whatever tab was left open broke that, and left a hidden
+      // view current while the user typed.
+      root.currentView = "chat"
       root.unreadCount = 0
       root.lastReadMessageCount = (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
       focusTimer.start()
       Qt.callLater(function() { root.focusPrompt() })
-    } else if (promptInput) {
-      // Closing hides the window but leaves the prompt alive; drop its focus so
-      // a closed popup never holds a keyboard grab through the bar.
-      promptInput.focus = false
+    } else {
+      root.releasePromptFocus()
     }
   }
 
@@ -600,11 +613,8 @@ Panel {
     if (currentView === "chat") {
       focusTimer.start()
       Qt.callLater(function() { root.focusPrompt() })
-    } else if (promptInput) {
-      // Leaving the chat view hides it but does not destroy it, and focus
-      // survives on the hidden prompt; drop it so typing reaches the visible
-      // tab instead of the invisible composer.
-      promptInput.focus = false
+    } else {
+      root.releasePromptFocus()
     }
   }
   readonly property string bottyDataDir: (Quickshell.env("HOME") || "/home/alberto") + "/.local/share/botty"
@@ -1353,7 +1363,7 @@ Panel {
     activeColor: root.showStatusInBar
       ? Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
       : root.foreground
-    opacity: root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
+    opacity: root.showStatusInBar && root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
 
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) {
@@ -1511,7 +1521,7 @@ Panel {
       onCloseRequested: root.close()
 
       onTextKey: function(t) {
-        if (root.currentView === "chat" && promptInput) {
+        if (root.opened && root.currentView === "chat" && promptInput) {
           root.focusPrompt()
           promptInput.text = promptInput.text + t
         } else if (root.currentView === "settings" && modelSearchLoader.item) {
@@ -1543,7 +1553,7 @@ Panel {
             color: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
             font.family: root.fontFamily
             font.pixelSize: Style.space(20)
-            opacity: root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
+            opacity: root.showStatusInBar && root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
           }
         }
 
@@ -1794,7 +1804,8 @@ Panel {
                   event.accepted = true
                   return
                 }
-                if (event.text && event.text.length > 0 && promptInput && !promptInput.activeFocus) {
+                if (event.text && event.text.length > 0 && promptInput && !promptInput.activeFocus
+                    && root.opened && root.currentView === "chat") {
                   root.focusPrompt()
                   promptInput.text = promptInput.text + event.text
                   event.accepted = true
@@ -2189,7 +2200,8 @@ Panel {
                           selectByMouse: true
                           mouseSelectionMode: TextEdit.SelectCharacters
                           cursorVisible: false
-                          activeFocusOnPress: true
+                          // never grab the keyboard while the chat view is hidden
+                          activeFocusOnPress: root.opened && root.currentView === "chat"
                           selectionColor: root.alpha(root.accent, 0.4)
                           selectedTextColor: root.foreground
                           Keys.onPressed: function(event) {
@@ -2218,7 +2230,8 @@ Panel {
                               event.accepted = true
                               return
                             }
-                            if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
+                            if (event.text && event.text.length > 0 && !event.modifiers && promptInput
+                                && root.opened && root.currentView === "chat") {
                               root.focusPrompt()
                               promptInput.text = promptInput.text + event.text
                               event.accepted = true
@@ -2293,7 +2306,8 @@ Panel {
                               selectByMouse: true
                               mouseSelectionMode: TextEdit.SelectCharacters
                               cursorVisible: false
-                              activeFocusOnPress: true
+                              // never grab the keyboard while the chat view is hidden
+                              activeFocusOnPress: root.opened && root.currentView === "chat"
                               selectionColor: root.alpha(root.accent, 0.4)
                               selectedTextColor: root.foreground
 
@@ -2323,7 +2337,8 @@ Panel {
                                   event.accepted = true
                                   return
                                 }
-                                if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
+                                if (event.text && event.text.length > 0 && !event.modifiers && promptInput
+                                    && root.opened && root.currentView === "chat") {
                                   root.focusPrompt()
                                   promptInput.text = promptInput.text + event.text
                                   event.accepted = true
@@ -2368,7 +2383,8 @@ Panel {
                       selectByMouse: true
                       mouseSelectionMode: TextEdit.SelectCharacters
                       cursorVisible: false
-                      activeFocusOnPress: true
+                      // never grab the keyboard while the chat view is hidden
+                      activeFocusOnPress: root.opened && root.currentView === "chat"
                       selectionColor: root.alpha(root.accent, 0.4)
                       selectedTextColor: root.foreground
 
@@ -2398,7 +2414,8 @@ Panel {
                           event.accepted = true
                           return
                         }
-                        if (event.text && event.text.length > 0 && !event.modifiers && promptInput) {
+                        if (event.text && event.text.length > 0 && !event.modifiers && promptInput
+                            && root.opened && root.currentView === "chat") {
                           root.focusPrompt()
                           promptInput.text = promptInput.text + event.text
                           event.accepted = true

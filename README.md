@@ -124,7 +124,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
 | Non-Hermes engines | Refused outright while Sandbox Mode is on; with it off they run under their own permission models |
-| Sandbox Mode off | Every Hermes turn is launched with `--yolo` and is not gated: there is no approval card in that mode |
+| Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |
 
 ## Docs
 

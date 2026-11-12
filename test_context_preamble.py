@@ -170,10 +170,12 @@ class TestContextPreamble(unittest.TestCase):
         self.assertEqual(prompt.count("You are acting as Botty"), 1)
         self.assertIn("[MODE: SANDBOXED", prompt)
 
-    def test_unrestricted_mode_line_on_bypass_run(self):
+    def test_unrestricted_mode_line_when_sandbox_is_off(self):
         prompt = self._run_ask_capture(sandboxed=False)
-        self.assertIn("[MODE: UNRESTRICTED RUN", prompt)
+        self.assertIn("[MODE: UNRESTRICTED", prompt)
         self.assertNotIn("[MODE: SANDBOXED", prompt)
+        # Sandbox Mode off is not an approval, and the line must not say it is.
+        self.assertNotIn("the user approved execution", prompt)
 
     def test_bridge_sent_only_with_the_directive(self):
         # The continuity bridge is a session preamble too: after the first turn it

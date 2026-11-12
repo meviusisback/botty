@@ -29,7 +29,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 - **Ambient visual screen awareness.** Captures active Hyprland windows and attaches screenshots directly for multimodal models — no raw OCR dump clutter.
 - **Universal file and context attachments (`+`).** One button for code files, documents and media; the file chooser floats centered without disturbing your tiling layout. Right-click `+` to attach a clipboard screenshot instantly.
 - **Voice dictation.** Record with PipeWire and transcribe locally via `voxtype` (Whisper).
-- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **Claude Code** and **OpenAI Codex**; on the Hermes engine the model catalog lists only providers whose API key is present in `~/.hermes/.env` (the OMP, Claude Code and Codex lists come from their own local caches or fixed provider lists).
+- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **Claude Code** and **OpenAI Codex**; on the Hermes engine the model catalog lists the providers the profile is set up for: those whose API key appears in `~/.hermes/.env` or in the profile's own `.env`, the provider the profile is currently using, and `ollama` when its `config.yaml` has an `ollama:` section (the OMP, Claude Code and Codex lists come from their own local caches or fixed provider lists).
 - **Continuous learning and memory.** Single-click memory deletion from the Memories tab; AES-256 encrypted local vault backup (owner-only `0600`/`0700` permissions are the real protection — sources stay plaintext on disk).
 - **Desktop automation actions.** Runs terminal commands, manages files, and interacts with Hyprland and system apps.
 
@@ -106,9 +106,9 @@ Widget settings (Omarchy plugin settings UI, defaults from `manifest.json`):
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `refreshIntervalSec` | integer 1–30 | `2` | How often the widget polls for status updates |
-| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph vs status-text ticker in the bar |
-| `showStatusInBar` | boolean | `true` | Status badges and activity dots on the bar icon |
+| `refreshIntervalSec` | integer 1–30 | `2` | Seconds between status polls while the agent is working (off otherwise) |
+| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph only, headline ticker, or the bare status word in the bar |
+| `showStatusInBar` | boolean | `true` | Status colour and the activity dot on the bar icon |
 
 Agent request timeout lives in `~/.local/share/botty/config.json` as `request_timeout_seconds` (positive seconds, default `600`; invalid values fall back to the default).
 
@@ -122,6 +122,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Learning | Compaction output is staged as proposals you approve one by one — nothing becomes memory or skill without review |
 | Rendering | Agent text is plain text (no markdown/HTML), so crafted answers can't trigger remote loads or spoofed chrome |
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
+| Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
 | Non-Hermes engines | Refused outright while Sandbox Mode is on; with it off they run under their own permission models |
 
 ## Docs
@@ -132,7 +133,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 ## Contributing
 
 ```bash
-python -m pytest test_security.py test_compaction.py test_context_preamble.py  # backend suites
+python -m unittest discover -p 'test_*.py'   # every backend suite (security, compaction, preamble, clear-chat, cleanup, helpers)
 node test_model_sanitize.js   # Model.js sanitizer, pure JS, no Qt needed
 ./redeploy-botty.sh           # copy Panel.qml + botty_backend.py to the installed plugin and restart the shell
 ```

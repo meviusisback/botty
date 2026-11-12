@@ -47,14 +47,14 @@
           "Compact"
         ],
         "defaultValue": "Icon",
-        "description": "Visual representation in the status bar (Icon glyph vs Status text ticker)."
+        "description": "Visual representation in the status bar: Icon glyph, Status headline ticker, or Compact status word."
       },
       {
         "key": "showStatusInBar",
         "type": "boolean",
         "label": "Show status indicators in bar",
         "defaultValue": true,
-        "description": "Display status badges and activity dots on the bar icon."
+        "description": "Show the status colour and the activity dot on the bar icon."
       }
     ]
   }

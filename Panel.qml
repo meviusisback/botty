@@ -99,6 +99,10 @@ Panel {
 
   property string currentView: "chat" // "chat" | "memories" | "settings" | "logs"
   property string promptText: ""
+  // The Memories input lives behind a Loader (a hidden view must hold no native
+  // text input), so its text is mirrored here: destroying the field on a view
+  // switch must not throw away a half-typed fact.
+  property string pendingMemoryText: ""
   
   // Generic File Attachment State
   property string attachedFilePath: ""
@@ -572,6 +576,10 @@ Panel {
           promptInput.forceActiveFocus()
         }
       })
+    } else if (promptInput) {
+      // Closing hides the window but leaves the prompt alive; drop its focus so
+      // a closed popup never holds a keyboard grab through the bar.
+      promptInput.focus = false
     }
   }
 
@@ -588,6 +596,11 @@ Panel {
       Qt.callLater(function() {
         if (promptInput) promptInput.forceActiveFocus()
       })
+    } else if (promptInput) {
+      // Leaving the chat view hides it but does not destroy it, and focus
+      // survives on the hidden prompt; drop it so typing reaches the visible
+      // tab instead of the invisible composer.
+      promptInput.focus = false
     }
   }
   readonly property string bottyDataDir: (Quickshell.env("HOME") || "/home/alberto") + "/.local/share/botty"
@@ -653,7 +666,9 @@ Panel {
   // with the final answer. fetchHistory() no-ops while a fetch is in
   // flight, so this is cheap.
   Timer {
-    interval: 1500
+    // The interval is the user's setting, so changing it really changes the
+    // poll rate (it used to be a hard-coded 1500 while the setting was dead).
+    interval: Math.max(250, root.refreshIntervalSec * 1000)
     running: (root.rawStatus && root.rawStatus.state === "working") || askProc.running
     repeat: true
     triggeredOnStart: false
@@ -1328,8 +1343,10 @@ Panel {
     bar: root.bar
     text: Model.statusIcon(root.rawStatus.state)
     tooltipText: Model.getTooltipText(root.rawStatus)
-    active: root.rawStatus.state === "working" || root.rawStatus.state === "waiting"
-    activeColor: Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
+    active: root.showStatusInBar && (root.rawStatus.state === "working" || root.rawStatus.state === "waiting")
+    activeColor: root.showStatusInBar
+      ? Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
+      : root.foreground
     opacity: root.rawStatus.state === "working" ? root.pulseOpacity : 1.0
 
     onPressed: function(buttonCode) {
@@ -1348,7 +1365,7 @@ Panel {
 
     Rectangle {
       id: iconDot
-      visible: (!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error"
+      visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error")
       anchors.top: parent.top
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)
@@ -1400,7 +1417,9 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: Model.getBarHeadline(root.rawStatus, 24)
+        text: root.barDisplay.toLowerCase() === "compact"
+          ? Model.statusBadgeText(root.rawStatus.state)
+          : Model.getBarHeadline(root.rawStatus, 24)
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         color: root.foreground
@@ -1465,9 +1484,15 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: (promptInput && promptInput.activeFocus)
-        || (newMemLoader.item && newMemLoader.item.inputActiveFocus)
-        || (modelSearchLoader.item && modelSearchLoader.item.activeFocus)
+      // A hidden view must not hold a live text input: the chat view is only
+      // made invisible, its prompt TextArea survives, and Qt does not clear
+      // keyboard focus when an ancestor is hidden. Without the opened/view
+      // guards the catcher stayed blocked on the Memories and Settings tabs, so
+      // keys fell through to the invisible prompt and Enter there could send a
+      // query from a view the user was not looking at.
+      blocked: (root.opened && root.currentView === "chat" && promptInput && promptInput.activeFocus)
+        || (root.opened && root.currentView === "memories" && newMemLoader.item && newMemLoader.item.inputActiveFocus)
+        || (root.opened && root.currentView === "settings" && modelSearchLoader.item && modelSearchLoader.item.activeFocus)
 
       onMoveRequested: function(dx, dy) {
         if (root.currentView === "chat" && dy !== 0) {
@@ -3371,6 +3396,8 @@ Panel {
                   implicitHeight: Style.space(32)
                   Layout.fillWidth: true
                   placeholderText: "Teach Botty a fact to remember permanently…"
+                  text: root.pendingMemoryText
+                  onTextChanged: root.pendingMemoryText = text
                   onAccepted: {
                     if (text.trim()) {
                       root.addMemoryNow(text, false)

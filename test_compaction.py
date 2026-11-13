@@ -508,7 +508,7 @@ class TestCompactionAndDistillation(unittest.TestCase):
         # parent (this process's child) also sleeps. On timeout the whole group
         # must be gone.
         marker = self.data_dir / "child_alive.txt"
-        helper = Path(__file__).parent / "test_helper_sleeper.py"
+        helper = Path(__file__).parent / "helper_sleeper.py"
 
         # Child process: spawn the sleeper helper and wait.
         parent_code = (

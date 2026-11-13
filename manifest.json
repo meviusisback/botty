@@ -47,7 +47,7 @@
           "Compact"
         ],
         "defaultValue": "Icon",
-        "description": "Visual representation in the status bar: Icon glyph, Status headline ticker, or Compact status word."
+        "description": "Visual representation in the status bar: Icon (glyph and dot), Status (last request snippet, or APPROVE while a card waits), or Compact (status word)."
       },
       {
         "key": "showStatusInBar",

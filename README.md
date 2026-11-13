@@ -107,14 +107,14 @@ Widget settings (Omarchy plugin settings UI, defaults from `manifest.json`):
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `refreshIntervalSec` | integer 1–30 | `2` | Seconds between status polls while the agent is working (off otherwise) |
-| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph only, a short snippet of the last request, or the bare status word in the bar |
+| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph only; a short snippet of the last request (or `APPROVE` while a card is waiting); or the bare status word |
 | `showStatusInBar` | boolean | `true` | Status colour and the activity dot on the bar icon |
 
 Agent request timeout lives in `~/.local/share/botty/config.json` as `request_timeout_seconds` (positive seconds, default `600`; invalid values fall back to the default).
 
 ## How it works
 
-**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window — and that enforcement depends on the profile's own approval gate (`approvals.single_query_mode`, `approvals.mode`, `command_allowlist`); when that config weakens the gate, Botty says so instead of claiming a boundary it cannot enforce.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. The proposal is bound to a random token Botty generates for that turn and sends only inside the prompt, so text the agent merely quotes (a file, a page, a log) can never mint a card. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is exactly that proposal; **Deny** retires the card, so a refused proposal cannot be approved later.
+**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window — and that enforcement depends on the profile's own approval gate (`approvals.single_query_mode`, `approvals.mode`, `command_allowlist`); when that config weakens the gate, Botty says so instead of claiming a boundary it cannot enforce.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. The proposal is bound to a random token Botty generates for that turn and sends only inside the prompt, so text the agent merely quotes (a file, a page, a log) can never mint a card. The card prints the exact text the approved run will receive. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is that text (inside Botty's fixed wrapper and mode line) and nothing else from the conversation; **Deny** retires the card, so a refused proposal cannot be approved later.
 
 | Layer | Guarantee |
 |---|---|
@@ -124,8 +124,8 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
 | Manual CLI | The shell verbs still take their payload as positional arguments (`ask QUERY`, `copy TEXT`, `add-memory TEXT`, `create-skill ...`), so a hand-typed invocation is visible in `ps`; the widget never uses those forms |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
-| Approval | The card is minted only by a marker line carrying the turn's random token, the executed prompt is that proposal (with Botty's fixed wrapper and mode line) and nothing else from the conversation, one approval is good for one run, and a card older than 30 minutes must be asked for again |
-| Non-Hermes engines | Refused while Sandbox Mode is on unless you approve a card for a concrete proposal (the approval lifts Botty's refusal; those engines have their own permission model, get no `--yolo`, and OMP runs with its own `--allow-home` flag, which lets it write anywhere in your home folder during that turn); with Sandbox Mode off they run under that model |
+| Approval | The card is minted only by a marker line carrying the turn's random token (the template in the prompt shows it); the card prints the exact executed text, which is that text plus Botty's fixed wrapper and mode line and nothing else from the conversation; the cap keeps whole actions (an action too long to fit is dropped, never truncated); one approval is good for one run, and a card older than 30 minutes must be asked for again |
+| Non-Hermes engines | Refused while Sandbox Mode is on: only a Hermes turn can mint a card, and an approved card lifts Botty's refusal for that one run (those engines have their own permission model, get no `--yolo`, and OMP runs with its own `--allow-home` flag, which lets it write anywhere in your home folder during that turn); with Sandbox Mode off they run under that model |
 | Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |
 
 ## Docs

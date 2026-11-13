@@ -68,6 +68,16 @@ Panel {
   property bool copyBusy: false
   property bool memBusy: false
 
+  // One rule for the in-message card, the pinned banner and the bar badge. The
+  // age limit is the backend's CARD_MAX_AGE_SECONDS (30 min); keeping it in a single
+  // helper is what stops the three surfaces from disagreeing again.
+  function cardIsApprovable(m) {
+    if (!m) return false
+    if (m.sandbox_approved_at || m.sandbox_denied_at || !m.sandbox_token) return false
+    if (m.sandbox_minted_at && (Date.now() / 1000 - m.sandbox_minted_at) > 1800) return false
+    return true
+  }
+
   readonly property string pendingPermissionId: {
     var msgs = (root.historyData && root.historyData.messages) || []
     if (msgs.length === 0) return ""
@@ -76,8 +86,7 @@ Panel {
     for (var i = msgs.length - 1; i >= 0 && i > msgs.length - 21; i--) {
       var m = msgs[i]
       if (!m || m.role !== "assistant" || m.sandbox_request !== true) continue
-      if (m.sandbox_approved_at || m.sandbox_denied_at) continue
-      if (!m.sandbox_token) continue      // legacy card: nothing approvable
+      if (!root.cardIsApprovable(m)) continue   // used, denied, legacy or expired
       return String(m.id || "")
     }
     return ""
@@ -2571,6 +2580,25 @@ Panel {
                           }
                         }
 
+                        // The exact text the approved run receives, printed verbatim:
+                        // the scope is normalised by the backend, so a numbered or
+                        // oddly formatted proposal cannot differ from what executes.
+                        Text {
+                          visible: !!modelData.sandbox_scope
+                          text: modelData.sandbox_scope || ""
+                          textFormat: Text.PlainText
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.space(10)
+                          color: root.foreground
+                          wrapMode: Text.Wrap
+                          Layout.fillWidth: true
+                          Layout.topMargin: Style.space(2)
+                          leftPadding: Style.space(6)
+                          rightPadding: Style.space(6)
+                          topPadding: Style.space(4)
+                          bottomPadding: Style.space(4)
+                        }
+
                         Text {
                           text: ((modelData.sandbox_mode === true)
                             ? "Writes are technically blocked while Sandbox Mode is active. "
@@ -2603,10 +2631,7 @@ Panel {
                             // backend refuses it, so the button would lie.
                             // A card older than the backend's 30-minute limit is
                             // refused on click: do not offer the button.
-                            visible: !modelData.sandbox_approved_at && !modelData.sandbox_denied_at
-                                     && !!modelData.sandbox_token
-                                     && !(modelData.sandbox_minted_at
-                                          && (Date.now() / 1000 - modelData.sandbox_minted_at) > 1800)
+                            visible: root.cardIsApprovable(modelData)
                             onClicked: {
                               root.approveSandboxBypass(
                                     modelData.sandbox_request === true ? modelData.id : "")

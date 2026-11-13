@@ -1424,7 +1424,9 @@ Panel {
       width: Style.space(6)
       height: Style.space(6)
       radius: width / 2
-      color: Model.statusColor(root.rawStatus.state, root.accent, root.accent, root.urgent)
+      color: root.pendingPermissionId !== ""
+        ? root.urgent
+        : Model.statusColor(root.rawStatus.state, root.accent, root.accent, root.urgent)
     }
   }
 
@@ -1470,8 +1472,13 @@ Panel {
 
       Text {
         textFormat: Text.PlainText
-        text: root.barDisplay.toLowerCase() === "compact"
-          ? Model.statusBadgeText(root.rawStatus.state, root.rawStatus.headline)
+        // A pending card outranks the last-request snippet in every text mode:
+        // Status mode used to show the previous query while a write waited.
+        text: (root.pendingPermissionId !== ""
+               || root.barDisplay.toLowerCase() === "compact")
+          ? Model.statusBadgeText(root.pendingPermissionId !== "" ? "waiting" : root.rawStatus.state,
+                                  root.pendingPermissionId !== "" ? "Permission Required"
+                                                                 : root.rawStatus.headline)
           : Model.getBarHeadline(root.rawStatus, 24)
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -1486,7 +1493,9 @@ Panel {
         width: Style.space(6)
         height: Style.space(6)
         radius: width / 2
-        color: Model.statusColor(root.rawStatus.state, root.accent, root.accent, root.urgent)
+        color: root.pendingPermissionId !== ""
+          ? root.urgent
+          : Model.statusColor(root.rawStatus.state, root.accent, root.accent, root.urgent)
       }
     }
 
@@ -2592,8 +2601,12 @@ Panel {
                             fontSize: Style.space(10)
                             // A consumed card must not offer Approve again: the
                             // backend refuses it, so the button would lie.
+                            // A card older than the backend's 30-minute limit is
+                            // refused on click: do not offer the button.
                             visible: !modelData.sandbox_approved_at && !modelData.sandbox_denied_at
                                      && !!modelData.sandbox_token
+                                     && !(modelData.sandbox_minted_at
+                                          && (Date.now() / 1000 - modelData.sandbox_minted_at) > 1800)
                             onClicked: {
                               root.approveSandboxBypass(
                                     modelData.sandbox_request === true ? modelData.id : "")
@@ -2773,19 +2786,10 @@ Panel {
           // Pinned Pending Sandbox Permission Banner
           BorderSurface {
             id: pendingPermissionBanner
-            visible: {
-              var msgs = (root.historyData && root.historyData.messages) || []
-              if (root.isProcessing || msgs.length === 0) return false
-              var lastMsg = msgs[msgs.length - 1]
-              // Flag only, same rule as the in-message card.
-              // An already-used card must not reappear as "Permission Required"
-              // over its own row, which says the approval was consumed.
-              return lastMsg && lastMsg.role === "assistant"
-                && lastMsg.sandbox_request === true
-                && !!lastMsg.sandbox_token
-                && !lastMsg.sandbox_approved_at
-                && !lastMsg.sandbox_denied_at
-            }
+            // Driven by the card scan, like the bar badge and the dot: keying it on
+            // "the last message" hid the banner as soon as any row landed after the
+            // card, while the bar still said APPROVE.
+            visible: !root.isProcessing && root.pendingPermissionCard !== null
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)
             radius: Style.space(8)

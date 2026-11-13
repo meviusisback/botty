@@ -503,7 +503,7 @@ def _drop_inline_fences(text: str) -> str:
     line goes - deleting everything after it (the old behaviour) made one stray
     ``` kill a genuine proposal, so the sandboxed run could never be approved.
     """
-    lines = (text or "").splitlines()
+    lines = _scope_lines(text)
     out = []
     i, n = 0, len(lines)
     while i < n:
@@ -523,9 +523,9 @@ def _drop_inline_fences(text: str) -> str:
             while j < n and lines[j].strip() and not closer_line.match(lines[j]):
                 j += 1
             if j < n and closer_line.match(lines[j]):
-                rest = closer_line.sub("", lines[j], count=1)
-                if rest.strip():
-                    out.append(rest)
+                # Drop the whole closer line: it starts with a fence run, so its
+                # tail is an info string, not prose. Re-emitting the tail promoted
+                # "```🔒 SANDBOX PERMISSION REQUIRED [tok]" into an approvable line.
                 i = j + 1
             else:
                 # unclosed: the rest of its PARAGRAPH is code. A blank line ends the
@@ -537,7 +537,7 @@ def _drop_inline_fences(text: str) -> str:
     return "\n".join(out)
 
 
-def _strip_fenced_code(text: str) -> str:
+def _strip_fenced_code(text: str, keep_inline: bool = False) -> str:
     """Remove everything the model might be QUOTING, leaving its own prose.
 
     Attacker-controlled screen/file/window text reaches the model inside a quote
@@ -553,15 +553,33 @@ def _strip_fenced_code(text: str) -> str:
     fence_char = ""
     fence_len = 0
     html_block = ""
-    for line in (text or "").splitlines():
+    for line in _scope_lines(text):
         if html_block:
-            if re.search(r"</\s*" + html_block + r"\s*>", line, re.IGNORECASE):
+            if html_block in ("]]>", "?>", "%>", ">"):
+                if html_block in line:
+                    html_block = ""
+                continue
+            if re.search(r"</\s*" + re.escape(html_block) + r"\s*>", line, re.IGNORECASE):
                 html_block = ""
-            continue
+                continue
+            if _FENCE_RE.match(line.lstrip()):
+                # A fence run while an HTML block is open: end the block and let the
+                # fence scanner below see it, or that fence's body was judged prose.
+                html_block = ""
+            else:
+                continue
         # ANY element boundary counts, not a whitelist: <div>, <p>, <ul>, <xmp>,
         # <plaintext>, <svg>, namespaced forms - a quoted block wrapped in a tag
         # nobody listed used to keep its marker and mint the card. Fail closed: an
         # unknown tag removes text instead of keeping it.
+        special_open = re.match(r"^ {0,3}(<!\[CDATA\[|<\?|<%[^=]|<![A-Za-z])", line)
+        if special_open:
+            opener = special_open.group(1)
+            closer = {"<![CDATA[": "]]>", "<?": "?>", "<%": "%>"}.get(opener, ">")
+            if closer in line[special_open.end():]:
+                continue
+            html_block = closer
+            continue
         html_open = re.match(r"^ {0,3}</?\s*([A-Za-z][A-Za-z0-9:_.-]*)", line)
         if html_open:
             tag = html_open.group(1).lower()
@@ -599,11 +617,27 @@ def _strip_fenced_code(text: str) -> str:
     # Anything still carrying a run is a leftover span on one line only.
     cleaned = re.sub(r"```[^\n]*", "", cleaned)
     cleaned = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", cleaned)
-    cleaned = re.sub(r"`+[^`\n]*`+", "", cleaned)
+    if keep_inline:
+        # Keep the CONTENT of an inline span: models put paths and commands in
+        # backticks, and deleting them left the executed scope with empty bullets.
+        cleaned = re.sub(r"`+([^`\n]*)`+", r"\1", cleaned)
+    else:
+        cleaned = re.sub(r"`+[^`\n]*`+", "", cleaned)
     return cleaned
 
 
 _PERMISSION_MARKER = "🔒 SANDBOX PERMISSION REQUIRED"
+
+
+def _scope_lines(text: str) -> list:
+    """The text split the way the CARD draws it.
+
+    str.splitlines() also breaks on \v, \f, \x1c-\x1e, \x85, U+2028/29 and a lone
+    \r, none of which the panel draws as a break: a marker after one of them minted
+    from what looked like a single line. Normalise first, then split on \n only.
+    """
+    normalised = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    return normalised.split("\n")
 
 
 def _proposal_lines(text: str, token: str = ""):
@@ -615,7 +649,7 @@ def _proposal_lines(text: str, token: str = ""):
     it carries. The token alone would let a model that repeats its own envelope
     inside a code block mint a card from the example.
     """
-    lines = _strip_fenced_code(text or "").splitlines()
+    lines = _scope_lines(_strip_fenced_code(text or ""))
     found = [i for i, line in enumerate(lines)
              if _marker_line_carries_token(line, token)]
     return lines, found
@@ -632,9 +666,16 @@ def _marker_line_carries_token(line: str, token: str) -> bool:
 
 
 def _has_permission_marker(text: str, token: str = "") -> bool:
-    """True when the model asked for approval with this turn's token, in its prose."""
+    """True when the model asked for approval, with its token, in prose, for a task.
+
+    A bare marker line carries no instruction: minting a card for it would offer an
+    Approve button that starts a --yolo run with an empty mandate, so the marker
+    must list actions or say what to do.
+    """
     _lines, found = _proposal_lines(text, token)
-    return bool(found)
+    if not found:
+        return False
+    return bool(_permission_scope(text, token))
 
 
 def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
@@ -647,6 +688,9 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     lines, found = _proposal_lines(text, token)
     if not found:
         return ""
+    # Same lines, but an inline span keeps its content (a path in backticks is a
+    # path, not decoration): the scope is what runs, so it must be verbatim.
+    lines = _scope_lines(_strip_fenced_code(text, keep_inline=True))
     # The LAST proposal: a message may restate the request, and the final one is the
     # model's own conclusion rather than an earlier echo.
     start = found[-1]
@@ -655,19 +699,27 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     while i < len(lines) and not lines[i].strip():
         i += 1
     if i < len(lines) and lines[i].strip().lower().startswith("proposed actions"):
-        scope.append(lines[i])
+        scope.append(lines[i].rstrip())
         i += 1
-        # ONE block: bullets until the first blank line. A later list ("Next
-        # steps"), a repeated header or a bolded prose line used to ride into the
-        # --yolo prompt, so what ran was not what the card showed.
+        # Blank lines between the header and its bullets are ordinary formatting.
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        # ONE block: bullets until a blank line or any other line. A later list
+        # ("Next steps") stays out; '- ', '* ' and '• ' are what the models write.
         while i < len(lines):
             current = lines[i]
-            if not current.strip() or not current.strip().startswith(("- ", "* ")):
+            if not current.strip() or not current.strip().startswith(("- ", "* ", "• ")):
                 break
-            if current.strip().lower().startswith("proposed actions"):
-                break
-            scope.append(current)
+            scope.append(current.rstrip())
             i += 1
+    actions = [l for l in scope[1:] if l.strip().startswith(("- ", "* ", "• "))]
+    if not actions:
+        # No bullet block: the marker line itself must carry the instruction (the
+        # model wrote it after the marker, e.g. "... [tok]: create ~/notes.md").
+        # A bare marker would start a --yolo run with an empty mandate.
+        marker_tail = scope[0].split("]", 1)[-1].strip(" :\t")
+        if len(marker_tail) < 3:
+            return ""
     return "\n".join(scope)[:limit].strip()
 
 
@@ -1269,12 +1321,16 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
         (".aws",), (".azure",), (".kube",), (".docker",),
         (".password-store",), (".config", "gcloud"),
         (".local", "share", "keyrings"), (".mozilla",),
+        # Provider keys live in these clients' stores; the Hermes profile itself is
+        # matched by path shape below (a scratch home may live under ~/.hermes).
+        (".config", "gh"), (".config", "opencode"),
     )
     _SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".kdbx",
                              ".ppk", ".ovpn", ".age", ".vault", ".env")
     _SENSITIVE_NAMES = {".env", "credentials.json", "secrets.json", "id_rsa",
                         "id_ed25519", "id_ecdsa", "id_dsa", ".netrc", "_netrc",
-                        ".git-credentials", ".npmrc", ".pypirc"}
+                        ".git-credentials", ".npmrc", ".pypirc", "auth.json",
+                        "hosts.yml"}
     _SENSITIVE_SUBSTRINGS = ("secret", "credential", "passwd", "private")
     try:
         home_parts = Path.home().resolve().parts
@@ -1286,6 +1342,13 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
             return {"ok": False, "error": f"Refusing to read credential store path: {filepath}. Paste a redacted snippet instead."}
         if any(rel[:len(pre)] == pre for pre in _SENSITIVE_DIR_PREFIXES):
             return {"ok": False, "error": f"Refusing to read credential store path: {filepath}. Paste a redacted snippet instead."}
+    # The Hermes profile config holds provider API keys. Matched by path shape, not
+    # by a home-relative ".hermes" prefix: a SCRATCH home used by the tests lives
+    # under ~/.hermes/cache/... and must stay attachable.
+    if "/.hermes/profiles/" in str(p):
+        return {"ok": False,
+                "error": f"Refusing to read a Hermes profile file: {filepath}. "
+                         f"Paste a redacted snippet instead."}
     if str(p).startswith(("/etc/ssh/", "/etc/ssl/private/")):
         return {"ok": False, "error": f"Refusing to read system credential path: {filepath}."}
     if p in (Path("/etc/shadow"), Path("/etc/gshadow")):
@@ -3600,7 +3663,9 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         fpath = attached_file_info["path"]
         fext = attached_file_info["extension"]
         if attached_file_info.get("has_text_content"):
-            preview = attached_file_info["text_preview"]
+            # Second layer: whatever the denylist missed, the redactor catches
+            # before the text reaches a third-party provider.
+            preview = redact_secrets(attached_file_info["text_preview"])
             prompt_parts.append(
                 f"[ATTACHED FILE: {_untrusted_inline(fname, 120)} "
                 f"(Path: {_untrusted_inline(fpath, 400)})]\n{_UNTRUSTED_NOTE}\n"
@@ -3744,7 +3809,8 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             cmd.extend(["--model", selected_model])
         # omp's documented file transport: MESSAGES prefixed with @ read the file,
         # so argv carries only an owner-only path, never prompt/attachment text.
-        omp_prompt_file = BOTTY_DATA_DIR / "current_omp_prompt.txt"
+        omp_prompt_file = BOTTY_DATA_DIR / (
+            f"current_omp_prompt_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt")
         _write_private_file(omp_prompt_file, final_prompt)
         cmd.extend(["--", "@" + str(omp_prompt_file)])
     elif engine == "claude":
@@ -5024,7 +5090,8 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
         if engine == "omp":
             # omp's documented file transport (MESSAGES prefixed with @) keeps the
             # conversation out of argv; the file is owner-only and removed below.
-            omp_distill_file = BOTTY_DATA_DIR / "current_distill_prompt.txt"
+            omp_distill_file = BOTTY_DATA_DIR / (
+                f"current_distill_prompt_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt")
             _write_private_file(omp_distill_file, distillation_prompt)
             cmd = ["omp", "-p", "--allow-home", "@" + str(omp_distill_file)]
         elif engine == "claude":

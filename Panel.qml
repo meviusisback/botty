@@ -76,11 +76,22 @@ Panel {
     for (var i = msgs.length - 1; i >= 0 && i > msgs.length - 21; i--) {
       var m = msgs[i]
       if (!m || m.role !== "assistant" || m.sandbox_request !== true) continue
-      if (m.sandbox_approved_at) return ""
+      if (m.sandbox_approved_at || m.sandbox_denied_at) continue
+      if (!m.sandbox_token) continue      // legacy card: nothing approvable
       return String(m.id || "")
     }
     return ""
   }
+  readonly property var pendingPermissionCard: {
+    var id = root.pendingPermissionId
+    if (id === "") return null
+    var msgs = (root.historyData && root.historyData.messages) || []
+    for (var i = 0; i < msgs.length; i++) {
+      if (msgs[i] && String(msgs[i].id || "") === id) return msgs[i]
+    }
+    return null
+  }
+
   property int lastMessageCount: 0
   property int lastReadMessageCount: 0
   property int unreadCount: 0
@@ -346,7 +357,12 @@ Panel {
     // Mode-aware, like the card's own title, body and Deny buttons: with Sandbox
     // Mode off the message must not tell the model to bypass a boundary that is
     // not there.
-    root.sendQuery(root.sandboxMode
+    var card = null
+    var msgs = (root.historyData && root.historyData.messages) || []
+    for (var i = 0; i < msgs.length; i++) {
+      if (msgs[i] && String(msgs[i].id || "") === String(messageId)) { card = msgs[i]; break }
+    }
+    root.sendQuery((card && card.sandbox_mode === true)
                      ? "I approve this action. Please bypass the sandbox and execute the proposed changes."
                      : "I approve this action. Please carry out exactly the proposed changes.",
                    "", false, false, true, messageId)
@@ -1398,7 +1414,9 @@ Panel {
 
     Rectangle {
       id: iconDot
-      visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error")
+      visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0)
+               || root.pendingPermissionId !== ""
+               || root.rawStatus.state === "working" || root.rawStatus.state === "error")
       anchors.top: parent.top
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)
@@ -1462,7 +1480,9 @@ Panel {
       }
 
       Rectangle {
-        visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0) || root.rawStatus.state === "working" || root.rawStatus.state === "error")
+        visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0)
+               || root.pendingPermissionId !== ""
+               || root.rawStatus.state === "working" || root.rawStatus.state === "error")
         width: Style.space(6)
         height: Style.space(6)
         radius: width / 2
@@ -2532,7 +2552,8 @@ Panel {
                           Text {
                             textFormat: Text.PlainText
                             text: (modelData.sandbox_mode === true) ? "Sandbox Write Permission Requested"
-                                                   : "Write Permission Requested"
+                                 : (modelData.sandbox_mode === false) ? "Write Permission Requested"
+                                 : "Permission Requested (older card)"
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.body
                             font.bold: true
@@ -2544,7 +2565,9 @@ Panel {
                         Text {
                           text: ((modelData.sandbox_mode === true)
                             ? "Writes are technically blocked while Sandbox Mode is active. "
-                            : "Sandbox Mode is off, so the engine's own gate is what refused this write. ")
+                            : (modelData.sandbox_mode === false)
+                              ? "Sandbox Mode is off, so the engine's own gate is what refused this write. "
+                              : "This card does not record which sandbox mode was in force. ")
                             + "Approving starts ONE unrestricted run: the engine's command approval gate is "
                             + "off for it, so it is scoped by this prompt alone (the proposed actions, with the "
                             + "rest of the conversation left out). Verify every listed path and command yourself."
@@ -2570,10 +2593,33 @@ Panel {
                             // A consumed card must not offer Approve again: the
                             // backend refuses it, so the button would lie.
                             visible: !modelData.sandbox_approved_at && !modelData.sandbox_denied_at
+                                     && !!modelData.sandbox_token
                             onClicked: {
                               root.approveSandboxBypass(
                                     modelData.sandbox_request === true ? modelData.id : "")
                             }
+                          }
+
+                          Text {
+                            visible: !!modelData.sandbox_denied_at
+                            textFormat: Text.PlainText
+                            text: "Proposal denied — it cannot be approved any more. Re-run the task sandboxed for a fresh card."
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(10)
+                            color: root.dim
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                          }
+
+                          Text {
+                            visible: !modelData.sandbox_token
+                            textFormat: Text.PlainText
+                            text: "This card was made by an older Botty and carries no approval token: re-run the task sandboxed to get one you can approve."
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(10)
+                            color: root.dim
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
                           }
 
                           Text {
@@ -2736,7 +2782,9 @@ Panel {
               // over its own row, which says the approval was consumed.
               return lastMsg && lastMsg.role === "assistant"
                 && lastMsg.sandbox_request === true
+                && !!lastMsg.sandbox_token
                 && !lastMsg.sandbox_approved_at
+                && !lastMsg.sandbox_denied_at
             }
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)
@@ -2768,7 +2816,12 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: root.sandboxMode ? "Permission Required for Sandbox Bypass" : "Permission Required for a Write"
+                    text: {
+                      var card = root.pendingPermissionCard
+                      var mode = card && card.sandbox_mode === true
+                      return mode ? "Permission Required for Sandbox Bypass"
+                                  : "Permission Required for a Write"
+                    }
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     font.bold: true
@@ -2777,9 +2830,15 @@ Panel {
 
                   Text {
                     textFormat: Text.PlainText
-                    text: root.sandboxMode
-                      ? "Botty halted file/system writes. Choose an action below. Verify every proposed path and command before approving."
-                      : "The agent asked for a write it is not allowed to perform by itself. Approving runs one explicit bypass for the proposed changes only; verify every path and command first."
+                    text: {
+                      var card = root.pendingPermissionCard
+                      var mode = card && card.sandbox_mode === true
+                      // Same wording as the card: an approval is ONE unrestricted
+                      // run scoped by the proposal, not a contained one.
+                      return mode
+                        ? "Botty halted file/system writes. Choose an action below. Verify every proposed path and command before approving."
+                        : "The agent asked for a write it could not perform. Approving starts ONE unrestricted run (the engine's command gate is off for it), scoped by this proposal alone; verify every path and command first."
+                    }
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
                     color: root.foreground
@@ -2794,7 +2853,8 @@ Panel {
 
                 Button {
                   iconText: "󰄬"
-                  text: root.sandboxMode ? "Approve & Run (Bypass)" : "Approve & Run Once"
+                  text: (root.pendingPermissionCard && root.pendingPermissionCard.sandbox_mode === true)
+                        ? "Approve & Run (Bypass)" : "Approve & Run Once"
                   selected: true
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
@@ -2817,13 +2877,15 @@ Panel {
 
                 Button {
                   iconText: "󰅖"
-                  text: root.sandboxMode ? "Deny (Keep Sandboxed)" : "Deny"
+                  text: (root.pendingPermissionCard && root.pendingPermissionCard.sandbox_mode === true)
+                        ? "Deny (Keep Sandboxed)" : "Deny"
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {
-                    root.sendQuery(root.sandboxMode
-                                               ? "Do not execute these changes. Keep the environment sandboxed."
-                                               : "Do not execute these changes.", "", false, false, false,
+                    var carded = root.pendingPermissionCard
+                    root.sendQuery((carded && carded.sandbox_mode === true)
+                                     ? "Do not execute these changes. Keep the environment sandboxed."
+                                     : "Do not execute these changes.", "", false, false, false,
                                    "", root.lastPendingPermissionId())
                   }
                 }

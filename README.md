@@ -124,8 +124,8 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
 | Manual CLI | The shell verbs still take their payload as positional arguments (`ask QUERY`, `copy TEXT`, `add-memory TEXT`, `create-skill ...`), so a hand-typed invocation is visible in `ps`; the widget never uses those forms |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
-| Approval | The card is minted only by a marker line carrying the turn's random token, the executed prompt is that proposal alone, and one approval is good for one run |
-| Non-Hermes engines | Refused while Sandbox Mode is on unless you approve a card for a concrete proposal (the approval lifts Botty's refusal; those engines have their own permission model and get no `--yolo`); with Sandbox Mode off they run under that model |
+| Approval | The card is minted only by a marker line carrying the turn's random token, the executed prompt is that proposal (with Botty's fixed wrapper and mode line) and nothing else from the conversation, one approval is good for one run, and a card older than 30 minutes must be asked for again |
+| Non-Hermes engines | Refused while Sandbox Mode is on unless you approve a card for a concrete proposal (the approval lifts Botty's refusal; those engines have their own permission model, get no `--yolo`, and OMP runs with its own `--allow-home` flag, which lets it write anywhere in your home folder during that turn); with Sandbox Mode off they run under that model |
 | Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |
 
 ## Docs
@@ -136,7 +136,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 ## Contributing
 
 ```bash
-python -m unittest discover -p 'test_*.py'   # every backend suite (security, compaction, preamble, clear-chat, cleanup, helpers)
+python -m unittest discover -p 'test_*.py'   # every backend suite (security, compaction, preamble, clear-chat, cleanup)
 node test_model_sanitize.js   # Model.js sanitizer, pure JS, no Qt needed
 ./redeploy-botty.sh           # copy Panel.qml + botty_backend.py to the installed plugin and restart the shell
 ```

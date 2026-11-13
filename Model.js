@@ -331,7 +331,7 @@ function getBarHeadline(status, maxLen) {
 function getTooltipText(status) {
   if (!status) return "Botty 🐼 - Desktop Agent Assistant"
   var lines = ["Botty 🐼 - Desktop Agent Assistant"]
-  lines.push("Status: " + statusBadgeText(status.state))
+  lines.push("Status: " + statusBadgeText(status.state, status.headline))
   if (status.active_model) lines.push("Model: " + status.active_model)
   if (status.memory_count !== undefined) lines.push("Memories: " + status.memory_count + " | Skills: " + (status.skills_count || 0))
   if (status.last_query) lines.push("Last: " + truncateText(status.last_query, 45))

@@ -609,12 +609,13 @@ _PERMISSION_MARKER = "🔒 SANDBOX PERMISSION REQUIRED"
 def _proposal_lines(text: str, token: str = ""):
     """The lines to search and the indices of the marker lines that count.
 
-    With a token (every run does), the marker must carry it - that is the whole
-    proof of authorship. Without one, nothing counts: an old message without a
-    token cannot be approved, because there is no way to tell an echo from a
-    proposal.
+    Two independent gates: the marker line must carry this turn's token (the proof
+    of authorship), and it must sit in the model's own prose - a marker the model
+    echoes inside a fence, a blockquote or an HTML block is quoted text, whatever
+    it carries. The token alone would let a model that repeats its own envelope
+    inside a code block mint a card from the example.
     """
-    lines = (text or "").splitlines()
+    lines = _strip_fenced_code(text or "").splitlines()
     found = [i for i, line in enumerate(lines)
              if _marker_line_carries_token(line, token)]
     return lines, found
@@ -630,24 +631,10 @@ def _marker_line_carries_token(line: str, token: str) -> bool:
     return ("[" + token + "]") in line
 
 
-def find_approval_token(text: str, token: str) -> bool:
-    """The model asked for approval using the envelope it was given.
-
-    A text-shape heuristic cannot decide whether a marker is the model's own: every
-    quoting form the scanner does not model (nested HTML, CDATA, escaped entities,
-    an unfenced paste) minted a card and became the executed --yolo scope. The token
-    is generated per turn, sent only in the prompt, and required on the marker line,
-    so quoted text cannot produce it.
-    """
-    if not token:
-        return False
-    return any(_marker_line_carries_token(line, token)
-               for line in (text or "").splitlines())
-
-
 def _has_permission_marker(text: str, token: str = "") -> bool:
-    """True when the model asked for approval with this turn's token."""
-    return find_approval_token(text, token)
+    """True when the model asked for approval with this turn's token, in its prose."""
+    _lines, found = _proposal_lines(text, token)
+    return bool(found)
 
 
 def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
@@ -668,12 +655,16 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     while i < len(lines) and not lines[i].strip():
         i += 1
     if i < len(lines) and lines[i].strip().lower().startswith("proposed actions"):
+        scope.append(lines[i])
+        i += 1
+        # ONE block: bullets until the first blank line. A later list ("Next
+        # steps"), a repeated header or a bolded prose line used to ride into the
+        # --yolo prompt, so what ran was not what the card showed.
         while i < len(lines):
             current = lines[i]
-            if current.strip() and not (current.strip().startswith(("-", "*", "•"))
-                                        or current.strip().lower().startswith("proposed actions")):
+            if not current.strip() or not current.strip().startswith(("- ", "* ")):
                 break
-            if not current.strip() and (not scope or scope[-1].strip() == ""):
+            if current.strip().lower().startswith("proposed actions"):
                 break
             scope.append(current)
             i += 1
@@ -1260,6 +1251,12 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
     p = Path(filepath).expanduser().resolve()
     if not p.exists():
         return {"ok": False, "error": f"File not found: {filepath}"}
+    # Kernel pseudo-files are S_ISREG with size 0 and pass every other gate:
+    # /proc/self/environ would become an attachment (and a prompt to a provider).
+    for _pseudo in ("/proc", "/sys", "/dev"):
+        if str(p).startswith(_pseudo + "/"):
+            return {"ok": False,
+                    "error": f"Refusing to read a kernel pseudo-file: {p}"}
 
     # Security (M1): never ingest credential material. resolve() above already
     # defeats ../ and symlink escape; this denylist blocks the obvious secret
@@ -2316,10 +2313,16 @@ def hypr_ipc_query(cmd: str) -> Any:
             s.connect(sock_path)
             s.sendall(cmd.encode("utf-8"))
             buf = []
+            total = 0
             while True:
                 chunk = s.recv(8192)
                 if not chunk:
                     break
+                total += len(chunk)
+                if total > HYPR_IPC_MAX_BYTES:
+                    # A peer that keeps streaming used to grow this list without
+                    # bound; fall back to hyprctl instead.
+                    raise ValueError("hyprctl IPC reply too large")
                 buf.append(chunk)
             s.close()
             raw = b"".join(buf).decode("utf-8", errors="replace")
@@ -2872,6 +2875,11 @@ def build_hermes_prompt(final_prompt: str, directive: str, mode_line: str,
     return "\n\n".join(p for p in parts if p)
 
 
+# An approval card is a decision about a moment: past this it must be re-asked.
+CARD_MAX_AGE_SECONDS = 30 * 60
+
+HYPR_IPC_MAX_BYTES = 4 * 1024 * 1024
+
 AUTO_COMPACT_COOLDOWN_SECONDS = 600
 
 
@@ -2950,6 +2958,10 @@ def _resolve_approved_proposal(approve_id: str):
                 or m.get("role") != "assistant"
                 or not str(m.get("content", "")).strip()):
             return "", "that message is not a sandbox permission proposal."
+        minted = m.get("sandbox_minted_at")
+        if isinstance(minted, int) and minted > 0 and time.time() - minted > CARD_MAX_AGE_SECONDS:
+            return "", ("that proposal is too old to approve. Re-run the task "
+                        "sandboxed for a fresh card.")
         if m.get("sandbox_denied_at"):
             return "", ("that proposal was denied. Re-run the task sandboxed for a "
                         "fresh card.")
@@ -2983,7 +2995,9 @@ def _consume_approved_proposal(approve_id: str) -> bool:
     for m in msgs:
         if not isinstance(m, dict) or str(m.get("id", "")) != str(approve_id):
             continue
-        if m.get("sandbox_approved_at"):
+        if m.get("sandbox_approved_at") or m.get("sandbox_denied_at"):
+            # A Deny that lands between resolve and consume must win: otherwise the
+            # user gets the write they just refused.
             return False
         m["sandbox_approved_at"] = int(time.time())
         save_json_file(HISTORY_FILE, hist)
@@ -3387,6 +3401,9 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
         # mode in force at that moment, so the card's copy cannot describe a mode
         # the toggle has since changed.
         "sandbox_token": sandbox_token if sandbox_request else "",
+        # A card is an approval for a moment in time: without this one minted while
+        # the context was poisoned stays approvable forever.
+        "sandbox_minted_at": int(time.time()) if sandbox_request else None,
         "sandbox_mode": sandbox_mode if sandbox_request else None
     }
     msgs.append(msg)
@@ -3695,7 +3712,10 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
     mode_line = build_mode_line(is_sandboxed, approved=bool(approved_scope))
     # A fresh token per turn: the only thing that can make a marker line the
     # model's own. It never leaves the prompt, so quoted text cannot carry it.
-    approval_token = secrets.token_hex(6) if engine == "hermes" else ""
+    # No envelope on an approved (--yolo) run: it reads untrusted files, and a card
+    # minted there would turn one click into a repeatable ladder.
+    approval_token = "" if approved_scope else (
+        secrets.token_hex(6) if engine == "hermes" else "")
     hermes_prompt = build_hermes_prompt(
         final_prompt, BOTTY_AGENT_DIRECTIVE, mode_line, include_directive,
         build_approval_envelope_line(approval_token))
@@ -3931,15 +3951,11 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
 
         # Detect the sandbox permission request BEFORE persisting, so the
         # structured flag rides on the history message and the UI never has to
-        # infer approval state from model text.
-        # Security (A2): match outside fenced code so reflected untrusted text
-        # quoted in fences cannot mint the approval UX. Blockquote and HTML
-        # comment lines are dropped (not unquoted — unquoting would normalize
-        # them back into a match). Plain-prose model requests still match;
-        # the user approval click remains the control.
-        _nomark = _strip_fenced_code(cleaned_response)
-        _nomark = re.sub(r"<!--[\s\S]*?-->", "", _nomark)
-        _nomark = "\n".join(l for l in _nomark.split("\n") if not re.match(r"\s{0,3}>", l))
+        # infer approval state from model text. Two gates: the marker line must
+        # carry this turn's token (only the model received it) and must sit in the
+        # model's own prose - _has_permission_marker strips fenced, HTML and
+        # blockquoted regions itself, so a model repeating its own envelope inside
+        # a code block mints nothing.
         is_permission_required = _has_permission_marker(cleaned_response, approval_token)
         add_history_message("assistant", cleaned_response, actions=actions,
                             model=selected_model, engine=engine,
@@ -3950,7 +3966,11 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
 
         if is_permission_required:
             set_status("idle", headline="Permission Required", last_query=query, last_answer=cleaned_response)
-            send_system_notification("blocked", "Botty — Permission Required", "Botty needs your approval to bypass sandbox for writes.", urgency="critical")
+            _blocked_body = ("Botty needs your approval to bypass the sandbox for writes."
+                             if get_sandbox_mode() else
+                             "The agent proposed a write it could not perform alone.")
+            send_system_notification("blocked", "Botty — Permission Required",
+                                     _blocked_body, urgency="critical")
         else:
             set_status("idle", headline="Ready", last_query=query, last_answer=cleaned_response)
             # Notification copy is non-sensitive boilerplate (F3): never put the
@@ -4035,6 +4055,10 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     spawn call refunds on a raise (nothing was created) and a run that produced
     output never refunds.
     """
+    if deny_id:
+        # The parameter is documented: a Python caller must get the same retirement
+        # the CLI does instead of a silently ignored argument.
+        _deny_approved_proposal(str(deny_id))
     args = (query, image_path, file_path, screen_context, situation_context,
             model, provider, bypass_sandbox, approve_id, deny_id)
     try:
@@ -5001,8 +5025,7 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
             # omp's documented file transport (MESSAGES prefixed with @) keeps the
             # conversation out of argv; the file is owner-only and removed below.
             omp_distill_file = BOTTY_DATA_DIR / "current_distill_prompt.txt"
-            omp_distill_file.write_text(distillation_prompt, encoding="utf-8")
-            secure_file_permissions(omp_distill_file)
+            _write_private_file(omp_distill_file, distillation_prompt)
             cmd = ["omp", "-p", "--allow-home", "@" + str(omp_distill_file)]
         elif engine == "claude":
             cmd = ["claude", "-p"]
@@ -5275,7 +5298,11 @@ def get_clipboard_image() -> Dict[str, Any]:
     timestamp = int(time.time() * 1000)
     clip_path = SCREENSHOT_DIR / f"clip_{timestamp}.png"
     try:
-        proc = subprocess.run(["wl-paste", "--type", "image/png"], stdout=open(clip_path, "wb"), stderr=subprocess.PIPE, timeout=3)
+        # The handle must be closed: one descriptor leaked per clipboard attach, and
+        # the PNG existed at the umask mode until the chmod below.
+        with open(clip_path, "wb") as clip_out:
+            proc = subprocess.run(["wl-paste", "--type", "image/png"], stdout=clip_out,
+                                  stderr=subprocess.PIPE, timeout=3)
         if proc.returncode == 0 and clip_path.exists() and clip_path.stat().st_size > 0:
             secure_file_permissions(clip_path)
             _prune_captures()

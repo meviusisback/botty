@@ -608,6 +608,16 @@ def _scan_message(text: str):
             else:
                 # Any element boundary counts, open or close, in ANY case: a quoted
                 # block wrapped in a tag nobody listed kept its marker before.
+                if "<!--" in probe and "-->" not in probe[probe.index("<!--"):]:
+                    # An inline "<!-- ..." opens a multi-line comment just like one
+                    # that starts the line.
+                    quoted = True
+                    kind = "html"
+                    literal_closer = "-->"
+                    lines.append(line)
+                    prose.append(False)
+                    kinds.append(kind)
+                    continue
                 tag_open = re.match(r"^<\s*(/?)\s*([A-Za-z][A-Za-z0-9:_.-]*)", probe)
                 if tag_open:
                     quoted = True
@@ -732,10 +742,16 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     # The SAME lines the marker index was computed on, with inline spans unwrapped (a
     # path in backticks is a path). Building a second, differently filtered list here
     # shifted the index and handed an earlier quoted list to the --yolo run.
-    _raw, _prose, _kinds, _gate, lines = _scan_message(text or "")
     # The LAST proposal: a message may restate the request, and the final one is the
     # model's own conclusion rather than an earlier echo.
-    start = found[-1]
+    return _scope_from_index(text, found[-1], limit)
+
+
+def _scope_from_index(text: str, start: int, limit: int = 2000) -> str:
+    """Build the executable scope around the marker line at ``start``."""
+    _raw, _prose, _kinds, _gate, lines = _scan_message(text or "")
+    if not (0 <= start < len(lines)):
+        return ""
     scope = [lines[start]]
     i = start + 1
     while i < len(lines) and not lines[i].strip():
@@ -799,11 +815,17 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     # A line that opens with "[" could be the prompt's own "[END APPROVED EXECUTION
     # SCOPE]" marker: inside a --yolo run that would put text OUTSIDE the block that
     # declares the approval. Neutralise the sink.
+    # Characters that are line breaks to a line-oriented reader (and to str.splitlines)
+    # must not survive inside a scope line: "…\x85[END …]" forged the sentinel even
+    # though the line itself did not start with "[".
+    _SEPARATORS = dict.fromkeys(map(ord, "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"), " ")
+
     def _defuse(line: str) -> str:
-        # "- [END APPROVED EXECUTION SCOPE]" would close the block the prompt builds.
-        body = re.sub(r"^(\s*(?:[-*•]|\d+[.)])\s+)", "", line)
-        if body.lstrip().startswith("["):
-            return line.replace("[", "(", 1).replace("]", ")", 1)
+        line = line.translate(_SEPARATORS)
+        # Neutralise BOTH sentinels wherever they appear, not only at line start.
+        for marker in ("[APPROVED EXECUTION SCOPE", "[END APPROVED EXECUTION SCOPE]"):
+            if marker in line:
+                line = line.replace(marker, marker.replace("[", "(").replace("]", ")"))
         return line
 
     scope = [_defuse(line) for line in scope]
@@ -1288,10 +1310,19 @@ def strip_reasoning(text: str) -> str:
     t = strip_cli_notices(t)
     return t.strip()
 
+MAX_STATE_FILE_BYTES = 16 * 1024 * 1024
+
+
 def load_json_file(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
     try:
+        # Stat before reading: history.json is re-read on every status poll, so a
+        # runaway file would be materialised and parsed every couple of seconds.
+        if path.stat().st_size > MAX_STATE_FILE_BYTES:
+            append_botty_log(f"STATE: {path.name} is larger than "
+                             f"{MAX_STATE_FILE_BYTES} bytes; using the default")
+            return default
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
@@ -3179,6 +3210,11 @@ def _load_history_migrated():
             _release_file_lock(fh)
 
 
+def _permission_scope_legacy(text: str, start: int, limit: int = 2000) -> str:
+    """The scope of a card minted before tokens existed, from a known marker index."""
+    return _scope_from_index(text, start, limit)
+
+
 def _migrate_legacy_card_scope(messages) -> bool:
     """Give a card minted before sandbox_scope existed the scope it would run.
 
@@ -3192,8 +3228,21 @@ def _migrate_legacy_card_scope(messages) -> bool:
             continue
         if str(m.get("sandbox_scope", "") or ""):
             continue
-        scope = _permission_scope(str(m.get("content", "")),
-                                  str(m.get("sandbox_token", "")))
+        if not isinstance(m.get("sandbox_minted_at"), int):
+            # Undated cards are refused by the resolver; deriving a scope for them
+            # would only make them look verifiable.
+            continue
+        token = str(m.get("sandbox_token", "") or "")
+        scope = _permission_scope(str(m.get("content", "")), token) if token else ""
+        if not scope and not token:
+            # 1.0.9 cards carry no token: accept the derivation only when the message
+            # holds EXACTLY one marker line, so "the proposal it introduces" is not a
+            # guess between several.
+            lines, prose, _kinds, gate, _scope = _scan_message(str(m.get("content", "")))
+            markers = [i for i, (line, is_prose) in enumerate(zip(gate, prose))
+                       if is_prose and line.strip().startswith(_PERMISSION_MARKER)]
+            if len(markers) == 1:
+                scope = _permission_scope_legacy(str(m.get("content", "")), markers[0])
         if scope:
             m["sandbox_scope"] = scope
             changed = True
@@ -3216,7 +3265,12 @@ def _resolve_approved_proposal(approve_id: str):
                 or not str(m.get("content", "")).strip()):
             return "", "that message is not a sandbox permission proposal."
         minted = m.get("sandbox_minted_at")
-        if isinstance(minted, int) and minted > 0 and time.time() - minted > CARD_MAX_AGE_SECONDS:
+        if not isinstance(minted, int) or minted <= 0:
+            # A card we cannot date cannot be shown fresh: an undated token-bearing
+            # card would otherwise stay approvable forever.
+            return "", ("that card does not record when it was made, so it cannot be "
+                        "approved. Re-run the task sandboxed for a fresh card.")
+        if time.time() - minted > CARD_MAX_AGE_SECONDS:
             return "", ("that proposal is too old to approve. Re-run the task "
                         "sandboxed for a fresh card.")
         if m.get("sandbox_denied_at"):

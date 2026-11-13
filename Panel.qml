@@ -95,7 +95,7 @@ Panel {
     if (msgs.length === 0) return ""
     // The newest ACTIONABLE proposal, not simply the last message: a refusal row
     // or any other answer landing after the card must not hide the banner.
-    for (var i = msgs.length - 1; i >= 0 && i > msgs.length - 21; i--) {
+    for (var i = msgs.length - 1; i >= 0; i--) {
       var m = msgs[i]
       if (!m || m.role !== "assistant" || m.sandbox_request !== true) continue
       if (!root.cardIsApprovable(m)) continue   // used, denied, legacy or expired
@@ -368,6 +368,7 @@ Panel {
   function lastPendingPermissionId() { return root.pendingPermissionId }
 
   function approveSandboxBypass(messageId) {
+    root.keepDraftOnSend = true
     // The approval is bound to the card the user clicked: the id travels with the
     // request and the backend resolves THAT message (a forward/backward scan for
     // "the newest proposal" let an injected card become the executed payload).
@@ -408,6 +409,10 @@ Panel {
     testNotifProc.running = false
     testNotifProc.running = true
   }
+
+  // Approve/Deny send a fixed sentence, not the composer: setting this keeps the
+  // user's draft and staged attachment across the click.
+  property bool keepDraftOnSend: false
 
   function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox, approveId, denyId) {
     if (askProc.running || root.rawStatus.state === "working") return
@@ -465,16 +470,19 @@ Panel {
     // Optimistically update status and clear input
     root.rawStatus.state = "working"
     root.rawStatus.headline = "Botty thinking…"
-    promptInput.text = ""
-    root.promptText = ""
-    root.attachedFilePath = ""
-    root.attachedFileName = ""
-    root.attachedFileSize = ""
-    root.attachedFileIsImage = false
-    root.screenContextEnabled = false
-    root.situationContextEnabled = false
-    root.lastCaptureInfo = null
-    root.situationData = null
+    if (!root.keepDraftOnSend) {
+      promptInput.text = ""
+      root.promptText = ""
+      root.attachedFilePath = ""
+      root.attachedFileName = ""
+      root.attachedFileSize = ""
+      root.attachedFileIsImage = false
+      root.screenContextEnabled = false
+      root.situationContextEnabled = false
+      root.lastCaptureInfo = null
+      root.situationData = null
+    }
+    root.keepDraftOnSend = false
     root.fetchHistory()
     root.scrollChatToEnd()
     Qt.callLater(function() {
@@ -1658,7 +1666,8 @@ Panel {
               Text {
                 id: statusText
                 anchors.centerIn: parent
-                text: Model.statusBadgeText(root.rawStatus.state, root.rawStatus.headline)
+                text: Model.statusBadgeText(root.rawStatus.state,
+                                    root.pendingPermissionId !== "" ? "Permission Required" : "")
                 textFormat: Text.PlainText
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(9)
@@ -2662,6 +2671,7 @@ Panel {
                             // A card older than the backend's 30-minute limit is
                             // refused on click: do not offer the button.
                             visible: root.cardIsApprovable(modelData)
+                            enabled: !root.isProcessing
                             onClicked: {
                               root.approveSandboxBypass(
                                     modelData.sandbox_request === true ? modelData.id : "")
@@ -2707,10 +2717,12 @@ Panel {
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             visible: !modelData.sandbox_approved_at && !modelData.sandbox_denied_at
+                        enabled: !root.isProcessing
                             onClicked: {
                               // The refusal must RETIRE the card: a deny that only
                               // sends a chat message left the proposal executable
                               // on a later click.
+                              root.keepDraftOnSend = true
                               root.sendQuery((modelData.sandbox_mode === true)
                                                ? "Do not execute these changes. Keep the environment sandboxed."
                                                : "Do not execute these changes.",
@@ -2885,10 +2897,14 @@ Panel {
                     font.pixelSize: Style.font.body
                     font.bold: true
                     color: "#F59E0B"
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
                   }
 
                   Text {
                     textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    Layout.fillWidth: true
                     text: {
                       var card = root.pendingPermissionCard
                       var mode = card && card.sandbox_mode === true
@@ -2913,12 +2929,14 @@ Panel {
                       var card = root.pendingPermissionCard
                       if (!card || !card.sandbox_scope) return ""
                       var all = String(card.sandbox_scope).split("\n")
+                      if (all.length <= 8) return all.join("\n")
+                      // Never look complete while it is not: the button runs ALL of it.
                       return all.slice(0, 8).join("\n")
+                             + "\n… +" + (all.length - 8) + " more line(s) — full text on the card"
                     }
                     visible: text !== ""
                     wrapMode: Text.Wrap
-                    maximumLineCount: 8
-                    elide: Text.ElideRight
+                    Layout.fillWidth: true
                     Layout.fillWidth: true
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
@@ -2965,6 +2983,7 @@ Panel {
                   fontSize: Style.space(10)
                   onClicked: {
                     var carded = root.pendingPermissionCard
+                    root.keepDraftOnSend = true
                     root.sendQuery((carded && carded.sandbox_mode === true)
                                      ? "Do not execute these changes. Keep the environment sandboxed."
                                      : "Do not execute these changes.", "", false, false, false,

@@ -74,8 +74,20 @@ Panel {
   function cardIsApprovable(m) {
     if (!m) return false
     if (m.sandbox_approved_at || m.sandbox_denied_at || !m.sandbox_token) return false
-    if (m.sandbox_minted_at && (Date.now() / 1000 - m.sandbox_minted_at) > 1800) return false
+    // No stored scope means the card cannot print what would run: never approve it.
+    if (!m.sandbox_scope) return false
+    if (m.sandbox_minted_at && (root.nowTick / 1000 - m.sandbox_minted_at) > 1800) return false
     return true
+  }
+
+  // The 30-minute limit must expire on screen, not only when some unrelated change
+  // re-evaluates a binding: this ticks while a card is pending.
+  property double nowTick: Date.now()
+  Timer {
+    interval: 30000
+    repeat: true
+    running: root.pendingPermissionId !== ""
+    onTriggered: root.nowTick = Date.now()
   }
 
   readonly property string pendingPermissionId: {
@@ -1483,12 +1495,13 @@ Panel {
         textFormat: Text.PlainText
         // A pending card outranks the last-request snippet in every text mode:
         // Status mode used to show the previous query while a write waited.
-        text: (root.pendingPermissionId !== ""
-               || root.barDisplay.toLowerCase() === "compact")
-          ? Model.statusBadgeText(root.pendingPermissionId !== "" ? "waiting" : root.rawStatus.state,
-                                  root.pendingPermissionId !== "" ? "Permission Required"
-                                                                 : root.rawStatus.headline)
-          : Model.getBarHeadline(root.rawStatus, 24)
+        // Compact mode used to map a stale "Permission Required" headline to APPROVE
+        // long after the card expired; the card scan is the only source of truth.
+        text: root.pendingPermissionId !== ""
+          ? Model.statusBadgeText("waiting", "Permission Required")
+          : (root.barDisplay.toLowerCase() === "compact")
+            ? Model.statusBadgeText(root.rawStatus.state, "")
+            : Model.getBarHeadline(root.rawStatus, 24)
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
         color: root.foreground
@@ -2621,6 +2634,18 @@ Panel {
                           spacing: Style.space(8)
                           Layout.topMargin: Style.space(2)
 
+                          Text {
+                            textFormat: Text.PlainText
+                            text: "This card is older than 30 minutes, so Botty will not run it. Re-run the task sandboxed for a fresh card."
+                            visible: !!modelData.sandbox_token && !modelData.sandbox_approved_at
+                                     && !modelData.sandbox_denied_at && !root.cardIsApprovable(modelData)
+                            wrapMode: Text.Wrap
+                            Layout.fillWidth: true
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.space(10)
+                            color: "#F59E0B"
+                          }
+
                           Button {
                             iconText: "󰄬"
                             text: (modelData.sandbox_mode === true) ? "Approve & Bypass Sandbox" : "Approve & Run Once"
@@ -2871,6 +2896,25 @@ Panel {
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)
                     color: root.foreground
+                  }
+
+                  // A banner without the proposal is a blind approval surface: print
+                  // the last line of the exact text that will run.
+                  Text {
+                    textFormat: Text.PlainText
+                    text: {
+                      var card = root.pendingPermissionCard
+                      if (!card || !card.sandbox_scope) return ""
+                      var lines = String(card.sandbox_scope).split("\n")
+                      return lines[lines.length - 1]
+                    }
+                    visible: text !== ""
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.space(10)
+                    color: root.foreground
+                    opacity: 0.85
                   }
                 }
               }
@@ -3783,7 +3827,13 @@ Panel {
               selected: settingsViewItem.settingsTab === "models"
               implicitHeight: Style.space(32)
               fontSize: Style.space(10)
-              onClicked: settingsViewItem.settingsTab = "models"
+              onClicked: {
+                settingsViewItem.settingsTab = "models"
+                // A sub-tab switch destroys the model-search field if it holds focus;
+                // without this the popup is left with no active-focus item and
+                // Escape/panel keys stop working until the user clicks inside.
+                root.releasePromptFocus()
+              }
             }
 
             Button {
@@ -3792,7 +3842,13 @@ Panel {
               selected: settingsViewItem.settingsTab === "sandbox"
               implicitHeight: Style.space(32)
               fontSize: Style.space(10)
-              onClicked: settingsViewItem.settingsTab = "sandbox"
+              onClicked: {
+                settingsViewItem.settingsTab = "sandbox"
+                // A sub-tab switch destroys the model-search field if it holds focus;
+                // without this the popup is left with no active-focus item and
+                // Escape/panel keys stop working until the user clicks inside.
+                root.releasePromptFocus()
+              }
             }
 
             Button {
@@ -3801,7 +3857,13 @@ Panel {
               selected: settingsViewItem.settingsTab === "notifications"
               implicitHeight: Style.space(32)
               fontSize: Style.space(10)
-              onClicked: settingsViewItem.settingsTab = "notifications"
+              onClicked: {
+                settingsViewItem.settingsTab = "notifications"
+                // A sub-tab switch destroys the model-search field if it holds focus;
+                // without this the popup is left with no active-focus item and
+                // Escape/panel keys stop working until the user clicks inside.
+                root.releasePromptFocus()
+              }
             }
 
             Item { Layout.fillWidth: true }

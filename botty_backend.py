@@ -537,122 +537,125 @@ def _drop_inline_fences(text: str) -> str:
     return "\n".join(out)
 
 
-def _strip_fenced_code(text: str, keep_inline: bool = False,
-                       keep_indented_bullets: bool = False) -> str:
-    """Remove everything the model might be QUOTING, leaving its own prose.
+def _scan_message(text: str):
+    """One pass over the message: lines, quote flags, and the two renders.
 
-    Attacker-controlled screen/file/window text reaches the model inside a quote
-    of some form, and a permission marker found there must not mint an approval
-    card. Fixed-width regexes were the wrong tool: a four-backtick fence holding a
-    three-backtick line closed on the inner run, so the quoted marker survived.
-    This walks fences properly (same character, closing run at least as long as
-    the opener), then drops indented blocks, blockquote lines, HTML comments and
-    inline code spans of any length.
+    Returns ``(lines, prose, gate_lines, scope_lines)``. Every line of the message
+    is present in every list, so an index computed for the gate can be used to slice
+    the scope - the off-by-N between two differently filtered views was what let a
+    quoted list above the marker become the approved --yolo payload.
+
+    ``prose[i]`` is False when line i sits inside a quoted region (fence, HTML or
+    CDATA block, indented block, blockquote): such text can never be the model's own
+    request, whatever token it carries. ``gate_lines`` blanks inline code spans (a
+    quoted span is quoted text); ``scope_lines`` unwraps them (a path in backticks is
+    a path, and the scope is what runs).
     """
-    text = _drop_inline_fences(text)
-    out = []
+    raw = _drop_inline_fences(text or "")
+    lines = []
+    prose = []
     fence_char = ""
     fence_len = 0
-    html_stack = []          # open elements (nesting), or one literal closer
+    html_stack = []          # open elements (nesting)
     literal_closer = ""      # ]]> / ?> / %> handled as a single sentinel
-    for line in _scope_lines(text):
-        # Openers are recognised on the line with its indentation and any blockquote
-        # markers removed: a 4-space or "> " prefixed <div> used to be dropped as a
-        # line while the block it opened was never recorded, so its body was prose.
+    for line in _scope_lines(raw):
         probe = re.sub(r"^(?:\s*>\s*)+", "", line).lstrip()
+        quoted = False
         if literal_closer:
+            quoted = True
             if literal_closer in line:
                 literal_closer = ""
-            continue
-        if html_stack:
+        elif html_stack:
             if _FENCE_RE.match(line.lstrip()):
-                # A fence in the middle of a quoted block: close the block and let
-                # the fence scanner see the run instead of swallowing it.
                 html_stack = []
                 probe = line.lstrip()
             else:
-                # Only a line that is JUST the closing tag of the element we opened
-                # ends the block. Counting closers per line let an inner
-                # "<div>…</div>" pop the outer <div>, and everything after it read
-                # as prose (the marker inside a nested quote then minted a card).
+                quoted = True
+                # Only a line that is JUST a tag ends or opens a level: an inner
+                # "<div>…</div>" on the same line must not pop the outer element, and
+                # a nested multi-line <div> must push so its closer pops the inner one.
+                # Close first (a lone </tag>), then push the elements this line
+                # OPENS and does not close itself: "<div class=\"body\">" inside an
+                # open <div> must deepen the nesting, or its closer ends the outer one.
                 lone_close = re.match(r"^</\s*([A-Za-z][A-Za-z0-9:_.-]*)\s*>\s*$", probe)
                 if lone_close and lone_close.group(1).lower() == html_stack[-1]:
                     html_stack.pop()
-                continue
-        # ANY element boundary counts, not a whitelist: <div>, <p>, <ul>, <xmp>,
-        # <plaintext>, <svg>, namespaced forms - a quoted block wrapped in a tag
-        # nobody listed used to keep its marker and mint the card. Fail closed: an
-        # unknown tag removes text instead of keeping it.
-        # CDATA, processing instructions and ALL template forms: "<%" alone and
-        # "<%=" were not openers (the pattern demanded a character after '%' and
-        # explicitly excluded '='), so their body stayed "prose".
-        special_open = re.match(r"^(<!\[CDATA\[|<\?|<%|<![A-Za-z])", probe)
-        if special_open:
-            opener = special_open.group(1)
-            closer = {"<![CDATA[": "]]>", "<?": "?>", "<%": "%>"}.get(opener, ">")
-            if closer in probe[special_open.end():]:
-                continue
-            literal_closer = closer
-            continue
-        html_open = re.match(r"^</?\s*([A-Za-z][A-Za-z0-9:_.-]*)", probe)
-        if html_open:
-            tag = html_open.group(1).lower()
-            opens_here = not probe.startswith("</")
-            # Same line closers for THIS tag only; a nested <div>...</div> must not
-            # end an outer <div> (that is how a quoted block reopened).
-            closed_here = []
-            for m2 in re.finditer(r"</\s*([A-Za-z][A-Za-z0-9:_.-]*)\s*>", probe):
-                closed_here.append(m2.group(1).lower())
-            if (not opens_here or re.search(r"/\s*>\s*$", probe)
-                    or (probe.count("<" + tag) <= probe.count("</" + tag))):
-                for name in closed_here:
-                    if name in html_stack:
+                for tag_open in re.finditer(r"<\s*([A-Za-z][A-Za-z0-9:_.-]*)", probe):
+                    if tag_open.group(0).startswith("</"):
+                        continue
+                    name = tag_open.group(1).lower()
+                    closed_here = [m.group(1).lower() for m in
+                                   re.finditer(r"</\s*([A-Za-z][A-Za-z0-9:_.-]*)\s*>", probe)]
+                    if re.search(r"/\s*>", probe):
+                        continue
+                    if name in closed_here:
+                        continue
+                    html_stack.append(name)
+        if not quoted:
+            special_open = re.match(r"^(<!\[CDATA\[|<\?|<%|<![A-Za-z])", probe)
+            if special_open:
+                opener = special_open.group(1)
+                closer = {"<![CDATA[": "]]>", "<?": "?>", "<%": "%>"}.get(opener, ">")
+                quoted = True
+                if closer not in probe[special_open.end():]:
+                    literal_closer = closer
+            else:
+                # Any element boundary counts, open or close, in ANY case: a quoted
+                # block wrapped in a tag nobody listed kept its marker before.
+                tag_open = re.match(r"^<\s*(/?)\s*([A-Za-z][A-Za-z0-9:_.-]*)", probe)
+                if tag_open:
+                    quoted = True
+                    name = tag_open.group(2).lower()
+                    if not tag_open.group(1):
+                        self_closing = bool(re.search(r"/\s*>\s*$", probe))
+                        closed_here = [m.group(1).lower() for m in
+                                       re.finditer(r"</\s*([A-Za-z][A-Za-z0-9:_.-]*)\s*>", probe)]
+                        if not self_closing and name not in closed_here:
+                            html_stack.append(name)
+                    elif name in html_stack:
                         while html_stack and html_stack.pop() != name:
                             pass
-                continue
-            html_stack.append(tag)
-            for name in closed_here:
-                if name in html_stack:
-                    while html_stack and html_stack.pop() != name:
-                        pass
-            continue
-        # An indented fence run still OPENS a fence (a model indents inside a list),
-        # but only an un-indented one may CLOSE it: a 4-space line inside a fence is
-        # content, and letting it close the block is how quoted text escaped.
-        m = _FENCE_RE.match(line)
-        m_opener = _FENCE_RE.match(line.lstrip()) if not m else m
-        if fence_char:
-            # Inside a fence every line is content except a closer of the same
-            # character, at least as long, with no info string and NOT indented
-            # deeper than the opener.
-            if (m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len
-                    and not m.group(2).strip()):
-                fence_char = ""
-                fence_len = 0
-            continue
-        if m_opener:
-            fence_char = m_opener.group(1)[0]
-            fence_len = len(m_opener.group(1))
-            continue
-        if re.match(r"^(?: {4}|\t)", line) or re.match(r"^\s*>", line):
-            # An indented bullet is list content, not a quoted block: models indent
-            # proposals, and dropping the line threw away the actions themselves.
-            if keep_indented_bullets and re.match(r"^\s*(?:[-*•]|\d+[.)])\s+\S", line):
-                out.append(line.strip())
-                continue
-            continue
-        out.append(line)
-    cleaned = "\n".join(out)
-    # Anything still carrying a run is a leftover span on one line only.
-    cleaned = re.sub(r"```[^\n]*", "", cleaned)
-    cleaned = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", cleaned)
-    if keep_inline:
-        # Keep the CONTENT of an inline span: models put paths and commands in
-        # backticks, and deleting them left the executed scope with empty bullets.
-        cleaned = re.sub(r"`+([^`\n]*)`+", r"\1", cleaned)
-    else:
-        cleaned = re.sub(r"`+[^`\n]*`+", "", cleaned)
-    return cleaned
+                elif re.match(r"^\s*(?: {4}|\t)", line) or re.match(r"^\s*>", line):
+                    quoted = True
+        if not quoted:
+            fence_run = _FENCE_RE.match(line)
+            fence_any = fence_run or _FENCE_RE.match(line.lstrip())
+            if fence_char:
+                quoted = True
+                if (fence_run and fence_run.group(1)[0] == fence_char
+                        and len(fence_run.group(1)) >= fence_len
+                        and not fence_run.group(2).strip()):
+                    fence_char = ""
+                    fence_len = 0
+            elif fence_any:
+                quoted = True
+                fence_char = fence_any.group(1)[0]
+                fence_len = len(fence_any.group(1))
+        lines.append(line)
+        prose.append(not quoted)
+
+    def _render(keep_inline: bool):
+        out = []
+        for line in lines:
+            cleaned = re.sub(r"```[^\n]*", "", line)
+            cleaned = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", cleaned)
+            if keep_inline:
+                cleaned = re.sub(r"`+([^`\n]*)`+", r"\1", cleaned)
+            else:
+                cleaned = re.sub(r"`+[^`\n]*`+", "", cleaned)
+            out.append(cleaned)
+        return out
+
+    return lines, prose, _render(False), _render(True)
+
+
+def _strip_fenced_code(text: str, keep_inline: bool = False,
+                       keep_indented_bullets: bool = False) -> str:
+    """Prose only, as a string (kept for callers that want the text)."""
+    _lines, _prose, gate, scope = _scan_message(text)
+    rendered = scope if keep_inline else gate
+    kept = [line for line, is_prose in zip(rendered, _prose) if is_prose]
+    return "\n".join(kept)
 
 
 _PERMISSION_MARKER = "🔒 SANDBOX PERMISSION REQUIRED"
@@ -670,17 +673,15 @@ def _scope_lines(text: str) -> list:
 
 
 def _proposal_lines(text: str, token: str = ""):
-    """The lines to search and the indices of the marker lines that count.
+    """The message's lines and the indices of the marker lines that count.
 
     Two independent gates: the marker line must carry this turn's token (the proof
-    of authorship), and it must sit in the model's own prose - a marker the model
-    echoes inside a fence, a blockquote or an HTML block is quoted text, whatever
-    it carries. The token alone would let a model that repeats its own envelope
-    inside a code block mint a card from the example.
+    of authorship) and it must sit in the model's own prose - a marker echoed inside
+    a fence, a blockquote or an HTML block is quoted text, whatever it carries.
     """
-    lines = _scope_lines(_strip_fenced_code(text or ""))
-    found = [i for i, line in enumerate(lines)
-             if _marker_line_carries_token(line, token)]
+    lines, prose, gate, _scope = _scan_message(text or "")
+    found = [i for i, (line, is_prose) in enumerate(zip(gate, prose))
+             if is_prose and _marker_line_carries_token(line, token)]
     return lines, found
 
 
@@ -717,10 +718,10 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     lines, found = _proposal_lines(text, token)
     if not found:
         return ""
-    # Same lines, but an inline span keeps its content (a path in backticks is a
-    # path, not decoration): the scope is what runs, so it must be verbatim.
-    lines = _scope_lines(_strip_fenced_code(text, keep_inline=True,
-                                           keep_indented_bullets=True))
+    # The SAME lines the marker index was computed on, with inline spans unwrapped (a
+    # path in backticks is a path). Building a second, differently filtered list here
+    # shifted the index and handed an earlier quoted list to the --yolo run.
+    _raw, _prose, _gate, lines = _scan_message(text or "")
     # The LAST proposal: a message may restate the request, and the final one is the
     # model's own conclusion rather than an earlier echo.
     start = found[-1]
@@ -775,6 +776,12 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
             return ""
     # Cap on WHOLE lines: cutting at a character offset sent "- rm -rf ~/Documents/old"
     # to the run as "- rm -rf ~", which is a broader path than the one approved.
+    # Neutralise bidi and other format controls: Qt applies the Unicode bidi
+    # algorithm to Text.PlainText, so a U+202E in the scope would be READ in a
+    # different order than the run receives it.
+    _BIDI = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+                                 "\u2066\u2067\u2068\u2069\u061c"), None)
+    scope = [line.translate(_BIDI) for line in scope]
     kept = []
     used = 0
     for line in scope:
@@ -3103,6 +3110,27 @@ def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
 
 
 @_synchronized
+def _migrate_legacy_card_scope(messages) -> bool:
+    """Give a card minted before sandbox_scope existed the scope it would run.
+
+    Cards written by 1.0.9/early 1.0.10 have the token but no stored scope, so the
+    card printed nothing while the resolver executed re-derived text. Deriving once,
+    PERSISTING it, and then printing it makes display and execution one string again.
+    """
+    changed = False
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("sandbox_request") is not True:
+            continue
+        if str(m.get("sandbox_scope", "") or ""):
+            continue
+        scope = _permission_scope(str(m.get("content", "")),
+                                  str(m.get("sandbox_token", "")))
+        if scope:
+            m["sandbox_scope"] = scope
+            changed = True
+    return changed
+
+
 def _resolve_approved_proposal(approve_id: str):
     """Read a sandbox proposal without consuming it. Returns (scope, refusal).
 
@@ -3111,6 +3139,9 @@ def _resolve_approved_proposal(approve_id: str):
     """
     hist = load_json_file(HISTORY_FILE, {"messages": []})
     msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+    if isinstance(hist, dict) and _migrate_legacy_card_scope(msgs):
+        # Persist the derived scope so the card prints exactly what it executes.
+        save_json_file(HISTORY_FILE, hist)
     for m in msgs:
         if not isinstance(m, dict) or str(m.get("id", "")) != str(approve_id):
             continue
@@ -3131,12 +3162,16 @@ def _resolve_approved_proposal(approve_id: str):
         # Only the proposal block is approved, never the rest of the message. The
         # scope is bound to the token that minted the card: a message whose marker
         # came from quoted text has no token and cannot be executed.
-        stored = str(m.get("sandbox_scope", "") or "")
-        scope = stored or _permission_scope(str(m.get("content", "")),
-                                            str(m.get("sandbox_token", "")))
+        scope = str(m.get("sandbox_scope", "") or "")
         if not scope:
-            return "", ("that message does not hold an approvable proposal "
-                        "(no approval token). Re-run the task sandboxed.")
+            # Cards minted before the scope was stored cannot be verified: the card
+            # would print nothing while the resolver executed re-derived text.
+            return "", ("that card was made by an older Botty and cannot be verified "
+                        "(it does not record the text it would run). Re-run the task "
+                        "sandboxed and approve the fresh card.")
+        if not _permission_scope(str(m.get("content", "")), str(m.get("sandbox_token", ""))):
+            return "", ("that message does not hold an approvable proposal any more. "
+                        "Re-run the task sandboxed.")
         return scope, ""
     return "", ("that proposal is no longer in the conversation. Re-run the task "
                 "sandboxed and approve the new card.")
@@ -3418,6 +3453,10 @@ def get_history() -> Dict[str, Any]:
         "messages": []
     }
     history = load_json_file(HISTORY_FILE, default_history)
+    # A card from an older build gets its scope derived ONCE and stored, so the card
+    # can print the text it would run (see _migrate_legacy_card_scope).
+    if isinstance(history, dict) and _migrate_legacy_card_scope(history.get("messages")):
+        save_json_file(HISTORY_FILE, history)
     return {"ok": True, "history": history}
 
 @_synchronized
@@ -3857,7 +3896,9 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
     except Exception as e:
         append_botty_log(f"Context bridge read error: {str(e)}")
 
-    add_history_message("user", user_query, attachments=attachments)
+    # An approved bypass carries no user text; an empty row in the chat says nothing.
+    if user_query.strip() or not approved_scope:
+        add_history_message("user", user_query, attachments=attachments)
 
     # Security (H2): the sandbox is technically enforced ONLY by the Hermes
     # engine's approval gate (default-deny single-query mode). The omp/claude/

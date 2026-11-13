@@ -32,7 +32,8 @@ Panel {
   readonly property bool showStatusInBar: (function (v) {
     // shell.json is untyped: the string "false" is truthy, so Boolean() left every
     // bar indicator on after a hand edit.
-    if (typeof v === "string") return v.trim().toLowerCase() !== "false"
+    if (typeof v === "string")
+      return ["false", "0", "no", "off"].indexOf(v.trim().toLowerCase()) === -1
     return Boolean(v)
   })(root.setting("showStatusInBar", true))
   readonly property bool barShowsText: barDisplay.toLowerCase() === "status" || barDisplay.toLowerCase() === "compact"
@@ -76,7 +77,9 @@ Panel {
     if (m.sandbox_approved_at || m.sandbox_denied_at || !m.sandbox_token) return false
     // No stored scope means the card cannot print what would run: never approve it.
     if (!m.sandbox_scope) return false
-    if (m.sandbox_minted_at && (root.nowTick / 1000 - m.sandbox_minted_at) > 1800) return false
+    // The resolver refuses a card it cannot date, so the UI must not offer one.
+    if (typeof m.sandbox_minted_at !== "number" || m.sandbox_minted_at <= 0) return false
+    if ((root.nowTick / 1000 - m.sandbox_minted_at) > 1800) return false
     return true
   }
 
@@ -368,6 +371,7 @@ Panel {
   function lastPendingPermissionId() { return root.pendingPermissionId }
 
   function approveSandboxBypass(messageId) {
+    if (!messageId) return
     root.keepDraftOnSend = true
     // The approval is bound to the card the user clicked: the id travels with the
     // request and the backend resolves THAT message (a forward/backward scan for
@@ -418,7 +422,9 @@ Panel {
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
-    var fpath = filePath || root.attachedFilePath || ""
+    // An approval runs only the proposal: the backend refuses an approved run that
+    // carries an attachment, so never attach one to it.
+    var fpath = filePath || (root.keepDraftOnSend ? "" : root.attachedFilePath) || ""
     var scr = (useScreen !== undefined) ? useScreen : root.screenContextEnabled
     var sit = (useSituation !== undefined) ? useSituation : root.situationContextEnabled
 
@@ -2936,7 +2942,6 @@ Panel {
                     }
                     visible: text !== ""
                     wrapMode: Text.Wrap
-                    Layout.fillWidth: true
                     Layout.fillWidth: true
                     font.family: root.fontFamily
                     font.pixelSize: Style.space(10)

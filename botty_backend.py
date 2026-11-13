@@ -483,6 +483,13 @@ REDACTION_PATTERNS = [
     (re.compile(r"\b((?:gho|ghu|ghs|ghr)_[a-zA-Z0-9]{8})[a-zA-Z0-9]{12,}\b"), r"\1…[REDACTED]"),
     (re.compile(r"\b(github_pat_[a-zA-Z0-9]{4})[a-zA-Z0-9_]{16,}\b"), r"\1…[REDACTED]"),
     (re.compile(r"\b(glpat-[a-zA-Z0-9]{4})[a-zA-Z0-9_-]{12,}\b"), r"\1…[REDACTED]"),
+    # Round-18 audit: these shapes passed through verbatim (a note claimed them
+    # before; the code did not have them).
+    (re.compile(r"\b((?:sk|rk)_(?:live|test)_[a-zA-Z0-9]{6})[a-zA-Z0-9]{10,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(hf_[a-zA-Z0-9]{6})[a-zA-Z0-9]{16,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(npm_[a-zA-Z0-9]{6})[a-zA-Z0-9]{16,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"\b(pypi-[a-zA-Z0-9]{6})[a-zA-Z0-9_-]{16,}\b"), r"\1…[REDACTED]"),
+    (re.compile(r"(?i)\b((?:password|passwd|token|secret)\s*[:=]\s*)\S{6,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(AKIA[0-9A-Z]{4})[0-9A-Z]{12}\b"), r"\1…[REDACTED]"),
     (re.compile(r"\b((?:sk-ant|sk-proj)-[a-zA-Z0-9_-]{4})[a-zA-Z0-9_-]{12,}\b"), r"\1…[REDACTED]"),
     (re.compile(r"\b(AIza[0-9A-Za-z_-]{4})[0-9A-Za-z_-]{31}\b"), r"\1…[REDACTED]"),
@@ -603,12 +610,36 @@ def _scan_message(text: str):
                           "<%": "%>"}.get(opener, ">")
                 quoted = True
                 kind = "html"
-                if closer not in probe[special_open.end():]:
+                _tail = probe[special_open.end():]
+                if opener == "<!--":
+                    # "<!-- ok --> <!--" opens a comment too: the LAST opener is not
+                    # closed, whatever the first pair did.
+                    _last_open = probe.rfind("<!--")
+                    _closed = "<!--" in _tail and "-->" in _tail[_tail.find("<!--"):]
+                    if _last_open != -1 and probe.find("-->", _last_open) == -1:
+                        _closed = False
+                        literal_closer = closer
+                else:
+                    _closed = closer in _tail
+                if not _closed:
                     literal_closer = closer
             else:
                 # Any element boundary counts, open or close, in ANY case: a quoted
                 # block wrapped in a tag nobody listed kept its marker before.
-                if "<!--" in probe and "-->" not in probe[probe.index("<!--"):]:
+                # The first UNCLOSED opener wins: "<!-- ok --> <!--" still opens a
+                # comment for every HTML reader.
+                _rest = probe
+                _unclosed = False
+                while True:
+                    _o = _rest.find("<!--")
+                    if _o == -1:
+                        break
+                    _c = _rest.find("-->", _o)
+                    if _c == -1:
+                        _unclosed = True
+                        break
+                    _rest = _rest[_c + 3:]
+                if _unclosed:
                     # An inline "<!-- ..." opens a multi-line comment just like one
                     # that starts the line.
                     quoted = True
@@ -747,6 +778,15 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     return _scope_from_index(text, found[-1], limit)
 
 
+# Bidi and other format controls: Qt applies the Unicode bidi algorithm to
+# Text.PlainText, so one of these makes the card READ in a different order than
+# the run receives. They are also deleted before a sentinel is matched, because
+# "[E\u200eND …]" reassembles into the sentinel once the mark is gone.
+_FORMAT_CONTROLS = dict.fromkeys(
+    map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
+             "\u2066\u2067\u2068\u2069\u061c"), None)
+
+
 def _scope_from_index(text: str, start: int, limit: int = 2000) -> str:
     """Build the executable scope around the marker line at ``start``."""
     _raw, _prose, _kinds, _gate, lines = _scan_message(text or "")
@@ -821,20 +861,19 @@ def _scope_from_index(text: str, start: int, limit: int = 2000) -> str:
     _SEPARATORS = dict.fromkeys(map(ord, "\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"), " ")
 
     def _defuse(line: str) -> str:
-        line = line.translate(_SEPARATORS)
+        # Format controls FIRST: deleting a bidi mark used to reassemble a sentinel
+        # that the rewrite below had already looked at and left alone.
+        line = line.translate(_FORMAT_CONTROLS).translate(_SEPARATORS)
         # Neutralise BOTH sentinels wherever they appear, not only at line start.
         for marker in ("[APPROVED EXECUTION SCOPE", "[END APPROVED EXECUTION SCOPE]"):
             if marker in line:
                 line = line.replace(marker, marker.replace("[", "(").replace("]", ")"))
         return line
 
+    # _defuse already strips the format controls (Qt applies the bidi algorithm to
+    # Text.PlainText, so a U+202E would be READ in a different order than the run
+    # receives it) before rewriting the sentinels.
     scope = [_defuse(line) for line in scope]
-    # Neutralise bidi and other format controls: Qt applies the Unicode bidi
-    # algorithm to Text.PlainText, so a U+202E in the scope would be READ in a
-    # different order than the run receives it.
-    _BIDI = dict.fromkeys(map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
-                                 "\u2066\u2067\u2068\u2069\u061c"), None)
-    scope = [line.translate(_BIDI) for line in scope]
     kept = []
     used = 0
     for line in scope:
@@ -3216,34 +3255,32 @@ def _permission_scope_legacy(text: str, start: int, limit: int = 2000) -> str:
 
 
 def _migrate_legacy_card_scope(messages) -> bool:
-    """Give a card minted before sandbox_scope existed the scope it would run.
+    """Make the stored scope of a card agree with what this code derives.
 
-    Cards written by 1.0.9/early 1.0.10 have the token but no stored scope, so the
-    card printed nothing while the resolver executed re-derived text. Deriving once,
-    PERSISTING it, and then printing it makes display and execution one string again.
+    Two cases, one rule: a card with a token and no stored scope gets one, and a
+    stored scope that this build would derive differently (an older build wrote it
+    without defusing the sentinels) is replaced. Display and execution stay one
+    string, and the resolver refuses a card whose stored text it cannot reproduce.
     """
     changed = False
     for m in messages or []:
         if not isinstance(m, dict) or m.get("sandbox_request") is not True:
             continue
-        if str(m.get("sandbox_scope", "") or ""):
-            continue
+        # A stored scope does not skip the pass: it is re-derived and, when the
+        # stored text differs, replaced - that is how a scope stored by a build
+        # that did not defuse the sentinels is healed instead of executed as-is.
         if not isinstance(m.get("sandbox_minted_at"), int):
             # Undated cards are refused by the resolver; deriving a scope for them
             # would only make them look verifiable.
             continue
         token = str(m.get("sandbox_token", "") or "")
-        scope = _permission_scope(str(m.get("content", "")), token) if token else ""
-        if not scope and not token:
-            # 1.0.9 cards carry no token: accept the derivation only when the message
-            # holds EXACTLY one marker line, so "the proposal it introduces" is not a
-            # guess between several.
-            lines, prose, _kinds, gate, _scope = _scan_message(str(m.get("content", "")))
-            markers = [i for i, (line, is_prose) in enumerate(zip(gate, prose))
-                       if is_prose and line.strip().startswith(_PERMISSION_MARKER)]
-            if len(markers) == 1:
-                scope = _permission_scope_legacy(str(m.get("content", "")), markers[0])
-        if scope:
+        if not token:
+            # 1.0.9 cards carry no token, and nothing without a token can be approved,
+            # so there is nothing to derive: a scope here would only look verifiable.
+            continue
+        scope = _permission_scope(str(m.get("content", "")), token)
+        if scope and m.get("sandbox_scope") != scope:
+            # Also heals a scope stored by a build that did not defuse the sentinels.
             m["sandbox_scope"] = scope
             changed = True
     return changed
@@ -3289,9 +3326,19 @@ def _resolve_approved_proposal(approve_id: str):
             return "", ("that card was made by an older Botty and cannot be verified "
                         "(it does not record the text it would run). Re-run the task "
                         "sandboxed and approve the fresh card.")
-        if not _permission_scope(str(m.get("content", "")), str(m.get("sandbox_token", ""))):
+        # Re-derive and require an exact match: the string that runs must be the
+        # string this code produces from this message NOW. A stored scope left by an
+        # older build (no defusing, a different parser) would otherwise be pasted
+        # into the --yolo prompt unchecked.
+        fresh = _permission_scope(str(m.get("content", "")),
+                                  str(m.get("sandbox_token", "")))
+        if not fresh:
             return "", ("that message does not hold an approvable proposal any more. "
                         "Re-run the task sandboxed.")
+        if fresh != scope:
+            return "", ("that card no longer matches the proposal it came from "
+                        "(the message and the stored plan disagree). Re-run the task "
+                        "sandboxed and approve the fresh card.")
         return scope, ""
     return "", ("that proposal is no longer in the conversation. Re-run the task "
                 "sandboxed and approve the new card.")
@@ -3505,8 +3552,7 @@ def _apply_pending_reset() -> bool:
             return False
         if bridge:
             try:
-                CONTEXT_BRIDGE_FILE.write_text(bridge, encoding="utf-8")
-                secure_file_permissions(CONTEXT_BRIDGE_FILE)
+                _write_private_file(CONTEXT_BRIDGE_FILE, bridge)
             except Exception as e:
                 append_botty_log(f"Pending bridge write error: {str(e)}")
                 return False
@@ -4484,8 +4530,11 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
         p_data: Dict[str, Any] = {}
         if p_cache_file.exists():
             try:
-                with open(p_cache_file, "r", encoding="utf-8") as f:
-                    p_data = json.load(f)
+                # Same size guard as the state files: this is re-parsed on every
+                # models popup, and the cache is Hermes's (6 MB on this host).
+                if p_cache_file.stat().st_size <= MAX_STATE_FILE_BYTES:
+                    with open(p_cache_file, "r", encoding="utf-8") as f:
+                        p_data = json.load(f)
             except Exception:
                 pass
 
@@ -4876,8 +4925,7 @@ def add_memory(text: str, is_user_fact: bool = False, from_model: bool = False) 
         else:
             new_content = f"{text.strip()}\n"
             
-        target_file.write_text(new_content, encoding="utf-8")
-        secure_file_permissions(target_file)
+        _write_private_file(target_file, new_content)
         set_status(get_status().get("state", "idle"), headline="Memory saved")
         update_encrypted_vault()
         return {"ok": True, "message": "Memory saved successfully."}
@@ -5024,8 +5072,7 @@ def _write_approved_memory(text: str, is_user_fact: bool = False) -> Dict[str, A
         else:
             new_content = f"{text}\n"
 
-        target_file.write_text(new_content, encoding="utf-8")
-        secure_file_permissions(target_file)
+        _write_private_file(target_file, new_content)
         return {"ok": True, "message": "Memory saved to staging (not live)."}
     except Exception as e:
         return {"ok": False, "error": f"Failed to save approved memory: {str(e)}"}
@@ -5581,8 +5628,7 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
             else:
                 if bridge_text:
                     try:
-                        CONTEXT_BRIDGE_FILE.write_text(bridge_text, encoding="utf-8")
-                        secure_file_permissions(CONTEXT_BRIDGE_FILE)
+                        _write_private_file(CONTEXT_BRIDGE_FILE, bridge_text)
                     except Exception as e:
                         append_botty_log(f"Context bridge write error: {str(e)}")
 

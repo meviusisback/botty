@@ -71,7 +71,8 @@ def _exclusive_file_lock():
     BOTTY_DATA_DIR.mkdir(parents=True, exist_ok=True)
     _history_rlock.acquire()
     try:
-        fh = open(HISTORY_LOCK_FILE, "a+b")
+        _lfd = os.open(HISTORY_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        fh = os.fdopen(_lfd, "a+b")
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         return fh
     except Exception:
@@ -509,15 +510,23 @@ def _strip_fenced_code(text: str) -> str:
             if not re.search(r"</\s*" + tag + r"\s*>", line, re.IGNORECASE):
                 html_block = tag
             continue
-        m = _FENCE_RE.match(line.lstrip() if line.startswith("    ") else line)
+        # An indented fence run still OPENS a fence (a model indents inside a list),
+        # but only an un-indented one may CLOSE it: a 4-space line inside a fence is
+        # content, and letting it close the block is how quoted text escaped.
+        m = _FENCE_RE.match(line)
+        m_opener = _FENCE_RE.match(line.lstrip()) if not m else m
         if fence_char:
-            if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len and not m.group(2).strip():
+            # Inside a fence every line is content except a closer of the same
+            # character, at least as long, with no info string and NOT indented
+            # deeper than the opener.
+            if (m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len
+                    and not m.group(2).strip()):
                 fence_char = ""
                 fence_len = 0
             continue
-        if m:
-            fence_char = m.group(1)[0]
-            fence_len = len(m.group(1))
+        if m_opener:
+            fence_char = m_opener.group(1)[0]
+            fence_len = len(m_opener.group(1))
             continue
         if re.match(r"^(?: {4}|\t)", line) or re.match(r"^\s*>", line):
             continue
@@ -527,18 +536,30 @@ def _strip_fenced_code(text: str) -> str:
     # block scanner above left it alone, so treat any remaining run as a span.
     cleaned = re.sub(r"```[\s\S]*?(?:```|$)", "", cleaned)
     cleaned = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", cleaned)
-    cleaned = re.sub(r"`+[^`]*`+", "", cleaned)
+    cleaned = re.sub(r"`+[^`\n]*`+", "", cleaned)
     return cleaned
 
 
+_PERMISSION_MARKER = "🔒 SANDBOX PERMISSION REQUIRED"
+
+
+def _proposal_lines(text: str):
+    """Indices (into the SANITISED text) of the marker lines that count.
+
+    Quoted material is removed first, so a marker the model merely echoed is not a
+    proposal at all - the same pass decides "is there a card" and "what does it
+    execute", which is what a fenced fake proposal used to break.
+    """
+    sanitised = _strip_fenced_code(text or "")
+    lines = sanitised.splitlines()
+    return lines, [i for i, line in enumerate(lines)
+                   if line.lstrip(" \t").startswith(_PERMISSION_MARKER)]
+
+
 def _has_permission_marker(text: str) -> bool:
-    """True when the marker opens a PLAIN line of the model's own prose."""
-    for line in (text or "").splitlines():
-        stripped = line.lstrip(" \t")
-        if not stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED"):
-            continue
-        return True
-    return False
+    """True when the model itself wrote the marker, outside any quotation."""
+    _lines, found = _proposal_lines(text)
+    return bool(found)
 
 
 def _permission_scope(text: str, limit: int = 2000) -> str:
@@ -548,15 +569,12 @@ def _permission_scope(text: str, limit: int = 2000) -> str:
     text that followed the marker rode along into a --yolo run. The scope is now
     the marker line plus the proposal block it introduces, capped.
     """
-    lines = (text or "").splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        stripped = line.lstrip(" \t")
-        if stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED"):
-            start = i
-            break
-    if start is None:
+    lines, found = _proposal_lines(text)
+    if not found:
         return ""
+    # The LAST proposal: a message may restate the request, and the final one is the
+    # model's own conclusion rather than an earlier echo.
+    start = found[-1]
     scope = [lines[start]]
     i = start + 1
     while i < len(lines) and not lines[i].strip():
@@ -1506,8 +1524,12 @@ def send_system_notification(event_type: str, title: str, message: str, urgency:
         # (status.last_error), the chat and botty.log; the notification only
         # points at it.
         if event_type == "blocked":
-            clean_title = "🔒 Sandbox Permission Required"
-            clean_msg = "Botty halted write operations. Click to open Botty and choose Approve or Deny."
+            if get_sandbox_mode():
+                clean_title = "🔒 Sandbox Permission Required"
+                clean_msg = "Botty halted write operations. Click to open Botty and choose Approve or Deny."
+            else:
+                clean_title = "🔒 Write Permission Required"
+                clean_msg = "The agent proposed a write it cannot perform alone. Click to open Botty and choose Approve or Deny."
         elif event_type == "complete":
             clean_title = "󰄬 Botty — Done"
             clean_msg = "Botty finished your request. Open the widget for the full response."
@@ -1948,6 +1970,10 @@ def _write_private_file(path: Path, text: str) -> None:
     while the file never has another mode.
     """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchmod(fd, 0o600)  # an existing inode keeps its old mode otherwise
+    except OSError:
+        pass
     os.close(fd)
     path.write_text(text, encoding="utf-8")
     secure_file_permissions(path)
@@ -3452,6 +3478,8 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         provider = active_m.get("provider") or None
     else:
         selected_model = model or active_m.get("model", "")
+        if selected_model and not _valid_engine_id(selected_model):
+            selected_model = ""  # a corrupt/hostile config value is not a flag
 
     # The directive and the continuity bridge are SESSION preambles: `--continue`
     # keeps the session history, so the model already has them. They are sent only

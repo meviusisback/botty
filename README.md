@@ -35,7 +35,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 
 ## Install
 
-1. Create the Hermes profile Botty drives — the engine appears once the `hermes` binary is on `PATH`, but asks fail without that profile, so create it before the first request:
+1. Create the Hermes profile Botty drives — every engine is listed in Settings, but a Hermes ask needs both the `hermes` binary on `PATH` and this profile, so create it before the first request:
 
 ```bash
 hermes profile create botty
@@ -118,7 +118,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 
 | Layer | Guarantee |
 |---|---|
-| Prompt transport | The prompt and message text travel via stdin or an owner-only file (`0600`/`0700`); only attachment paths, approval ids and flags appear in `argv` |
+| Prompt transport | The prompt and message text travel via stdin or an owner-only file (`0600`/`0700`); `argv` carries only attachment paths, approval ids, flags and the fixed engine directive |
 | Learning | Compaction output is staged as proposals you approve one by one — nothing becomes memory or skill without review |
 | Rendering | Agent text is plain text (no markdown/HTML), so crafted answers can't trigger remote loads or spoofed chrome |
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |

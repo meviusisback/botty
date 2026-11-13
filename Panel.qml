@@ -1516,7 +1516,9 @@ Panel {
       // query from a view the user was not looking at.
       blocked: (root.opened && root.currentView === "chat" && promptInput && promptInput.activeFocus)
         || (root.opened && root.currentView === "memories" && newMemLoader.item && newMemLoader.item.inputActiveFocus)
-        || (root.opened && root.currentView === "settings" && modelSearchLoader.item && modelSearchLoader.item.activeFocus)
+        || (root.opened && root.currentView === "settings"
+            && settingsViewItem.settingsTab === "models"
+            && modelSearchLoader.item && modelSearchLoader.item.activeFocus)
 
       onMoveRequested: function(dx, dy) {
         if (root.currentView === "chat" && dy !== 0) {
@@ -1530,7 +1532,8 @@ Panel {
         if (root.opened && root.currentView === "chat" && promptInput) {
           root.focusPrompt()
           promptInput.text = promptInput.text + t
-        } else if (root.currentView === "settings" && modelSearchLoader.item) {
+        } else if (root.currentView === "settings"
+                   && settingsViewItem.settingsTab === "models" && modelSearchLoader.item) {
           modelSearchLoader.item.forceActiveFocus()
           modelSearchLoader.item.text = modelSearchLoader.item.text + t
         }
@@ -2577,7 +2580,9 @@ Panel {
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             onClicked: {
-                              root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
+                              root.sendQuery(root.sandboxMode
+                                               ? "Do not execute these changes. Keep the environment sandboxed."
+                                               : "Do not execute these changes.", "", false, false, false)
                             }
                           }
                         }
@@ -2767,7 +2772,7 @@ Panel {
 
                 Button {
                   iconText: "󰄬"
-                  text: "Approve & Run (Bypass)"
+                  text: root.sandboxMode ? "Approve & Run (Bypass)" : "Approve & Run Once"
                   selected: true
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
@@ -2794,7 +2799,9 @@ Panel {
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {
-                    root.sendQuery("Do not execute these changes. Keep the environment sandboxed.", "", false, false, false)
+                    root.sendQuery(root.sandboxMode
+                                               ? "Do not execute these changes. Keep the environment sandboxed."
+                                               : "Do not execute these changes.", "", false, false, false)
                   }
                 }
               }
@@ -3797,6 +3804,7 @@ Panel {
                 id: modelSearchLoader
                 Layout.fillWidth: true
                 active: root.opened && root.currentView === "settings"
+                        && settingsViewItem.settingsTab === "models"
                 sourceComponent: Component {
                   TextField {
                     id: modelSearchInput

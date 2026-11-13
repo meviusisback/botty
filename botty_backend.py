@@ -176,8 +176,10 @@ def _acquire_pid_file(path: Path) -> bool:
             os.close(fd)
             return False
     try:
+        os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
         os.write(fd, str(os.getpid()).encode())
+        os.fsync(fd)
     except OSError:
         pass
     _PID_LOCK_FDS[str(path)] = fd
@@ -194,7 +196,13 @@ def _release_pid_file(path: Path) -> None:
     try:
         if not path.exists():
             return
-        if path.read_text().strip() != str(os.getpid()):
+        try:
+            content = path.read_text().strip()
+        except (OSError, ValueError):
+            content = ""
+        # We hold the flock, so this slot is OURS: unlink it even when the content
+        # cannot be read (a corrupted file used to stay on disk forever).
+        if content and content != str(os.getpid()):
             return
         path.unlink(missing_ok=True)
     except (OSError, ValueError):
@@ -488,14 +496,26 @@ def _strip_fenced_code(text: str) -> str:
     out = []
     fence_char = ""
     fence_len = 0
+    html_block = ""
     for line in (text or "").splitlines():
-        m = _FENCE_RE.match(line)
+        if html_block:
+            if re.search(r"</\s*" + html_block + r"\s*>", line, re.IGNORECASE):
+                html_block = ""
+            continue
+        html_open = re.match(r"^ {0,3}<(pre|code|blockquote|details|summary|script|style|textarea|table)\b",
+                             line, re.IGNORECASE)
+        if html_open:
+            tag = html_open.group(1).lower()
+            if not re.search(r"</\s*" + tag + r"\s*>", line, re.IGNORECASE):
+                html_block = tag
+            continue
+        m = _FENCE_RE.match(line.lstrip() if line.startswith("    ") else line)
         if fence_char:
             if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len and not m.group(2).strip():
                 fence_char = ""
                 fence_len = 0
             continue
-        if m and (m.group(1)[0] == "`" or not m.group(2).strip()):
+        if m:
             fence_char = m.group(1)[0]
             fence_len = len(m.group(1))
             continue
@@ -517,10 +537,6 @@ def _has_permission_marker(text: str) -> bool:
         stripped = line.lstrip(" \t")
         if not stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED"):
             continue
-        # No quoting or markup in front of it: an echoed line keeps its bullet,
-        # heading, quote mark or fence characters.
-        if re.match(r"^(?:[>*#+|\-]|\d+\.|`|~)", stripped):
-            continue
         return True
     return False
 
@@ -536,8 +552,7 @@ def _permission_scope(text: str, limit: int = 2000) -> str:
     start = None
     for i, line in enumerate(lines):
         stripped = line.lstrip(" \t")
-        if stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED") and not re.match(
-                r"^(?:[>*#+|\-]|\d+\.|`|~)", stripped):
+        if stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED"):
             start = i
             break
     if start is None:
@@ -1632,9 +1647,12 @@ def _parse_hermes_model_block(content: str) -> tuple:
     model_idx = None
     model_indent = 0
     for i, line in enumerate(lines):
-        if re.match(r"^\s*model\s*:\s*(?:#.*)?$", line):
+        # Column 0 only, like the writer: an indented `model:` is a different key
+        # (providers.ollama.model) and reading it made the panel show a model the
+        # engine does not use.
+        if re.match(r"^model\s*:\s*(?:#.*)?$", line):
             model_idx = i
-            model_indent = len(line) - len(line.lstrip())
+            model_indent = 0
             break
     if model_idx is None:
         return None, None
@@ -1685,6 +1703,23 @@ def _yaml_scalar(value: str) -> str:
     # yaml.safe_load reads back as two lone surrogates. _yaml_quoted() escapes the
     # same characters the way round 4 already fixed for the skill frontmatter.
     return _yaml_quoted(text, 400)
+
+
+def _omp_config_roundtrip_problem(content: str, model_id: str) -> str:
+    """Why ``content`` does not read back as the requested OMP default, or ""."""
+    try:
+        import yaml
+    except Exception:
+        return ""
+    try:
+        doc = yaml.safe_load(content)
+    except Exception as e:
+        return f"it does not parse ({str(e).splitlines()[0]})"
+    if not isinstance(doc, dict):
+        return "it is not a mapping"
+    if str(doc.get("default")) != str(model_id):
+        return f"the default reads back as {doc.get('default')!r}"
+    return ""
 
 
 def _config_model_roundtrip_problem(content: str, model_id: str,
@@ -4060,7 +4095,10 @@ def _valid_engine_id(value: str) -> bool:
     """Model/provider ids are written into YAML config by string substitution, so
     they must not be able to inject keys or newlines (B6)."""
     text = str(value or "")
-    return bool(_ENGINE_ID_RE.fullmatch(text))
+    if not _ENGINE_ID_RE.fullmatch(text):
+        return False
+    # An id that starts with '-' would be read as an option by the engine CLI.
+    return not text.startswith("-")
 
 
 def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Optional[str] = None) -> Dict[str, Any]:
@@ -4082,7 +4120,6 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
         return {"ok": False, "error": "Invalid provider id."}
 
     cfg["engine_models"][engine] = {"model": model_id, "provider": provider_id}
-    save_json_file(CONFIG_FILE, cfg)
 
     if engine == "hermes":
         if HERMES_CONFIG_FILE.exists():
@@ -4100,15 +4137,27 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
         if OMP_CONFIG_FILE.exists():
             try:
                 content = OMP_CONFIG_FILE.read_text(encoding="utf-8")
-                # Only touch a `default:` line that carries a model id (has `/`
-                # or is non-empty), anchored to line start to avoid clobbering
-                # unrelated `default` keys elsewhere in the file.
-                new_content, n = re.subn(r"(?m)^(\s*default\s*:\s*)\S[^\n]*", rf"\g<1>{model_id}", content, count=1)
-                if n:
-                    OMP_CONFIG_FILE.write_text(new_content, encoding="utf-8")
+                # Column 0 only and quoted: the old expression accepted any
+                # indentation (rewriting a nested provider default) and spliced the
+                # id bare, so `@cf/...` or `ornith:` left a config OMP cannot parse.
+                quoted = _yaml_scalar(model_id)
+                new_content, n = re.subn(r"(?m)^(default\s*:\s*)\S[^\n]*",
+                                         lambda m: m.group(1) + quoted, content, count=1)
+                if not n:
+                    return {"ok": False,
+                            "error": "the OMP config has no top-level 'default:' "
+                                     "line to update"}
+                problem = _omp_config_roundtrip_problem(new_content, model_id)
+                if problem:
+                    return {"ok": False,
+                            "error": f"Refusing to write an unusable OMP config: {problem}"}
+                OMP_CONFIG_FILE.write_text(new_content, encoding="utf-8")
             except Exception as e:
                 return {"ok": False, "error": f"Failed to set OMP model: {str(e)}"}
 
+    # Persist the widget's own choice only after the profile write succeeded, so a
+    # refused change cannot leave the widget passing a model the engine rejects.
+    save_json_file(CONFIG_FILE, cfg)
     set_status(get_status().get("state", "idle"), headline=f"{engine.upper()}: {model_id}")
     return {"ok": True, "engine": engine, "model": model_id, "provider": provider_id}
 

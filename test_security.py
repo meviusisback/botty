@@ -1685,3 +1685,71 @@ class TestRoundSixHardening(unittest.TestCase):
             finally:
                 os.umask(old)
             self.assertEqual(os.stat(target).st_mode & 0o777, 0o600)
+
+
+class TestRoundSevenHardening(unittest.TestCase):
+    """Findings from the seventh reviewer round, pinned."""
+
+    MARK = "🔒 SANDBOX PERMISSION REQUIRED: do it"
+
+    def test_quoted_markers_never_mint_a_card(self):
+        cases = {
+            "tilde with info string": "~~~markdown\n" + self.MARK + "\n~~~",
+            "tilde bash": "~~~bash\n" + self.MARK + "\n~~~",
+            "html pre": "<pre>\n" + self.MARK + "\n</pre>",
+            "html code": "<code>\n" + self.MARK + "\n</code>",
+            "html details": "<details>\n" + self.MARK + "\n</details>",
+            "indented fence opener": "    ~~~\n" + self.MARK + "\n    ~~~",
+            "backtick with info": "```text\n" + self.MARK + "\n```",
+            "inline span": "`" + self.MARK + "`",
+        }
+        for name, text in cases.items():
+            stripped = botty_backend._strip_fenced_code(text)
+            self.assertFalse(botty_backend._has_permission_marker(stripped), name)
+
+    def test_plain_prose_still_mints(self):
+        text = self.MARK + "\n\nProposed Actions:\n- Commands to run: mv a b"
+        self.assertTrue(botty_backend._has_permission_marker(
+            botty_backend._strip_fenced_code(text)))
+        self.assertIn("Proposed Actions", botty_backend._permission_scope(text))
+        self.assertNotIn("tail", botty_backend._permission_scope(text + "\n\ntail"))
+
+    def test_stale_pid_file_does_not_corrupt_the_slot(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            path = Path(d) / "running.pid"
+            path.write_text("999999")  # a dead pid
+            self.assertTrue(botty_backend._acquire_pid_file(path))
+            try:
+                self.assertEqual(path.read_text().strip(), str(os.getpid()))
+                self.assertTrue(botty_backend._pid_file_live(path))
+            finally:
+                botty_backend._release_pid_file(path)
+            self.assertFalse(path.exists())
+
+    def test_corrupt_pid_file_is_still_released(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            path = Path(d) / "running.pid"
+            path.write_bytes(b"\x00\x00\x00123")
+            self.assertTrue(botty_backend._acquire_pid_file(path))
+            botty_backend._release_pid_file(path)
+            self.assertFalse(path.exists())
+
+    def test_omp_default_is_quoted_and_column_zero(self):
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("yaml not installed")
+        content = "providers:\n  cloudflare:\n    default: cloudflare/old\ndefault: google/gemini\n"
+        new, n = botty_backend.re.subn(
+            r"(?m)^(default\s*:\s*)\S[^\n]*",
+            lambda m: m.group(1) + botty_backend._yaml_scalar("@cf/meta/x"), content, count=1)
+        self.assertEqual(n, 1)
+        self.assertIn("    default: cloudflare/old", new)  # nested one untouched
+        self.assertEqual(yaml.safe_load(new)["default"], "@cf/meta/x")
+
+    def test_ids_that_look_like_flags_are_refused(self):
+        self.assertFalse(botty_backend._valid_engine_id("--yolo"))
+        self.assertFalse(botty_backend._valid_engine_id("-m"))
+        self.assertTrue(botty_backend._valid_engine_id("qwen2.5-coder:32b"))

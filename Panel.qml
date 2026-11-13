@@ -343,7 +343,12 @@ Panel {
       root.rawStatus.last_error = "This permission card has no approval id. Re-run the task sandboxed to get a fresh card."
       return
     }
-    root.sendQuery("I approve this action. Please bypass the sandbox and execute the proposed changes.",
+    // Mode-aware, like the card's own title, body and Deny buttons: with Sandbox
+    // Mode off the message must not tell the model to bypass a boundary that is
+    // not there.
+    root.sendQuery(root.sandboxMode
+                     ? "I approve this action. Please bypass the sandbox and execute the proposed changes."
+                     : "I approve this action. Please carry out exactly the proposed changes.",
                    "", false, false, true, messageId)
   }
 
@@ -2714,7 +2719,11 @@ Panel {
               if (root.isProcessing || msgs.length === 0) return false
               var lastMsg = msgs[msgs.length - 1]
               // Flag only, same rule as the in-message card.
-              return lastMsg && lastMsg.role === "assistant" && lastMsg.sandbox_request === true
+              // An already-used card must not reappear as "Permission Required"
+              // over its own row, which says the approval was consumed.
+              return lastMsg && lastMsg.role === "assistant"
+                && lastMsg.sandbox_request === true
+                && !lastMsg.sandbox_approved_at
             }
             Layout.fillWidth: true
             implicitHeight: permBannerCol.implicitHeight + Style.space(16)

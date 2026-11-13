@@ -70,12 +70,22 @@ def _exclusive_file_lock():
     Returns the handle; caller must use _release_file_lock."""
     BOTTY_DATA_DIR.mkdir(parents=True, exist_ok=True)
     _history_rlock.acquire()
+    fh = None
     try:
         _lfd = os.open(HISTORY_LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
         fh = os.fdopen(_lfd, "a+b")
+        try:
+            os.fchmod(fh.fileno(), 0o600)  # an existing inode keeps its old mode
+        except OSError:
+            pass
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
         return fh
     except Exception:
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:
+                pass
         _history_rlock.release()
         raise
 
@@ -483,6 +493,49 @@ REDACTION_PATTERNS = [
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
 
+def _drop_inline_fences(text: str) -> str:
+    """Drop code that opens mid-line, without eating the rest of the answer.
+
+    A run of three or more backticks that does not start a line is an INLINE fence:
+    the text it wraps is quoted code. It is closed either on its own line or by a
+    later line-START fence run; when nothing closes it, only the rest of its own
+    line goes - deleting everything after it (the old behaviour) made one stray
+    ``` kill a genuine proposal, so the sandboxed run could never be approved.
+    """
+    lines = (text or "").splitlines()
+    out = []
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        m = re.search(r"(`{3,}|~{3,})", line)
+        if m and not _FENCE_RE.match(line):
+            run = m.group(0)
+            same_line = re.compile(r"%s{%d,}" % (re.escape(run[0]), len(run)))
+            closer = same_line.search(line, m.end())
+            if closer:
+                out.append(line[:m.start()] + line[closer.end():])
+                i += 1
+                continue
+            out.append(line[:m.start()])
+            closer_line = re.compile(r"^\s*%s{%d,}" % (re.escape(run[0]), len(run)))
+            j = i + 1
+            while j < n and lines[j].strip() and not closer_line.match(lines[j]):
+                j += 1
+            if j < n and closer_line.match(lines[j]):
+                rest = closer_line.sub("", lines[j], count=1)
+                if rest.strip():
+                    out.append(rest)
+                i = j + 1
+            else:
+                # unclosed: the rest of its PARAGRAPH is code. A blank line ends the
+                # paragraph, so a stray run cannot swallow the whole answer.
+                i = j
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def _strip_fenced_code(text: str) -> str:
     """Remove everything the model might be QUOTING, leaving its own prose.
 
@@ -494,6 +547,7 @@ def _strip_fenced_code(text: str) -> str:
     the opener), then drops indented blocks, blockquote lines, HTML comments and
     inline code spans of any length.
     """
+    text = _drop_inline_fences(text)
     out = []
     fence_char = ""
     fence_len = 0
@@ -503,11 +557,20 @@ def _strip_fenced_code(text: str) -> str:
             if re.search(r"</\s*" + html_block + r"\s*>", line, re.IGNORECASE):
                 html_block = ""
             continue
-        html_open = re.match(r"^ {0,3}<(pre|code|blockquote|details|summary|script|style|textarea|table)\b",
-                             line, re.IGNORECASE)
+        # ANY element boundary counts, not a whitelist: <div>, <p>, <ul>, <xmp>,
+        # <plaintext>, <svg>, namespaced forms - a quoted block wrapped in a tag
+        # nobody listed used to keep its marker and mint the card. Fail closed: an
+        # unknown tag removes text instead of keeping it.
+        html_open = re.match(r"^ {0,3}</?\s*([A-Za-z][A-Za-z0-9:_.-]*)", line)
         if html_open:
             tag = html_open.group(1).lower()
-            if not re.search(r"</\s*" + tag + r"\s*>", line, re.IGNORECASE):
+            if (re.match(r"^ {0,3}</", line)
+                    or re.search(r"</\s*" + re.escape(tag) + r"\s*>", line, re.IGNORECASE)
+                    or re.search(r"/\s*>\s*$", line)):
+                # a closing tag, a self-contained element, or one closed on the
+                # same line: nothing to swallow
+                pass
+            else:
                 html_block = tag
             continue
         # An indented fence run still OPENS a fence (a model indents inside a list),
@@ -532,9 +595,8 @@ def _strip_fenced_code(text: str) -> str:
             continue
         out.append(line)
     cleaned = "\n".join(out)
-    # A fence that opens mid-line ("a ``` code ``` b") is not a block fence; the
-    # block scanner above left it alone, so treat any remaining run as a span.
-    cleaned = re.sub(r"```[\s\S]*?(?:```|$)", "", cleaned)
+    # Anything still carrying a run is a leftover span on one line only.
+    cleaned = re.sub(r"```[^\n]*", "", cleaned)
     cleaned = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", cleaned)
     cleaned = re.sub(r"`+[^`\n]*`+", "", cleaned)
     return cleaned
@@ -932,7 +994,7 @@ def run_bounded_process(
             timed_out = True
             _kill_process_group(proc)
             rc = proc.wait() if proc.poll() is None else proc.returncode
-        if stdin_error and not "".join(out_chunks).strip():
+        if stdin_error and not timed_out and not "".join(out_chunks).strip():
             # The prompt never reached the child (EPIPE after an immediate exit):
             # say so instead of reporting an empty answer as a result.
             result["error"] = f"could not deliver the prompt: {stdin_error}"
@@ -3475,11 +3537,17 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         # caller-supplied override (argv-adjacent, and it would silently point the
         # approved actions at a different model).
         selected_model = active_m.get("model", "")
+        if selected_model and not _valid_engine_id(selected_model):
+            selected_model = ""
         provider = active_m.get("provider") or None
+        if provider and not _valid_engine_id(provider):
+            provider = None
     else:
         selected_model = model or active_m.get("model", "")
         if selected_model and not _valid_engine_id(selected_model):
             selected_model = ""  # a corrupt/hostile config value is not a flag
+        if provider and not _valid_engine_id(provider):
+            provider = None
 
     # The directive and the continuity bridge are SESSION preambles: `--continue`
     # keeps the session history, so the model already has them. They are sent only
@@ -3690,7 +3758,10 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
                 _unclaim_approved_proposal(str(approve_id))
             raise
         ran_output = ran_output or bool(run.get("stdout"))
-    if not run.get("ok") and not run.get("stdout") and not run.get("stderr"):
+    if (not run.get("ok") and not run.get("timed_out")
+            and not run.get("stdout") and not run.get("stderr")):
+        # A timeout is not a start failure: it has its own branch below, which
+        # reports the deadline and keeps any partial output.
         err = run.get("error") or "Agent process failed to start."
         set_status("error", headline="Error", last_error=err)
         append_botty_log(f"ERROR [{engine}/{selected_model}]: {err}")

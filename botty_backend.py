@@ -554,6 +554,7 @@ def _scan_message(text: str):
     raw = _drop_inline_fences(text or "")
     lines = []
     prose = []
+    kinds = []
     fence_char = ""
     fence_len = 0
     html_stack = []          # open elements (nesting)
@@ -561,8 +562,10 @@ def _scan_message(text: str):
     for line in _scope_lines(raw):
         probe = re.sub(r"^(?:\s*>\s*)+", "", line).lstrip()
         quoted = False
+        kind = ""
         if literal_closer:
             quoted = True
+            kind = "html"
             if literal_closer in line:
                 literal_closer = ""
         elif html_stack:
@@ -571,6 +574,7 @@ def _scan_message(text: str):
                 probe = line.lstrip()
             else:
                 quoted = True
+                kind = "html"
                 # Only a line that is JUST a tag ends or opens a level: an inner
                 # "<div>…</div>" on the same line must not pop the outer element, and
                 # a nested multi-line <div> must push so its closer pops the inner one.
@@ -592,11 +596,13 @@ def _scan_message(text: str):
                         continue
                     html_stack.append(name)
         if not quoted:
-            special_open = re.match(r"^(<!\[CDATA\[|<\?|<%|<![A-Za-z])", probe)
+            special_open = re.match(r"^(<!--|<!\[CDATA\[|<\?|<%|<![A-Za-z])", probe)
             if special_open:
                 opener = special_open.group(1)
-                closer = {"<![CDATA[": "]]>", "<?": "?>", "<%": "%>"}.get(opener, ">")
+                closer = {"<!--": "-->", "<![CDATA[": "]]>", "<?": "?>",
+                          "<%": "%>"}.get(opener, ">")
                 quoted = True
+                kind = "html"
                 if closer not in probe[special_open.end():]:
                     literal_closer = closer
             else:
@@ -605,6 +611,7 @@ def _scan_message(text: str):
                 tag_open = re.match(r"^<\s*(/?)\s*([A-Za-z][A-Za-z0-9:_.-]*)", probe)
                 if tag_open:
                     quoted = True
+                    kind = "html"
                     name = tag_open.group(2).lower()
                     if not tag_open.group(1):
                         self_closing = bool(re.search(r"/\s*>\s*$", probe))
@@ -617,11 +624,13 @@ def _scan_message(text: str):
                             pass
                 elif re.match(r"^\s*(?: {4}|\t)", line) or re.match(r"^\s*>", line):
                     quoted = True
+                    kind = "indent"
         if not quoted:
             fence_run = _FENCE_RE.match(line)
             fence_any = fence_run or _FENCE_RE.match(line.lstrip())
             if fence_char:
                 quoted = True
+                kind = "fence"
                 if (fence_run and fence_run.group(1)[0] == fence_char
                         and len(fence_run.group(1)) >= fence_len
                         and not fence_run.group(2).strip()):
@@ -629,10 +638,12 @@ def _scan_message(text: str):
                     fence_len = 0
             elif fence_any:
                 quoted = True
+                kind = "fence"
                 fence_char = fence_any.group(1)[0]
                 fence_len = len(fence_any.group(1))
         lines.append(line)
         prose.append(not quoted)
+        kinds.append("" if not quoted else kind)
 
     def _render(keep_inline: bool):
         out = []
@@ -646,13 +657,13 @@ def _scan_message(text: str):
             out.append(cleaned)
         return out
 
-    return lines, prose, _render(False), _render(True)
+    return lines, prose, kinds, _render(False), _render(True)
 
 
 def _strip_fenced_code(text: str, keep_inline: bool = False,
                        keep_indented_bullets: bool = False) -> str:
     """Prose only, as a string (kept for callers that want the text)."""
-    _lines, _prose, gate, scope = _scan_message(text)
+    _lines, _prose, _kinds, gate, scope = _scan_message(text)
     rendered = scope if keep_inline else gate
     kept = [line for line, is_prose in zip(rendered, _prose) if is_prose]
     return "\n".join(kept)
@@ -679,7 +690,7 @@ def _proposal_lines(text: str, token: str = ""):
     of authorship) and it must sit in the model's own prose - a marker echoed inside
     a fence, a blockquote or an HTML block is quoted text, whatever it carries.
     """
-    lines, prose, gate, _scope = _scan_message(text or "")
+    lines, prose, _kinds, gate, _scope = _scan_message(text or "")
     found = [i for i, (line, is_prose) in enumerate(zip(gate, prose))
              if is_prose and _marker_line_carries_token(line, token)]
     return lines, found
@@ -721,7 +732,7 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     # The SAME lines the marker index was computed on, with inline spans unwrapped (a
     # path in backticks is a path). Building a second, differently filtered list here
     # shifted the index and handed an earlier quoted list to the --yolo run.
-    _raw, _prose, _gate, lines = _scan_message(text or "")
+    _raw, _prose, _kinds, _gate, lines = _scan_message(text or "")
     # The LAST proposal: a message may restate the request, and the final one is the
     # model's own conclusion rather than an earlier echo.
     start = found[-1]
@@ -739,6 +750,13 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     items = []
     while i < len(lines):
         current = lines[i]
+        # A fenced, HTML or blockquoted line ends the proposal: the scan already
+        # called it quoted text, so it cannot be one of the model's own actions.
+        # Indented bullets are the exception - models format proposals that way.
+        if _kinds[i] in ("fence", "html"):
+            break
+        if _kinds[i] == "indent" and not _is_action_bullet(current):
+            break
         if not current.strip():
             j = i + 1
             while j < len(lines) and not lines[j].strip():
@@ -748,6 +766,8 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
                 continue
             break
         if _is_action_bullet(current):
+            if _kinds[i] == "indent" and _prose[i]:
+                break
             items.append(current.strip())
             i += 1
             continue
@@ -776,6 +796,17 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
             return ""
     # Cap on WHOLE lines: cutting at a character offset sent "- rm -rf ~/Documents/old"
     # to the run as "- rm -rf ~", which is a broader path than the one approved.
+    # A line that opens with "[" could be the prompt's own "[END APPROVED EXECUTION
+    # SCOPE]" marker: inside a --yolo run that would put text OUTSIDE the block that
+    # declares the approval. Neutralise the sink.
+    def _defuse(line: str) -> str:
+        # "- [END APPROVED EXECUTION SCOPE]" would close the block the prompt builds.
+        body = re.sub(r"^(\s*(?:[-*•]|\d+[.)])\s+)", "", line)
+        if body.lstrip().startswith("["):
+            return line.replace("[", "(", 1).replace("]", ")", 1)
+        return line
+
+    scope = [_defuse(line) for line in scope]
     # Neutralise bidi and other format controls: Qt applies the Unicode bidi
     # algorithm to Text.PlainText, so a U+202E in the scope would be READ in a
     # different order than the run receives it.
@@ -888,12 +919,20 @@ def read_framed_stdin(terminator: str, max_chars: int = QUERY_STDIN_MAX_CHARS) -
     out = []
     total = 0
     saw_term = False
-    for line in sys.stdin:
-        if line.rstrip("\n") == term:
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    # Chunked read: iterating sys.stdin buffers a whole line first, so a payload with
+    # no newline was materialised in full before the cap could fire.
+    while True:
+        chunk = stream.readline(max_chars + 1 - max(total, 0))
+        if not chunk:
+            break
+        if isinstance(chunk, bytes):
+            chunk = chunk.decode("utf-8", "replace")
+        if chunk.rstrip("\n") == term:
             saw_term = True
             break
-        out.append(line)
-        total += len(line)
+        out.append(chunk)
+        total += len(chunk)
         if total > max_chars:
             raise ValueError(f"stdin payload exceeds {max_chars} chars")
     if not saw_term:
@@ -1398,7 +1437,10 @@ def inspect_file(filepath: str) -> Dict[str, Any]:
             return {"ok": False, "error": f"Refusing to read symlink: {filepath}. Attach the target file directly."}
     except OSError:
         pass
-    p = Path(filepath).expanduser().resolve()
+    try:
+        p = Path(filepath).expanduser().resolve()   # "~nosuchuser/x" raises
+    except (RuntimeError, ValueError, OSError) as e:
+        return {"ok": False, "error": f"Invalid path: {e}"}
     if not p.exists():
         return {"ok": False, "error": f"File not found: {filepath}"}
     # Kernel pseudo-files are S_ISREG with size 0 and pass every other gate:
@@ -3110,6 +3152,33 @@ def _compaction_state_update(mutate=None, **changes) -> Dict[str, Any]:
 
 
 @_synchronized
+def _load_history_migrated():
+    """Load history and derive any missing card scope ATOMICALLY.
+
+    The migration used to load, derive and save outside the history lock: a row
+    appended in between was lost, and a Deny written in between was overwritten -
+    so the denied --yolo run still executed.
+    """
+    def _work():
+        hist = load_json_file(HISTORY_FILE, {"messages": []})
+        if isinstance(hist, dict) and _migrate_legacy_card_scope(hist.get("messages")):
+            save_json_file(HISTORY_FILE, hist)
+        return hist
+
+    if getattr(_lock_state, "held", False):
+        # Already inside a history write (an ask resolving its own card): taking the
+        # flock on a second descriptor would block against ourselves.
+        return _work()
+    with _history_rlock:
+        fh = _exclusive_file_lock()
+        _lock_state.held = True
+        try:
+            return _work()
+        finally:
+            _lock_state.held = False
+            _release_file_lock(fh)
+
+
 def _migrate_legacy_card_scope(messages) -> bool:
     """Give a card minted before sandbox_scope existed the scope it would run.
 
@@ -3137,11 +3206,8 @@ def _resolve_approved_proposal(approve_id: str):
     Read-only so the prompt can be assembled from the approved text before
     anything is written: if assembly fails, the card must still be usable.
     """
-    hist = load_json_file(HISTORY_FILE, {"messages": []})
+    hist = _load_history_migrated()
     msgs = hist.get("messages", []) if isinstance(hist, dict) else []
-    if isinstance(hist, dict) and _migrate_legacy_card_scope(msgs):
-        # Persist the derived scope so the card prints exactly what it executes.
-        save_json_file(HISTORY_FILE, hist)
     for m in msgs:
         if not isinstance(m, dict) or str(m.get("id", "")) != str(approve_id):
             continue
@@ -3452,11 +3518,9 @@ def get_history() -> Dict[str, Any]:
         "session_id": "botty-widget",
         "messages": []
     }
-    history = load_json_file(HISTORY_FILE, default_history)
-    # A card from an older build gets its scope derived ONCE and stored, so the card
-    # can print the text it would run (see _migrate_legacy_card_scope).
-    if isinstance(history, dict) and _migrate_legacy_card_scope(history.get("messages")):
-        save_json_file(HISTORY_FILE, history)
+    # A card from an older build gets its scope derived ONCE and stored, under the
+    # same lock every other history write takes (see _load_history_migrated).
+    history = _load_history_migrated()
     return {"ok": True, "history": history}
 
 @_synchronized
@@ -4863,7 +4927,13 @@ description: {_yaml_quoted(description, MAX_PROPOSAL_SKILL_DESC_CHARS)}
 {instructions.strip()}
 """
     try:
-        skill_file.write_text(body, encoding="utf-8")
+        # Personal instructions are not world-readable: same rule as every other
+        # write in this module (the staged copy already used it).
+        _write_private_file(skill_file, body)
+        try:
+            os.chmod(skill_file.parent, 0o700)
+        except OSError:
+            pass
         set_status(get_status().get("state", "idle"), headline=f"Created skill {clean_name}")
         return {"ok": True, "name": clean_name, "path": str(skill_dir)}
     except Exception as e:
@@ -4932,7 +5002,13 @@ description: {_yaml_quoted(description, MAX_PROPOSAL_SKILL_DESC_CHARS)}
 """
 
     try:
-        skill_file.write_text(body, encoding="utf-8")
+        # Personal instructions are not world-readable: same rule as every other
+        # write in this module (the staged copy already used it).
+        _write_private_file(skill_file, body)
+        try:
+            os.chmod(skill_file.parent, 0o700)
+        except OSError:
+            pass
         secure_file_permissions(skill_file)
         return {"ok": True, "name": clean_name, "path": str(skill_dir)}
     except Exception as e:

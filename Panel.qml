@@ -646,6 +646,9 @@ Panel {
       // returning to whatever tab was left open broke that, and left a hidden
       // view current while the user typed.
       root.currentView = "chat"
+      // Ask the backend once: it derives and stores the scope of a card minted by an
+      // older build under the history lock, so the card can print what it would run.
+      root.fetchHistory()
       root.unreadCount = 0
       root.lastReadMessageCount = (root.historyData && root.historyData.messages) ? root.historyData.messages.length : 0
       focusTimer.start()
@@ -2636,7 +2639,9 @@ Panel {
 
                           Text {
                             textFormat: Text.PlainText
-                            text: "This card is older than 30 minutes, so Botty will not run it. Re-run the task sandboxed for a fresh card."
+                            text: !modelData.sandbox_scope
+                                  ? "This card was made by an older Botty and does not record the text it would run. Re-run the task sandboxed for a fresh card."
+                                  : "This card is older than 30 minutes, so Botty will not run it. Re-run the task sandboxed for a fresh card."
                             visible: !!modelData.sandbox_token && !modelData.sandbox_approved_at
                                      && !modelData.sandbox_denied_at && !root.cardIsApprovable(modelData)
                             wrapMode: Text.Wrap
@@ -2902,13 +2907,17 @@ Panel {
                   // the last line of the exact text that will run.
                   Text {
                     textFormat: Text.PlainText
+                    // The WHOLE scope: one elided line let the payload hide behind a
+                    // harmless last bullet, next to a button that runs all of it.
                     text: {
                       var card = root.pendingPermissionCard
                       if (!card || !card.sandbox_scope) return ""
-                      var lines = String(card.sandbox_scope).split("\n")
-                      return lines[lines.length - 1]
+                      var all = String(card.sandbox_scope).split("\n")
+                      return all.slice(0, 8).join("\n")
                     }
                     visible: text !== ""
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 8
                     elide: Text.ElideRight
                     Layout.fillWidth: true
                     font.family: root.fontFamily
@@ -3600,6 +3609,12 @@ Panel {
                   placeholderText: "Teach Botty a fact to remember permanently…"
                   text: root.pendingMemoryText
                   onTextChanged: root.pendingMemoryText = text
+                  Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Escape) {
+                      root.releasePromptFocus()
+                      event.accepted = true
+                    }
+                  }
                   onAccepted: {
                     if (text.trim()) {
                       root.addMemoryNow(text, false)
@@ -3990,6 +4005,14 @@ Panel {
                     font.pixelSize: Style.font.body
                     text: root.modelSearchFilter
                     onTextChanged: root.modelSearchFilter = text
+                    Keys.onPressed: function(event) {
+                      if (event.key === Qt.Key_Escape) {
+                        // Hand the keyboard back: a focused field used to swallow
+                        // Escape, so the popup could not be dismissed by keyboard.
+                        root.releasePromptFocus()
+                        event.accepted = true
+                      }
+                    }
                   }
                 }
               }

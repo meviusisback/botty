@@ -12,6 +12,7 @@ import os
 import json
 import re
 import time
+import unicodedata
 import glob
 import subprocess
 import traceback
@@ -544,6 +545,24 @@ def _drop_inline_fences(text: str) -> str:
     return "\n".join(out)
 
 
+def _html_comment_is_open(text: str) -> bool:
+    """True when the last "<!--" in ``text`` has no "-->" after it.
+
+    Closed pairs are consumed left to right, so "<!-- note -->" is closed while
+    "<!-- a --> <!--" and "<!-- ok --> <!-- b" are open. A single test of
+    ``"-->" in text`` gets both wrong in opposite directions.
+    """
+    rest = text or ""
+    while True:
+        opener = rest.find("<!--")
+        if opener == -1:
+            return False
+        closer = rest.find("-->", opener)
+        if closer == -1:
+            return True
+        rest = rest[closer + 3:]
+
+
 def _scan_message(text: str):
     """One pass over the message: lines, quote flags, and the two renders.
 
@@ -610,36 +629,19 @@ def _scan_message(text: str):
                           "<%": "%>"}.get(opener, ">")
                 quoted = True
                 kind = "html"
-                _tail = probe[special_open.end():]
                 if opener == "<!--":
-                    # "<!-- ok --> <!--" opens a comment too: the LAST opener is not
-                    # closed, whatever the first pair did.
-                    _last_open = probe.rfind("<!--")
-                    _closed = "<!--" in _tail and "-->" in _tail[_tail.find("<!--"):]
-                    if _last_open != -1 and probe.find("-->", _last_open) == -1:
-                        _closed = False
+                    # A fully closed "<!-- note -->" is not an open comment; a
+                    # "<!-- ok --> <!--" is. Walk the pairs instead of guessing.
+                    if _html_comment_is_open(probe):
                         literal_closer = closer
-                else:
-                    _closed = closer in _tail
-                if not _closed:
+                elif closer not in probe[special_open.end():]:
                     literal_closer = closer
             else:
                 # Any element boundary counts, open or close, in ANY case: a quoted
                 # block wrapped in a tag nobody listed kept its marker before.
                 # The first UNCLOSED opener wins: "<!-- ok --> <!--" still opens a
                 # comment for every HTML reader.
-                _rest = probe
-                _unclosed = False
-                while True:
-                    _o = _rest.find("<!--")
-                    if _o == -1:
-                        break
-                    _c = _rest.find("-->", _o)
-                    if _c == -1:
-                        _unclosed = True
-                        break
-                    _rest = _rest[_c + 3:]
-                if _unclosed:
+                if _html_comment_is_open(probe):
                     # An inline "<!-- ..." opens a multi-line comment just like one
                     # that starts the line.
                     quoted = True
@@ -782,9 +784,29 @@ def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
 # Text.PlainText, so one of these makes the card READ in a different order than
 # the run receives. They are also deleted before a sentinel is matched, because
 # "[E\u200eND …]" reassembles into the sentinel once the mark is gone.
-_FORMAT_CONTROLS = dict.fromkeys(
-    map(ord, "\u200e\u200f\u202a\u202b\u202c\u202d\u202e"
-             "\u2066\u2067\u2068\u2069\u061c"), None)
+_FORMAT_CONTROLS_CACHE = None
+
+
+def _format_controls():
+    """Every character that must not survive inside a scope line.
+
+    A hand-picked bidi list missed U+200B, U+00AD, U+2060 and U+FEFF, so
+    "[E\u200bND APPROVED EXECUTION SCOPE]" reached the prompt intact. Every
+    zero-width/format character (category Cf) is dropped, and every space-like one
+    is folded to a plain space. Built once, on first use: the table is only needed
+    when a scope is derived.
+    """
+    global _FORMAT_CONTROLS_CACHE
+    if _FORMAT_CONTROLS_CACHE is None:
+        table = {}
+        for code in range(0x110000):
+            cat = unicodedata.category(chr(code))
+            if cat == "Cf" or code in (0x00AD, 0xFEFF, 0x180E, 0x034F):
+                table[code] = None
+            elif cat == "Zs":
+                table[code] = " "
+        _FORMAT_CONTROLS_CACHE = table
+    return _FORMAT_CONTROLS_CACHE
 
 
 def _scope_from_index(text: str, start: int, limit: int = 2000) -> str:
@@ -863,7 +885,7 @@ def _scope_from_index(text: str, start: int, limit: int = 2000) -> str:
     def _defuse(line: str) -> str:
         # Format controls FIRST: deleting a bidi mark used to reassemble a sentinel
         # that the rewrite below had already looked at and left alone.
-        line = line.translate(_FORMAT_CONTROLS).translate(_SEPARATORS)
+        line = line.translate(_format_controls()).translate(_SEPARATORS)
         # Neutralise BOTH sentinels wherever they appear, not only at line start.
         for marker in ("[APPROVED EXECUTION SCOPE", "[END APPROVED EXECUTION SCOPE]"):
             if marker in line:
@@ -3278,9 +3300,13 @@ def _migrate_legacy_card_scope(messages) -> bool:
             # 1.0.9 cards carry no token, and nothing without a token can be approved,
             # so there is nothing to derive: a scope here would only look verifiable.
             continue
+        if m.get("sandbox_scope"):
+            # Never rewrite text the card already printed: a card minted before the
+            # scope was stored gets one, a card that has one keeps it (the resolver
+            # refuses it if this build would derive something else).
+            continue
         scope = _permission_scope(str(m.get("content", "")), token)
-        if scope and m.get("sandbox_scope") != scope:
-            # Also heals a scope stored by a build that did not defuse the sentinels.
+        if scope:
             m["sandbox_scope"] = scope
             changed = True
     return changed
@@ -3307,6 +3333,11 @@ def _resolve_approved_proposal(approve_id: str):
             # card would otherwise stay approvable forever.
             return "", ("that card does not record when it was made, so it cannot be "
                         "approved. Re-run the task sandboxed for a fresh card.")
+        if minted > time.time() + 60:
+            # A stamp ahead of the clock is not a fresh card, it is an unverifiable
+            # one: "older than 30 minutes" would never become true for it.
+            return "", ("that card records a time in the future, so it cannot be "
+                        "verified. Re-run the task sandboxed for a fresh card.")
         if time.time() - minted > CARD_MAX_AGE_SECONDS:
             return "", ("that proposal is too old to approve. Re-run the task "
                         "sandboxed for a fresh card.")
@@ -3335,7 +3366,11 @@ def _resolve_approved_proposal(approve_id: str):
         if not fresh:
             return "", ("that message does not hold an approvable proposal any more. "
                         "Re-run the task sandboxed.")
-        if fresh != scope:
+        if fresh != scope and redact_secrets(scope) != fresh:
+            # The stored row is redacted (the message keeps secrets out of
+            # history.json), so the derived scope is the redacted form of the text
+            # the card printed. Anything else is a different proposal: refuse rather
+            # than execute text this build did not just derive.
             return "", ("that card no longer matches the proposal it came from "
                         "(the message and the stored plan disagree). Re-run the task "
                         "sandboxed and approve the fresh card.")
@@ -5404,8 +5439,13 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
     # agent, and the omp/claude/codex branches have no approval gate. While
     # sandboxed, force Hermes (approval-gated); if Hermes is unavailable the
     # existing fallback-summary path below handles the failure gracefully.
-    if get_sandbox_mode() and engine != "hermes":
-        append_botty_log(f"DISTILL engine override [{engine}->hermes]: sandboxed non-Hermes engine has no approval gate")
+    # This run happens with no user action (it is triggered at the compaction
+    # threshold), so it must never be the one run with home-wide writes: with Sandbox
+    # Mode on the engine is forced to the gated Hermes, and an OMP child never gets
+    # --allow-home from here.
+    if engine != "hermes":
+        append_botty_log(f"DISTILL engine override [{engine}->hermes]: an automatic "
+                         f"compaction run must go through the approval gate")
         engine = "hermes"
     distilled_data = None
     raw_llm_out = ""
@@ -5423,7 +5463,8 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
             omp_distill_file = BOTTY_DATA_DIR / (
                 f"current_distill_prompt_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt")
             _write_private_file(omp_distill_file, distillation_prompt)
-            cmd = ["omp", "-p", "--allow-home", "@" + str(omp_distill_file)]
+            # No --allow-home: this child runs unattended over untrusted text.
+            cmd = ["omp", "-p", "@" + str(omp_distill_file)]
         elif engine == "claude":
             cmd = ["claude", "-p"]
             stdin_text = distillation_prompt

@@ -328,12 +328,12 @@ function getBarHeadline(status, maxLen) {
 /**
  * Generates bar tooltip text.
  */
-function getTooltipText(status) {
+function getTooltipText(status, pending) {
   if (!status) return "Botty 🐼 - Desktop Agent Assistant"
   var lines = ["Botty 🐼 - Desktop Agent Assistant"]
-  // The headline is only rewritten on the next run, so a bare "Permission Required"
-  // there would claim a pending approval the card scan already dropped.
-  lines.push("Status: " + statusBadgeText(status.state, ""))
+  // The headline is only rewritten on the next run, so APPROVE comes from the card
+  // scan the chip and the badge use, never from a stale headline.
+  lines.push("Status: " + (pending ? "APPROVE" : statusBadgeText(status.state, "")))
   if (status.active_model) lines.push("Model: " + status.active_model)
   if (status.memory_count !== undefined) lines.push("Memories: " + status.memory_count + " | Skills: " + (status.skills_count || 0))
   if (status.last_query) lines.push("Last: " + truncateText(status.last_query, 45))

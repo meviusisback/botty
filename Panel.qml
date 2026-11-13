@@ -79,6 +79,7 @@ Panel {
     if (!m.sandbox_scope) return false
     // The resolver refuses a card it cannot date, so the UI must not offer one.
     if (typeof m.sandbox_minted_at !== "number" || m.sandbox_minted_at <= 0) return false
+    if (m.sandbox_minted_at > root.nowTick / 1000 + 60) return false
     if ((root.nowTick / 1000 - m.sandbox_minted_at) > 1800) return false
     return true
   }
@@ -419,12 +420,16 @@ Panel {
   property bool keepDraftOnSend: false
 
   function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox, approveId, denyId) {
+    // Consume the flag immediately: an early return below used to leave it latched,
+    // so the NEXT ordinary send silently dropped the staged attachment.
+    var keepDraft = root.keepDraftOnSend
+    root.keepDraftOnSend = false
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
     // An approval runs only the proposal: the backend refuses an approved run that
     // carries an attachment, so never attach one to it.
-    var fpath = filePath || (root.keepDraftOnSend ? "" : root.attachedFilePath) || ""
+    var fpath = filePath || (keepDraft ? "" : root.attachedFilePath) || ""
     var scr = (useScreen !== undefined) ? useScreen : root.screenContextEnabled
     var sit = (useSituation !== undefined) ? useSituation : root.situationContextEnabled
 
@@ -476,7 +481,7 @@ Panel {
     // Optimistically update status and clear input
     root.rawStatus.state = "working"
     root.rawStatus.headline = "Botty thinking…"
-    if (!root.keepDraftOnSend) {
+    if (!keepDraft) {
       promptInput.text = ""
       root.promptText = ""
       root.attachedFilePath = ""
@@ -488,7 +493,6 @@ Panel {
       root.lastCaptureInfo = null
       root.situationData = null
     }
-    root.keepDraftOnSend = false
     root.fetchHistory()
     root.scrollChatToEnd()
     Qt.callLater(function() {
@@ -705,7 +709,10 @@ Panel {
             root.sandboxMode = data.sandbox_mode
           }
           if (data.notifications) {
-            root.notificationConfig = data.notifications
+            // Merge over the current config: a partial payload used to bind the four
+            // toggles to undefined ("Unable to assign [undefined] to bool").
+            root.notificationConfig = Object.assign({}, root.notificationConfig || {},
+                                                    data.notifications)
           }
         }
       } catch (e) {}
@@ -796,7 +803,8 @@ Panel {
               root.sandboxMode = data.sandbox_mode
             }
             if (data.notifications) {
-              root.notificationConfig = data.notifications
+              root.notificationConfig = Object.assign({}, root.notificationConfig || {},
+                                                      data.notifications)
             }
             if (data.pending_proposals !== undefined) {
               root.pendingProposals = data.pending_proposals
@@ -1429,7 +1437,7 @@ Panel {
     visible: !root.barShowsText
     bar: root.bar
     text: Model.statusIcon(root.rawStatus.state)
-    tooltipText: Model.getTooltipText(root.rawStatus)
+    tooltipText: Model.getTooltipText(root.rawStatus, root.pendingPermissionId !== "")
     active: root.showStatusInBar && (root.rawStatus.state === "working" || root.rawStatus.state === "waiting")
     activeColor: root.showStatusInBar
       ? Model.statusColor(root.rawStatus.state, root.foreground, root.accent, root.urgent)
@@ -1452,7 +1460,7 @@ Panel {
 
     Rectangle {
       id: iconDot
-      visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0)
+      visible: (root.showStatusInBar || root.pendingPermissionId !== "") && ((!root.opened && root.unreadCount > 0)
                || root.pendingPermissionId !== ""
                || root.rawStatus.state === "working" || root.rawStatus.state === "error")
       anchors.top: parent.top
@@ -1526,7 +1534,7 @@ Panel {
       }
 
       Rectangle {
-        visible: root.showStatusInBar && ((!root.opened && root.unreadCount > 0)
+        visible: (root.showStatusInBar || root.pendingPermissionId !== "") && ((!root.opened && root.unreadCount > 0)
                || root.pendingPermissionId !== ""
                || root.rawStatus.state === "working" || root.rawStatus.state === "error")
         width: Style.space(6)
@@ -1545,7 +1553,9 @@ Panel {
       onClicked: function(mouse) { dataButton.triggerPress(mouse.button) }
       onContainsMouseChanged: {
         if (!root.bar) return
-        if (containsMouse) root.bar.showTooltip(dataButton, Model.getTooltipText(root.rawStatus))
+        if (containsMouse) root.bar.showTooltip(dataButton,
+                                               Model.getTooltipText(root.rawStatus,
+                                                                    root.pendingPermissionId !== ""))
         else root.bar.hideTooltip(dataButton)
       }
       Component.onCompleted: if (root.bar && root.bar.registerClickTarget) root.bar.registerClickTarget(dataButton)
@@ -2656,7 +2666,12 @@ Panel {
                             textFormat: Text.PlainText
                             text: !modelData.sandbox_scope
                                   ? "This card was made by an older Botty and does not record the text it would run. Re-run the task sandboxed for a fresh card."
-                                  : "This card is older than 30 minutes, so Botty will not run it. Re-run the task sandboxed for a fresh card."
+                                  : (typeof modelData.sandbox_minted_at !== "number"
+                                     || modelData.sandbox_minted_at <= 0)
+                                    ? "This card does not record when it was made, so Botty cannot show it is fresh. Re-run the task sandboxed for a fresh card."
+                                    : (modelData.sandbox_minted_at > root.nowTick / 1000 + 60)
+                                      ? "This card records a time in the future, so Botty cannot verify it. Re-run the task sandboxed for a fresh card."
+                                      : "This card is older than 30 minutes, so Botty will not run it. Re-run the task sandboxed for a fresh card."
                             visible: !!modelData.sandbox_token && !modelData.sandbox_approved_at
                                      && !modelData.sandbox_denied_at && !root.cardIsApprovable(modelData)
                             wrapMode: Text.Wrap
@@ -2984,6 +2999,9 @@ Panel {
                   iconText: "󰅖"
                   text: (root.pendingPermissionCard && root.pendingPermissionCard.sandbox_mode === true)
                         ? "Deny (Keep Sandboxed)" : "Deny"
+                  // Without an id there is nothing to retire: the click would send a
+                  // plain sentence and leave the card alive.
+                  visible: root.pendingPermissionId !== ""
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {

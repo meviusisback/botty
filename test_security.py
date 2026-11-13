@@ -1610,10 +1610,59 @@ class TestRoundSixHardening(unittest.TestCase):
         value = "x\U0001F600y"
         self.assertEqual(yaml.safe_load("k: " + botty_backend._yaml_scalar(value))["k"], value)
 
-    def test_engine_ids_with_a_leading_yaml_indicator_are_refused(self):
-        for bad in ("@cf/meta/x", "~", "#tagged", "*anchor"):
-            self.assertFalse(botty_backend._valid_engine_id(bad), bad)
+    def test_engine_ids_are_validated_on_the_whole_string(self):
+        # A trailing newline used to slip past the '$' anchor.
+        self.assertFalse(botty_backend._valid_engine_id("abc\n"))
+        self.assertFalse(botty_backend._valid_engine_id("has space"))
+        self.assertFalse(botty_backend._valid_engine_id("quote'"))
         self.assertTrue(botty_backend._valid_engine_id("claude-sonnet-4"))
+        # Real Cloudflare Workers AI ids start with '@': they are legitimate, and
+        # quoting (plus the round-trip assertion) is what keeps them data.
+        self.assertTrue(botty_backend._valid_engine_id("@cf/meta/llama-3-8b"))
+
+    def test_a_leading_indicator_id_round_trips_quoted(self):
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("yaml not installed")
+        text = botty_backend._update_hermes_config_model(
+            "model:\n  default: old\n  provider: p\n", "@cf/meta/llama-3-8b", "@cf")
+        doc = yaml.safe_load(text)
+        self.assertEqual(doc["model"]["default"], "@cf/meta/llama-3-8b")
+        self.assertEqual(botty_backend._config_model_roundtrip_problem(
+            text, "@cf/meta/llama-3-8b", "@cf"), "")
+
+    def test_a_colon_terminated_id_is_quoted_or_refused(self):
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("yaml not installed")
+        text = botty_backend._update_hermes_config_model(
+            "model:\n  default: old\n  provider: p\n", "ornith:", "default")
+        self.assertEqual(yaml.safe_load(text)["model"]["default"], "ornith:")
+
+    def test_ambiguous_yaml_scalars_are_quoted(self):
+        try:
+            import yaml
+        except Exception:
+            self.skipTest("yaml not installed")
+        for value in ("no", "off", "null", "true", "123", "1.5", "~"):
+            self.assertEqual(yaml.safe_load("k: " + botty_backend._yaml_scalar(value))["k"],
+                             value, value)
+
+    def test_a_nested_model_block_is_left_alone(self):
+        # providers.ollama.model is a DIFFERENT key: the writer must add its own
+        # top-level block rather than editing the provider's mapping.
+        text = botty_backend._update_hermes_config_model(
+            "providers:\n  ollama:\n    model: {default: a}\n", "gpt-5", "openai")
+        self.assertIn("    model: {default: a}", text)
+        self.assertTrue(text.startswith("providers:"))
+        self.assertIn("\nmodel:", text)
+
+    def test_a_flow_style_model_block_is_refused(self):
+        with self.assertRaises(ValueError):
+            botty_backend._update_hermes_config_model(
+                "model: {default: a, provider: b}\n", "gpt-5", "openai")
 
     def test_closed_pipes_stay_inside_the_deadline(self):
         # A child that closes stdout and stderr and keeps running used to get 5 s of

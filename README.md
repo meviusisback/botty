@@ -107,7 +107,7 @@ Widget settings (Omarchy plugin settings UI, defaults from `manifest.json`):
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `refreshIntervalSec` | integer 1–30 | `2` | Seconds between status polls while the agent is working (off otherwise) |
-| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph only, headline ticker, or the bare status word in the bar |
+| `barDisplay` | `Icon` / `Status` / `Compact` | `Icon` | Glyph only, a short snippet of the last request, or the bare status word in the bar |
 | `showStatusInBar` | boolean | `true` | Status colour and the activity dot on the bar icon |
 
 Agent request timeout lives in `~/.local/share/botty/config.json` as `request_timeout_seconds` (positive seconds, default `600`; invalid values fall back to the default).
@@ -124,7 +124,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
 | Manual CLI | The shell verbs still take their payload as positional arguments (`ask QUERY`, `copy TEXT`, `add-memory TEXT`, `create-skill ...`), so a hand-typed invocation is visible in `ps`; the widget never uses those forms |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
-| Non-Hermes engines | Refused outright while Sandbox Mode is on; with it off they run under their own permission models |
+| Non-Hermes engines | Refused while Sandbox Mode is on unless you approve a card for a concrete proposal (that single run then carries the bypass); with Sandbox Mode off they run under their own permission models |
 | Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |
 
 ## Docs

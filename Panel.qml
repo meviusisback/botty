@@ -27,9 +27,14 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // Plugin settings
-  readonly property int refreshIntervalSec: Math.max(1, Number(root.setting("refreshIntervalSec", 2)) || 2)
+  readonly property int refreshIntervalSec: Math.min(30, Math.max(1, Number(root.setting("refreshIntervalSec", 2)) || 2))
   readonly property string barDisplay: String(root.setting("barDisplay", "Icon"))
-  readonly property bool showStatusInBar: Boolean(root.setting("showStatusInBar", true))
+  readonly property bool showStatusInBar: (function (v) {
+    // shell.json is untyped: the string "false" is truthy, so Boolean() left every
+    // bar indicator on after a hand edit.
+    if (typeof v === "string") return v.trim().toLowerCase() !== "false"
+    return Boolean(v)
+  })(root.setting("showStatusInBar", true))
   readonly property bool barShowsText: barDisplay.toLowerCase() === "status" || barDisplay.toLowerCase() === "compact"
 
   // Live state
@@ -2512,7 +2517,8 @@ Panel {
                           }
                           Text {
                             textFormat: Text.PlainText
-                            text: "Sandbox Write Permission Requested"
+                            text: root.sandboxMode ? "Sandbox Write Permission Requested"
+                                                   : "Write Permission Requested"
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.body
                             font.bold: true
@@ -2541,7 +2547,7 @@ Panel {
 
                           Button {
                             iconText: "󰄬"
-                            text: "Approve & Bypass Sandbox"
+                            text: root.sandboxMode ? "Approve & Bypass Sandbox" : "Approve & Run Once"
                             selected: true
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
@@ -2567,7 +2573,7 @@ Panel {
 
                           Button {
                             iconText: "󰅖"
-                            text: "Deny (Keep Sandboxed)"
+                            text: root.sandboxMode ? "Deny (Keep Sandboxed)" : "Deny"
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             onClicked: {
@@ -2784,7 +2790,7 @@ Panel {
 
                 Button {
                   iconText: "󰅖"
-                  text: "Deny (Keep Sandboxed)"
+                  text: root.sandboxMode ? "Deny (Keep Sandboxed)" : "Deny"
                   implicitHeight: Style.space(32)
                   fontSize: Style.space(10)
                   onClicked: {
@@ -2975,7 +2981,7 @@ Panel {
                   ? (root.hermesEnforcement === "enforced"
                       ? "Sandbox: ACTIVE — writes technically denied until you approve (Hermes approval gate)"
                       : "Sandbox: ACTIVE but NOT enforced — your Hermes profile config weakens it (" + root.hermesEnforcement + ")")
-                  : "Sandbox: OFF — no approval card is shown and no bypass is granted; the Hermes engine still applies its own gate, so a dangerous write can be denied (click to enable Sandbox Mode)"
+                  : "Sandbox: OFF — no card is shown automatically and no bypass is pre-granted; the Hermes engine still applies its own gate, so a dangerous write can be denied, and a denial can still be proposed and approved once (click to enable Sandbox Mode)"
                 selected: root.sandboxMode
                 implicitHeight: Style.space(32)
                 implicitWidth: Style.space(32)
@@ -3013,7 +3019,7 @@ Panel {
 
                   TextArea.flickable: TextArea {
                     id: promptInput
-                    focus: true
+                    focus: false
                     width: promptInputFlickable.width
                     wrapMode: TextEdit.Wrap
                     font.family: root.fontFamily
@@ -3946,7 +3952,7 @@ Panel {
                         ? (root.hermesEnforcement === "enforced"
                             ? "Hermes engine: writes technically denied until you approve. Full read access active."
                             : "WARNING: sandbox NOT enforced — your Hermes profile config weakens it (" + root.hermesEnforcement + ")")
-                        : "No approval card is shown and no bypass is granted: the Hermes engine still applies its own gate, so a dangerous write can be denied. A denied action can still be approved through the card."
+                        : "No card is shown automatically and no bypass is pre-granted: the Hermes engine still applies its own gate, so a dangerous write can be denied. A denied action can still be proposed, and approving it once runs exactly that proposal."
                       font.family: root.fontFamily
                       font.pixelSize: Style.space(10)
                       color: root.sandboxMode && root.hermesEnforcement !== "enforced" ? "#F59E0B" : root.dim

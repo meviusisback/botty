@@ -136,24 +136,52 @@ def _pid_file_live(path: Path) -> bool:
         return False
 
 
+_PID_LOCK_FDS: Dict[str, int] = {}
+
+
 def _acquire_pid_file(path: Path) -> bool:
-    """Atomically claim a PID-file slot via O_EXCL, reaping one stale file."""
-    for _ in range(2):
+    """Claim a PID-file slot with a held flock.
+
+    The old O_EXCL-then-unlink reap let two runs that met in the window both
+    delete and both create, so both went live and shared one prompt file: whichever
+    wrote last decided what the other actually executed (with --yolo on an approved
+    run). A flock is released by the kernel when the process dies, which also makes
+    the stale case automatic.
+    """
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    # A LIVE pid that is not us still counts as busy: it may be an older Botty that
+    # only writes the file, and refusing is the safe answer.
+    try:
+        previous = os.read(fd, 64).decode("utf-8", "replace").strip()
+    except OSError:
+        previous = ""
+    if previous and previous != str(os.getpid()):
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            alive = _pid_file_live(path)
+        except Exception:
+            alive = False
+        if alive:
             try:
-                os.write(fd, str(os.getpid()).encode())
-            finally:
-                os.close(fd)
-            return True
-        except FileExistsError:
-            if _pid_file_live(path):
-                return False
-            try:
-                path.unlink(missing_ok=True)
+                fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
-    return False
+            os.close(fd)
+            return False
+    try:
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+    except OSError:
+        pass
+    _PID_LOCK_FDS[str(path)] = fd
+    return True
 
 
 def _release_pid_file(path: Path) -> None:
@@ -162,6 +190,7 @@ def _release_pid_file(path: Path) -> None:
     An unconditional unlink would delete a successor's claim (the previous owner
     releasing late), which makes a live slot read as free and admits a third run.
     """
+    held = _PID_LOCK_FDS.pop(str(path), None)
     try:
         if not path.exists():
             return
@@ -170,6 +199,12 @@ def _release_pid_file(path: Path) -> None:
         path.unlink(missing_ok=True)
     except (OSError, ValueError):
         pass
+    finally:
+        if held is not None:
+            try:
+                os.close(held)  # drops the flock
+            except OSError:
+                pass
 
 
 def _ask_live() -> bool:
@@ -436,22 +471,92 @@ REDACTION_PATTERNS = [
     (re.compile(r"\b(eyJ[a-zA-Z0-9_-]{10,})\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b"), r"\1…[REDACTED]"),
 ]
 
-def _strip_fenced_code(text: str) -> str:
-    """Remove ``` fenced blocks for marker matching (A2).
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
-    Attacker-controlled screen/file/window text is frequently echoed by the
-    model inside quotes or fences; matching the permission marker only outside
-    fences raises the cost of reflection spoofing. Legitimate model requests
-    are plain prose and still match. Unclosed openers strip to EOF (an odd
-    lone fence would otherwise flip in/out parity for the rest of the text)."""
-    cleaned = re.sub(r"```[\s\S]*?(?:```|$)", "", text or "")
-    # A fence is not the only way to quote what the model read: tilde fences,
-    # 4-space/tab indented blocks and inline `code` spans were all still minting
-    # an approvable card from attacker-controlled text.
-    cleaned = re.sub(r"~~~[\s\S]*?(?:~~~|$)", "", cleaned)
-    cleaned = re.sub(r"^(?: {4}|\t)[^\n]*$", "", cleaned, flags=re.MULTILINE)
-    cleaned = re.sub(r"(?m)(?<!`)`[^`\n]{1,400}`(?!`)", "", cleaned)
+
+def _strip_fenced_code(text: str) -> str:
+    """Remove everything the model might be QUOTING, leaving its own prose.
+
+    Attacker-controlled screen/file/window text reaches the model inside a quote
+    of some form, and a permission marker found there must not mint an approval
+    card. Fixed-width regexes were the wrong tool: a four-backtick fence holding a
+    three-backtick line closed on the inner run, so the quoted marker survived.
+    This walks fences properly (same character, closing run at least as long as
+    the opener), then drops indented blocks, blockquote lines, HTML comments and
+    inline code spans of any length.
+    """
+    out = []
+    fence_char = ""
+    fence_len = 0
+    for line in (text or "").splitlines():
+        m = _FENCE_RE.match(line)
+        if fence_char:
+            if m and m.group(1)[0] == fence_char and len(m.group(1)) >= fence_len and not m.group(2).strip():
+                fence_char = ""
+                fence_len = 0
+            continue
+        if m and (m.group(1)[0] == "`" or not m.group(2).strip()):
+            fence_char = m.group(1)[0]
+            fence_len = len(m.group(1))
+            continue
+        if re.match(r"^(?: {4}|\t)", line) or re.match(r"^\s*>", line):
+            continue
+        out.append(line)
+    cleaned = "\n".join(out)
+    # A fence that opens mid-line ("a ``` code ``` b") is not a block fence; the
+    # block scanner above left it alone, so treat any remaining run as a span.
+    cleaned = re.sub(r"```[\s\S]*?(?:```|$)", "", cleaned)
+    cleaned = re.sub(r"<!--[\s\S]*?(?:-->|$)", "", cleaned)
+    cleaned = re.sub(r"`+[^`]*`+", "", cleaned)
     return cleaned
+
+
+def _has_permission_marker(text: str) -> bool:
+    """True when the marker opens a PLAIN line of the model's own prose."""
+    for line in (text or "").splitlines():
+        stripped = line.lstrip(" \t")
+        if not stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED"):
+            continue
+        # No quoting or markup in front of it: an echoed line keeps its bullet,
+        # heading, quote mark or fence characters.
+        if re.match(r"^(?:[>*#+|\-]|\d+\.|`|~)", stripped):
+            continue
+        return True
+    return False
+
+
+def _permission_scope(text: str, limit: int = 2000) -> str:
+    """The bounded text a card approval is allowed to execute.
+
+    The whole assistant message used to be the approved scope, so any attacker
+    text that followed the marker rode along into a --yolo run. The scope is now
+    the marker line plus the proposal block it introduces, capped.
+    """
+    lines = (text or "").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip(" \t")
+        if stripped.startswith("🔒 SANDBOX PERMISSION REQUIRED") and not re.match(
+                r"^(?:[>*#+|\-]|\d+\.|`|~)", stripped):
+            start = i
+            break
+    if start is None:
+        return ""
+    scope = [lines[start]]
+    i = start + 1
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i < len(lines) and lines[i].strip().lower().startswith("proposed actions"):
+        while i < len(lines):
+            current = lines[i]
+            if current.strip() and not (current.strip().startswith(("-", "*", "•"))
+                                        or current.strip().lower().startswith("proposed actions")):
+                break
+            if not current.strip() and (not scope or scope[-1].strip() == ""):
+                break
+            scope.append(current)
+            i += 1
+    return "\n".join(scope)[:limit].strip()
 
 
 def _redact_obj(value):
@@ -1551,7 +1656,14 @@ def _parse_hermes_model_block(content: str) -> tuple:
     return model, provider
 
 
-_YAML_PLAIN_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/ @+=~-]*$")
+_YAML_PLAIN_SAFE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@+=~-]*$")
+# YAML 1.1 reads these as booleans/null/numbers, so an id that matches must be
+# quoted: `default: no` reloaded as False and broke the next hermes run.
+_YAML_AMBIGUOUS = re.compile(
+    r"^(?:y|Y|yes|Yes|YES|n|N|no|No|NO|true|True|TRUE|false|False|FALSE"
+    r"|on|On|ON|off|Off|OFF|null|Null|NULL|~)$"
+    r"|^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$"
+    r"|^0x[0-9a-fA-F]+$|^0o[0-7]+$")
 
 
 def _yaml_scalar(value: str) -> str:
@@ -1565,12 +1677,42 @@ def _yaml_scalar(value: str) -> str:
     if not text:
         return '""'
     unsafe_start = set("~@*&!%|>?,-[]{}\\#`")
-    if _YAML_PLAIN_SAFE.match(text) and text[0] not in unsafe_start:
+    if (_YAML_PLAIN_SAFE.match(text) and text[0] not in unsafe_start
+            and not _YAML_AMBIGUOUS.match(text) and ": " not in text
+            and not text.endswith(":")):
         return text
     # Not json.dumps: it writes astral code points as a UTF-16 surrogate pair, which
     # yaml.safe_load reads back as two lone surrogates. _yaml_quoted() escapes the
     # same characters the way round 4 already fixed for the skill frontmatter.
     return _yaml_quoted(text, 400)
+
+
+def _config_model_roundtrip_problem(content: str, model_id: str,
+                                    provider_id: str) -> str:
+    """Why ``content`` does not read back as the requested model, or "".
+
+    Quoting rules change; the parser is the authority. This assertion is what
+    would have caught both the create-branch splice and the colon-terminated id
+    that produced a config.yaml Hermes could not load.
+    """
+    try:
+        import yaml
+    except Exception:
+        return ""  # no parser installed: the quoting rules are all there is
+    try:
+        doc = yaml.safe_load(content) or {}
+    except Exception as e:
+        return f"it does not parse ({str(e).splitlines()[0]})"
+    model = doc.get("model") if isinstance(doc, dict) else None
+    if not isinstance(model, dict):
+        return "it has no model block"
+    if str(model.get("default")) != str(model_id):
+        return (f"the model reads back as {model.get('default')!r} "
+                f"instead of {model_id!r}")
+    if str(model.get("provider")) != str(provider_id):
+        return (f"the provider reads back as {model.get('provider')!r} "
+                f"instead of {provider_id!r}")
+    return ""
 
 
 def _update_hermes_config_model(content: str, model_id: str, provider_id: str) -> str:
@@ -1579,10 +1721,15 @@ def _update_hermes_config_model(content: str, model_id: str, provider_id: str) -
     model_idx = None
     model_indent = 0
     for i, line in enumerate(lines):
-        if re.match(r"^\s*model\s*:\s*(?:#.*)?$", line):
+        # Column 0 only: a nested `model:` (providers.ollama.model) is a different
+        # key, and editing it left Hermes's model untouched while reporting ok.
+        if re.match(r"^model\s*:\s*(?:#.*)?$", line):
             model_idx = i
-            model_indent = len(line) - len(line.lstrip())
+            model_indent = 0
             break
+    if model_idx is None and re.search(r"(?m)^model\s*:\s*\S", content):
+        raise ValueError("the profile config has a 'model:' block this plugin cannot "
+                         "edit safely (flow style); edit it by hand")
     model_id = _yaml_scalar(model_id)
     provider_id = _yaml_scalar(provider_id)
     if model_idx is None:
@@ -2475,6 +2622,16 @@ def build_sandbox_directive(is_sandboxed: bool, approved_run: bool = False) -> s
     in the same prompt).
     """
     if is_sandboxed:
+        enforcement = ""
+        try:
+            state = hermes_approval_enforcement().get("effective", "enforced")
+            if state != "enforced":
+                enforcement = (
+                    "\n- CAVEAT: the profile's approval gate is " + state + ", so the engine may\n"
+                    "  NOT block a write. Behave as if it does, and say so if you see evidence\n"
+                    "  otherwise.\n")
+        except Exception:
+            pass
         return (
             "SANDBOXED WRITE MODE (ACTIVE — WRITES ARE TECHNICALLY DENIED UNTIL APPROVAL):\n"
             "- You are running in a Sandboxed Environment on this Omarchy workstation.\n"
@@ -2488,6 +2645,7 @@ def build_sandbox_directive(is_sandboxed: bool, approved_run: bool = False) -> s
             "  - Commands to run: <commands>\n\n"
             "  Please approve to bypass the sandbox and apply these changes. Only the explicit\n"
             "  user-approved follow-up run may execute writes.\n"
+            + enforcement
         )
     if approved_run:
         return (
@@ -2614,7 +2772,11 @@ def _resolve_approved_proposal(approve_id: str):
         if m.get("sandbox_approved_at"):
             return "", ("that approval was already used. Re-run the task "
                         "sandboxed for a fresh card.")
-        return str(m.get("content", "")), ""
+        # Only the proposal block is approved, never the rest of the message.
+        scope = _permission_scope(str(m.get("content", "")))
+        if not scope:
+            return "", "that message does not hold a permission proposal."
+        return scope, ""
     return "", ("that proposal is no longer in the conversation. Re-run the task "
                 "sandboxed and approve the new card.")
 
@@ -3304,7 +3466,9 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         _release_ask_lock()
         return _ask_refused(err_msg, engine=engine, model=selected_model)
 
-    query_tmp = BOTTY_DATA_DIR / "current_query.txt"
+    # Per-run name: two overlapping runs must never share one prompt file.
+    query_tmp = BOTTY_DATA_DIR / (
+        f"current_query_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt")
     mode_line = build_mode_line(is_sandboxed, approved=bool(approved_scope))
     hermes_prompt = build_hermes_prompt(final_prompt, BOTTY_AGENT_DIRECTIVE, mode_line, include_directive)
     # Owner-only from the first byte: write_text created it at the umask (0644)
@@ -3545,7 +3709,7 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         _nomark = _strip_fenced_code(cleaned_response)
         _nomark = re.sub(r"<!--[\s\S]*?-->", "", _nomark)
         _nomark = "\n".join(l for l in _nomark.split("\n") if not re.match(r"\s{0,3}>", l))
-        is_permission_required = "🔒 SANDBOX PERMISSION REQUIRED" in _nomark
+        is_permission_required = _has_permission_marker(_nomark)
         add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved, sandbox_request=is_permission_required)
 
         if is_permission_required:
@@ -3889,19 +4053,14 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
 
     return {"ok": False, "error": f"Unknown engine {engine}"}
 
-_ENGINE_ID_RE = re.compile(r"^[A-Za-z0-9._:/@+~#-]{1,120}$")
+_ENGINE_ID_RE = re.compile(r"[A-Za-z0-9._:/@+~#-]{1,120}")
 
 
 def _valid_engine_id(value: str) -> bool:
     """Model/provider ids are written into YAML config by string substitution, so
     they must not be able to inject keys or newlines (B6)."""
     text = str(value or "")
-    if not _ENGINE_ID_RE.match(text):
-        return False
-    # A leading YAML indicator is refused as well: quoting makes it survive, but an
-    # id that needs quoting is not an id, and refusing keeps the write path from
-    # depending on the quoting being right.
-    return text[:1] not in "~@#*&!%|>?,-[]{}`'\""
+    return bool(_ENGINE_ID_RE.fullmatch(text))
 
 
 def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Optional[str] = None) -> Dict[str, Any]:
@@ -3930,9 +4089,13 @@ def set_model(model_id: str, provider_id: Optional[str] = None, engine_name: Opt
             try:
                 content = HERMES_CONFIG_FILE.read_text(encoding="utf-8")
                 new_content = _update_hermes_config_model(content, model_id, provider_id)
-                HERMES_CONFIG_FILE.write_text(new_content, encoding="utf-8")
             except Exception as e:
                 return {"ok": False, "error": f"Failed to set Hermes model: {str(e)}"}
+            problem = _config_model_roundtrip_problem(new_content, model_id, provider_id)
+            if problem:
+                return {"ok": False,
+                        "error": f"Refusing to write an unusable profile config: {problem}"}
+            HERMES_CONFIG_FILE.write_text(new_content, encoding="utf-8")
     elif engine == "omp":
         if OMP_CONFIG_FILE.exists():
             try:
@@ -4177,7 +4340,7 @@ def _yaml_quoted(value: str, max_len: int) -> str:
             out.append("\\" + ch)
         elif ch == "\n":
             out.append("\\n")
-        elif code < 0x20 or 0x7F <= code <= 0x9F:
+        elif code < 0x20 or 0x7F <= code <= 0x9F or code in (0x2028, 0x2029):
             out.append("\\u%04x" % code)
         elif code > 0xFFFF:
             out.append("\\U%08x" % code)

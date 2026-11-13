@@ -2175,6 +2175,28 @@ class TestRoundNineteenComments(unittest.TestCase):
                 self.assertNotIn(ch, scope)
 
 
+class TestApprovalClockIsLive(unittest.TestCase):
+    """The approval gate must read the clock, not a cached property.
+
+    A cached nowTick froze whenever no card was pending, and the timer that would
+    unfreeze it was gated by the same predicate: from the second minute of a session
+    every new card was refused as "from the future" and could never be approved.
+    """
+
+    def test_cardIsApprovable_uses_a_live_clock(self):
+        import re
+        base = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(base, "Panel.qml"), encoding="utf-8") as f:
+            src = f.read()
+        body = re.search(r"function cardIsApprovable\(m\) \{(.*?)\n  \}", src, re.S)
+        self.assertIsNotNone(body, "cardIsApprovable not found")
+        # Comments explain the bug; only the code matters here.
+        text = "\n".join(line.split("//")[0] for line in body.group(1).splitlines())
+        self.assertIn("Date.now()", text)
+        self.assertNotIn("nowTick", text,
+                         "the gate must not depend on the cached nowTick property")
+
+
 if __name__ == "__main__":
     unittest.main()
 

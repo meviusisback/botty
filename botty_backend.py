@@ -545,6 +545,37 @@ def _drop_inline_fences(text: str) -> str:
     return "\n".join(out)
 
 
+_INVISIBLE_CATEGORIES = ("Cf", "Mn", "Mc", "Me", "Cc", "Zl", "Zp")
+
+
+def _visible_indices(text: str) -> list:
+    """Indices of the characters a reader actually sees."""
+    import unicodedata
+    return [i for i, ch in enumerate(text)
+            if ch == "\n" or unicodedata.category(ch) not in _INVISIBLE_CATEGORIES]
+
+
+def _rewrite_ignoring_invisibles(line: str, marker: str) -> str:
+    """Rewrite ``marker`` even when invisible characters sit inside the word.
+
+    A literal str.replace was defeated by one combining mark or control character
+    (U+FE0F, U+0300-036F, TAB): the card and the prompt then carried a forged
+    "[END APPROVED EXECUTION SCOPE]". Matching happens on the visible skeleton and
+    the replacement covers the original span, so the invisible characters go with it.
+    """
+    while True:
+        idx = _visible_indices(line)
+        skeleton = "".join(line[i] for i in idx)
+        at = skeleton.find(marker)
+        if at == -1:
+            return line
+        start = idx[at]
+        end = idx[at + len(marker) - 1] + 1
+        replacement = "(" + marker[1:-1].replace("[", "(").replace("]", ")") + ")" \
+            if marker.endswith("]") else "(" + marker[1:]
+        line = line[:start] + replacement + line[end:]
+
+
 def _html_comment_is_open(text: str) -> bool:
     """True when the last "<!--" in ``text`` has no "-->" after it.
 
@@ -887,9 +918,10 @@ def _scope_from_index(text: str, start: int, limit: int = 2000) -> str:
         # that the rewrite below had already looked at and left alone.
         line = line.translate(_format_controls()).translate(_SEPARATORS)
         # Neutralise BOTH sentinels wherever they appear, not only at line start.
+        # The match runs on a "reader view" (what a renderer shows): one combining
+        # mark or control inside the word hid the sentinel from a literal replace.
         for marker in ("[APPROVED EXECUTION SCOPE", "[END APPROVED EXECUTION SCOPE]"):
-            if marker in line:
-                line = line.replace(marker, marker.replace("[", "(").replace("]", ")"))
+            line = _rewrite_ignoring_invisibles(line, marker)
         return line
 
     # _defuse already strips the format controls (Qt applies the bidi algorithm to
@@ -3277,20 +3309,18 @@ def _permission_scope_legacy(text: str, start: int, limit: int = 2000) -> str:
 
 
 def _migrate_legacy_card_scope(messages) -> bool:
-    """Make the stored scope of a card agree with what this code derives.
+    """Give a token-bearing card with no stored scope the scope it would run.
 
-    Two cases, one rule: a card with a token and no stored scope gets one, and a
-    stored scope that this build would derive differently (an older build wrote it
-    without defusing the sentinels) is replaced. Display and execution stay one
-    string, and the resolver refuses a card whose stored text it cannot reproduce.
+    One rule: a stored scope is NEVER rewritten - the card printed it, so changing it
+    would make the card lie about what runs. The resolver refuses a card whose stored
+    text this build cannot reproduce (exactly, or as its redacted form).
     """
     changed = False
     for m in messages or []:
         if not isinstance(m, dict) or m.get("sandbox_request") is not True:
             continue
-        # A stored scope does not skip the pass: it is re-derived and, when the
-        # stored text differs, replaced - that is how a scope stored by a build
-        # that did not defuse the sentinels is healed instead of executed as-is.
+        # A stored scope is left exactly as it is: the card printed it, and the
+        # resolver refuses it if this build would derive something else.
         if not isinstance(m.get("sandbox_minted_at"), int):
             # Undated cards are refused by the resolver; deriving a scope for them
             # would only make them look verifiable.

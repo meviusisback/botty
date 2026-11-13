@@ -73,24 +73,32 @@ Panel {
   // age limit is the backend's CARD_MAX_AGE_SECONDS (30 min); keeping it in a single
   // helper is what stops the three surfaces from disagreeing again.
   function cardIsApprovable(m) {
+    // Date.now() at evaluation, never a cached property: nowTick is only a repaint
+    // trigger, and while the predicate read it the clock froze whenever no card was
+    // pending - so every card minted later was judged "from the future" and could
+    // never be approved (and the timer that would unfreeze it was gated by this very
+    // predicate).
+    var now = Date.now() / 1000
     if (!m) return false
+    // With no id there is nothing the backend could resolve: never offer it.
+    if (!m.id) return false
     if (m.sandbox_approved_at || m.sandbox_denied_at || !m.sandbox_token) return false
     // No stored scope means the card cannot print what would run: never approve it.
     if (!m.sandbox_scope) return false
     // The resolver refuses a card it cannot date, so the UI must not offer one.
     if (typeof m.sandbox_minted_at !== "number" || m.sandbox_minted_at <= 0) return false
-    if (m.sandbox_minted_at > root.nowTick / 1000 + 60) return false
-    if ((root.nowTick / 1000 - m.sandbox_minted_at) > 1800) return false
+    if (m.sandbox_minted_at > now + 60) return false
+    if (now - m.sandbox_minted_at > 1800) return false
     return true
   }
 
-  // The 30-minute limit must expire on screen, not only when some unrelated change
-  // re-evaluates a binding: this ticks while a card is pending.
+  // Repaints the "older than 30 minutes" sentence. It is NOT what decides
+  // approvability any more, so a missed tick can no longer hide a card.
   property double nowTick: Date.now()
   Timer {
     interval: 30000
     repeat: true
-    running: root.pendingPermissionId !== ""
+    running: true
     onTriggered: root.nowTick = Date.now()
   }
 
@@ -372,15 +380,15 @@ Panel {
   function lastPendingPermissionId() { return root.pendingPermissionId }
 
   function approveSandboxBypass(messageId) {
-    if (!messageId) return
+    if (!messageId) {
+      root.rawStatus.last_error = "This permission card has no approval id, so it cannot be approved. Re-run the task for a fresh card."
+      root.showToast(root.rawStatus.last_error, true)
+      return
+    }
     root.keepDraftOnSend = true
     // The approval is bound to the card the user clicked: the id travels with the
     // request and the backend resolves THAT message (a forward/backward scan for
     // "the newest proposal" let an injected card become the executed payload).
-    if (!messageId) {
-      root.rawStatus.last_error = "This permission card has no approval id. Re-run the task sandboxed to get a fresh card."
-      return
-    }
     // Mode-aware, like the card's own title, body and Deny buttons: with Sandbox
     // Mode off the message must not tell the model to bypass a boundary that is
     // not there.

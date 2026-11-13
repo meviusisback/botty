@@ -372,7 +372,7 @@ Panel {
     testNotifProc.running = true
   }
 
-  function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox, approveId) {
+  function sendQuery(text, filePath, useScreen, useSituation, bypassSandbox, approveId, denyId) {
     if (askProc.running || root.rawStatus.state === "working") return
 
     var q = text || promptInput.text || ""
@@ -405,6 +405,12 @@ Panel {
         cmd.push("--approve-id")
         cmd.push(String(approveId))
       }
+    }
+    if (denyId) {
+      // Retires the proposal in the backend, so a refused card cannot be approved
+      // afterwards by a later click.
+      cmd.push("--deny-id")
+      cmd.push(String(denyId))
     }
     // The prompt travels on stdin, never in argv: on a host without hidepid any
     // local process can read another process's command line, and the README
@@ -1447,7 +1453,7 @@ Panel {
       Text {
         textFormat: Text.PlainText
         text: root.barDisplay.toLowerCase() === "compact"
-          ? Model.statusBadgeText(root.rawStatus.state)
+          ? Model.statusBadgeText(root.rawStatus.state, root.rawStatus.headline)
           : Model.getBarHeadline(root.rawStatus, 24)
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
@@ -1598,7 +1604,7 @@ Panel {
               Text {
                 id: statusText
                 anchors.centerIn: parent
-                text: Model.statusBadgeText(root.rawStatus.state)
+                text: Model.statusBadgeText(root.rawStatus.state, root.rawStatus.headline)
                 textFormat: Text.PlainText
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(9)
@@ -2525,7 +2531,7 @@ Panel {
                           }
                           Text {
                             textFormat: Text.PlainText
-                            text: root.sandboxMode ? "Sandbox Write Permission Requested"
+                            text: (modelData.sandbox_mode === true) ? "Sandbox Write Permission Requested"
                                                    : "Write Permission Requested"
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.body
@@ -2536,10 +2542,12 @@ Panel {
                         }
 
                         Text {
-                          text: (root.sandboxMode
+                          text: ((modelData.sandbox_mode === true)
                             ? "Writes are technically blocked while Sandbox Mode is active. "
                             : "Sandbox Mode is off, so the engine's own gate is what refused this write. ")
-                            + "Approving executes ONLY the proposed changes listed above — the agent may not take new actions. Verify every listed path and command yourself before approving."
+                            + "Approving starts ONE unrestricted run: the engine's command approval gate is "
+                            + "off for it, so it is scoped by this prompt alone (the proposed actions, with the "
+                            + "rest of the conversation left out). Verify every listed path and command yourself."
                           textFormat: Text.PlainText
                           font.family: root.fontFamily
                           font.pixelSize: Style.space(10)
@@ -2555,13 +2563,13 @@ Panel {
 
                           Button {
                             iconText: "󰄬"
-                            text: root.sandboxMode ? "Approve & Bypass Sandbox" : "Approve & Run Once"
+                            text: (modelData.sandbox_mode === true) ? "Approve & Bypass Sandbox" : "Approve & Run Once"
                             selected: true
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
                             // A consumed card must not offer Approve again: the
                             // backend refuses it, so the button would lie.
-                            visible: !modelData.sandbox_approved_at
+                            visible: !modelData.sandbox_approved_at && !modelData.sandbox_denied_at
                             onClicked: {
                               root.approveSandboxBypass(
                                     modelData.sandbox_request === true ? modelData.id : "")
@@ -2581,13 +2589,18 @@ Panel {
 
                           Button {
                             iconText: "󰅖"
-                            text: root.sandboxMode ? "Deny (Keep Sandboxed)" : "Deny"
+                            text: (modelData.sandbox_mode === true) ? "Deny (Keep Sandboxed)" : "Deny"
                             implicitHeight: Style.space(32)
                             fontSize: Style.space(10)
+                            visible: !modelData.sandbox_approved_at && !modelData.sandbox_denied_at
                             onClicked: {
-                              root.sendQuery(root.sandboxMode
+                              // The refusal must RETIRE the card: a deny that only
+                              // sends a chat message left the proposal executable
+                              // on a later click.
+                              root.sendQuery((modelData.sandbox_mode === true)
                                                ? "Do not execute these changes. Keep the environment sandboxed."
-                                               : "Do not execute these changes.", "", false, false, false)
+                                               : "Do not execute these changes.",
+                                             "", false, false, false, "", modelData.id)
                             }
                           }
                         }
@@ -2810,7 +2823,8 @@ Panel {
                   onClicked: {
                     root.sendQuery(root.sandboxMode
                                                ? "Do not execute these changes. Keep the environment sandboxed."
-                                               : "Do not execute these changes.", "", false, false, false)
+                                               : "Do not execute these changes.", "", false, false, false,
+                                   "", root.lastPendingPermissionId())
                   }
                 }
               }

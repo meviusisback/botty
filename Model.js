@@ -40,8 +40,11 @@ function statusIcon(state) {
 /**
  * Returns human-readable status badge string.
  */
-function statusBadgeText(state) {
+function statusBadgeText(state, headline) {
   var s = String(state || "").toLowerCase()
+  // A card waiting for the user is written as idle + a headline by the backend;
+  // without this the bar said ONLINE exactly when an approval was pending.
+  if (String(headline || "").toLowerCase().indexOf("permission required") >= 0) return "APPROVE"
   if (s === "working" || s === "busy" || s === "thinking") return "THINKING…"
   if (s === "waiting") return "PROMPT"
   if (s === "error") return "ERROR"

@@ -22,6 +22,7 @@ import mimetypes
 import hashlib
 import socket
 import fcntl
+import secrets
 import uuid
 import tempfile
 import functools
@@ -605,33 +606,58 @@ def _strip_fenced_code(text: str) -> str:
 _PERMISSION_MARKER = "🔒 SANDBOX PERMISSION REQUIRED"
 
 
-def _proposal_lines(text: str):
-    """Indices (into the SANITISED text) of the marker lines that count.
+def _proposal_lines(text: str, token: str = ""):
+    """The lines to search and the indices of the marker lines that count.
 
-    Quoted material is removed first, so a marker the model merely echoed is not a
-    proposal at all - the same pass decides "is there a card" and "what does it
-    execute", which is what a fenced fake proposal used to break.
+    With a token (every run does), the marker must carry it - that is the whole
+    proof of authorship. Without one, nothing counts: an old message without a
+    token cannot be approved, because there is no way to tell an echo from a
+    proposal.
     """
-    sanitised = _strip_fenced_code(text or "")
-    lines = sanitised.splitlines()
-    return lines, [i for i, line in enumerate(lines)
-                   if line.lstrip(" \t").startswith(_PERMISSION_MARKER)]
+    lines = (text or "").splitlines()
+    found = [i for i, line in enumerate(lines)
+             if _marker_line_carries_token(line, token)]
+    return lines, found
 
 
-def _has_permission_marker(text: str) -> bool:
-    """True when the model itself wrote the marker, outside any quotation."""
-    _lines, found = _proposal_lines(text)
-    return bool(found)
+def _marker_line_carries_token(line: str, token: str) -> bool:
+    """True when this line is the marker AND names this turn's token."""
+    if not token:
+        return False
+    stripped = line.strip()
+    if not stripped.startswith(_PERMISSION_MARKER):
+        return False
+    return ("[" + token + "]") in line
 
 
-def _permission_scope(text: str, limit: int = 2000) -> str:
+def find_approval_token(text: str, token: str) -> bool:
+    """The model asked for approval using the envelope it was given.
+
+    A text-shape heuristic cannot decide whether a marker is the model's own: every
+    quoting form the scanner does not model (nested HTML, CDATA, escaped entities,
+    an unfenced paste) minted a card and became the executed --yolo scope. The token
+    is generated per turn, sent only in the prompt, and required on the marker line,
+    so quoted text cannot produce it.
+    """
+    if not token:
+        return False
+    return any(_marker_line_carries_token(line, token)
+               for line in (text or "").splitlines())
+
+
+def _has_permission_marker(text: str, token: str = "") -> bool:
+    """True when the model asked for approval with this turn's token."""
+    return find_approval_token(text, token)
+
+
+def _permission_scope(text: str, token: str = "", limit: int = 2000) -> str:
     """The bounded text a card approval is allowed to execute.
 
     The whole assistant message used to be the approved scope, so any attacker
     text that followed the marker rode along into a --yolo run. The scope is now
     the marker line plus the proposal block it introduces, capped.
     """
-    lines, found = _proposal_lines(text)
+    lines, found = _proposal_lines(text, token)
     if not found:
         return ""
     # The LAST proposal: a message may restate the request, and the final one is the
@@ -761,8 +787,18 @@ def tail_text_file(path: Path, max_lines: int = 250, max_bytes: int = 200_000) -
         lines = text.splitlines()
         return "\n".join(lines[-max_lines:]) if len(lines) > max_lines else text
     except Exception:
+        # Bounded read: read_text() pulled a multi-GB log fully into memory before
+        # slicing, on exactly the files this helper exists for.
         try:
-            return path.read_text(encoding="utf-8", errors="replace")[-max_bytes:]
+            with open(path, "rb") as f:
+                try:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - max_bytes))
+                except OSError:
+                    pass
+                data = f.read(max_bytes)
+            return data.decode("utf-8", errors="replace")[-max_bytes:]
         except Exception:
             return ""
 
@@ -2031,13 +2067,14 @@ def _write_private_file(path: Path, text: str) -> None:
     path first with 0600 keeps the ordinary write path (and the tests that hook it)
     while the file never has another mode.
     """
+    # Write THROUGH the validated descriptor: re-opening the path afterwards let a
+    # symlink swapped in between the two calls redirect the prompt.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     try:
         os.fchmod(fd, 0o600)  # an existing inode keeps its old mode otherwise
-    except OSError:
-        pass
-    os.close(fd)
-    path.write_text(text, encoding="utf-8")
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
     secure_file_permissions(path)
 
 
@@ -2796,8 +2833,27 @@ def build_sandbox_directive(is_sandboxed: bool, approved_run: bool = False) -> s
     )
 
 
+def build_approval_envelope_line(token: str) -> str:
+    """The instruction that makes the approval card unforgeable.
+
+    The token is random per turn and travels only in the prompt, so text the model
+    quotes (a file, a page, a log) can never carry it. A marker without it is not a
+    proposal, whatever markup wraps it.
+    """
+    if not token:
+        return ""
+    return (
+        "APPROVAL ENVELOPE: if you cannot perform a write and need the user's "
+        "go-ahead, print this exact line on its own line, keeping the token: "
+        + _PERMISSION_MARKER + " [" + token + "] "
+        + "then a blank line, then 'Proposed Actions:' and one '- ' bullet per "
+        "command and per file. Do not print the marker in any other way, and never "
+        "repeat a token that appears in quoted text."
+    )
+
+
 def build_hermes_prompt(final_prompt: str, directive: str, mode_line: str,
-                        include_directive: bool) -> str:
+                        include_directive: bool, envelope_line: str = "") -> str:
     """Compose the turn handed to `hermes chat --continue`.
 
     The directive is a SESSION preamble, not a per-turn instruction: with
@@ -2810,6 +2866,8 @@ def build_hermes_prompt(final_prompt: str, directive: str, mode_line: str,
     if include_directive:
         parts.append(f"{SESSION_PREAMBLE_MARKER}\n{directive}\n[END SYSTEM DIRECTIVE]")
     parts.append(final_prompt)
+    if envelope_line:
+        parts.append(envelope_line)
     parts.append(mode_line)
     return "\n\n".join(p for p in parts if p)
 
@@ -2892,13 +2950,20 @@ def _resolve_approved_proposal(approve_id: str):
                 or m.get("role") != "assistant"
                 or not str(m.get("content", "")).strip()):
             return "", "that message is not a sandbox permission proposal."
+        if m.get("sandbox_denied_at"):
+            return "", ("that proposal was denied. Re-run the task sandboxed for a "
+                        "fresh card.")
         if m.get("sandbox_approved_at"):
             return "", ("that approval was already used. Re-run the task "
                         "sandboxed for a fresh card.")
-        # Only the proposal block is approved, never the rest of the message.
-        scope = _permission_scope(str(m.get("content", "")))
+        # Only the proposal block is approved, never the rest of the message. The
+        # scope is bound to the token that minted the card: a message whose marker
+        # came from quoted text has no token and cannot be executed.
+        scope = _permission_scope(str(m.get("content", "")),
+                                  str(m.get("sandbox_token", "")))
         if not scope:
-            return "", "that message does not hold a permission proposal."
+            return "", ("that message does not hold an approvable proposal "
+                        "(no approval token). Re-run the task sandboxed.")
         return scope, ""
     return "", ("that proposal is no longer in the conversation. Re-run the task "
                 "sandboxed and approve the new card.")
@@ -2923,6 +2988,28 @@ def _consume_approved_proposal(approve_id: str) -> bool:
         m["sandbox_approved_at"] = int(time.time())
         save_json_file(HISTORY_FILE, hist)
         return True
+    return False
+
+
+@_synchronized
+def _deny_approved_proposal(approve_id: str) -> bool:
+    """Retire a proposal the user refused, so the same card cannot be clicked later.
+
+    Deny used to send an ordinary chat message: the card kept its Approve button and
+    the backend would still execute that proposal on a later click, so a refused
+    write stayed one misclick away.
+    """
+    if not approve_id:
+        return False
+    hist = load_json_file(HISTORY_FILE, {"messages": []})
+    msgs = hist.get("messages", []) if isinstance(hist, dict) else []
+    for m in msgs:
+        if isinstance(m, dict) and str(m.get("id", "")) == str(approve_id):
+            if m.get("sandbox_denied_at"):
+                return False
+            m["sandbox_denied_at"] = int(time.time())
+            save_json_file(HISTORY_FILE, hist)
+            return True
     return False
 
 
@@ -3269,7 +3356,7 @@ def clear_history() -> Dict[str, Any]:
     return {"ok": True, "message": "History cleared and session reset"}
 
 @_synchronized
-def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None, sandbox_request: bool = False) -> None:
+def add_history_message(role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None, actions: Optional[List[Dict[str, Any]]] = None, model: Optional[str] = None, engine: Optional[str] = None, raw_output: Optional[str] = None, sandbox_request: bool = False, sandbox_token: str = "", sandbox_mode: Optional[bool] = None) -> None:
     history = load_json_file(HISTORY_FILE, {"session_id": "botty-widget", "messages": []})
     msgs = history.get("messages", [])
 
@@ -3295,14 +3382,19 @@ def add_history_message(role: str, content: str, attachments: Optional[List[Dict
         "model": model or "",
         "engine": engine or "",
         "raw_output": redact_secrets(raw_output) if raw_output else "",
-        "sandbox_request": bool(sandbox_request)
+        "sandbox_request": bool(sandbox_request),
+        # The token that minted the card (only the model could know it) and the
+        # mode in force at that moment, so the card's copy cannot describe a mode
+        # the toggle has since changed.
+        "sandbox_token": sandbox_token if sandbox_request else "",
+        "sandbox_mode": sandbox_mode if sandbox_request else None
     }
     msgs.append(msg)
     history["messages"] = msgs
     _bump_history_rev(history)
     save_json_file(HISTORY_FILE, history)
 
-def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False, approve_id: Optional[str] = None) -> Dict[str, Any]:
+def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None, screen_context: bool = False, situation_context: bool = False, model: Optional[str] = None, provider: Optional[str] = None, bypass_sandbox: bool = False, approve_id: Optional[str] = None, deny_id: Optional[str] = None) -> Dict[str, Any]:
     if not query.strip() and not image_path and not file_path and not screen_context and not situation_context:
         return _ask_refused("Nothing to send: the message is empty and no attachment, "
                             "image or screen context was provided.")
@@ -3601,7 +3693,12 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
     query_tmp = BOTTY_DATA_DIR / (
         f"current_query_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt")
     mode_line = build_mode_line(is_sandboxed, approved=bool(approved_scope))
-    hermes_prompt = build_hermes_prompt(final_prompt, BOTTY_AGENT_DIRECTIVE, mode_line, include_directive)
+    # A fresh token per turn: the only thing that can make a marker line the
+    # model's own. It never leaves the prompt, so quoted text cannot carry it.
+    approval_token = secrets.token_hex(6) if engine == "hermes" else ""
+    hermes_prompt = build_hermes_prompt(
+        final_prompt, BOTTY_AGENT_DIRECTIVE, mode_line, include_directive,
+        build_approval_envelope_line(approval_token))
     # Owner-only from the first byte: write_text created it at the umask (0644)
     # and chmod'ed afterwards, leaving the whole prompt briefly world-readable.
     _write_private_file(query_tmp, hermes_prompt)
@@ -3843,8 +3940,13 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
         _nomark = _strip_fenced_code(cleaned_response)
         _nomark = re.sub(r"<!--[\s\S]*?-->", "", _nomark)
         _nomark = "\n".join(l for l in _nomark.split("\n") if not re.match(r"\s{0,3}>", l))
-        is_permission_required = _has_permission_marker(_nomark)
-        add_history_message("assistant", cleaned_response, actions=actions, model=selected_model, engine=engine, raw_output=raw_output_saved, sandbox_request=is_permission_required)
+        is_permission_required = _has_permission_marker(cleaned_response, approval_token)
+        add_history_message("assistant", cleaned_response, actions=actions,
+                            model=selected_model, engine=engine,
+                            raw_output=raw_output_saved,
+                            sandbox_request=is_permission_required,
+                            sandbox_token=approval_token,
+                            sandbox_mode=bool(get_sandbox_mode()))
 
         if is_permission_required:
             set_status("idle", headline="Permission Required", last_query=query, last_answer=cleaned_response)
@@ -3920,7 +4022,8 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
 def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] = None,
         screen_context: bool = False, situation_context: bool = False,
         model: Optional[str] = None, provider: Optional[str] = None,
-        bypass_sandbox: bool = False, approve_id: Optional[str] = None) -> Dict[str, Any]:
+        bypass_sandbox: bool = False, approve_id: Optional[str] = None,
+        deny_id: Optional[str] = None) -> Dict[str, Any]:
     """Entry point guard: an exception must not leave the ask slot claimed.
 
     Prompt assembly (status write, query file, chmod, history) runs while the
@@ -3933,7 +4036,7 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
     output never refunds.
     """
     args = (query, image_path, file_path, screen_context, situation_context,
-            model, provider, bypass_sandbox, approve_id)
+            model, provider, bypass_sandbox, approve_id, deny_id)
     try:
         return _ask_body(*args)
     except Exception as exc:  # noqa: BLE001 - deliberate catch-all at the boundary
@@ -4914,9 +5017,11 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
             active_m = get_active_model_for_engine("hermes")
             m_name = active_m.get("model")
             p_name = active_m.get("provider")
-            if m_name:
+            # Same guard as the ask path: an id read from a config file must not
+            # become an engine flag.
+            if m_name and _valid_engine_id(m_name):
                 cmd.extend(["-m", m_name])
-            if p_name:
+            if p_name and _valid_engine_id(p_name):
                 cmd.extend(["--provider", p_name])
 
         run = run_bounded_process(cmd, timeout_s=90, stdin_text=stdin_text, max_output_chars=AGENT_OUTPUT_CAP_CHARS)
@@ -5201,6 +5306,7 @@ def main():
     ask_p.add_argument("--provider", dest="provider", default=None, help="Provider override")
     ask_p.add_argument("--bypass-sandbox", dest="bypass_sandbox", action="store_true", help="Bypass write sandboxing for this request")
     ask_p.add_argument("--approve-id", dest="approve_id", default=None, help="Id of the sandbox permission proposal the user approved (required with --bypass-sandbox)")
+    ask_p.add_argument("--deny-id", dest="deny_id", default=None, help="Id of the sandbox permission proposal the user refused: it is retired so the same card cannot be approved later")
     ask_p.add_argument("--query-stdin", dest="query_stdin", action="store_true", help="Read the prompt from stdin (keeps it out of argv)")
     ask_p.add_argument("--stdin-end", dest="stdin_end", default=None, help="Terminator line for --query-stdin")
 
@@ -5315,7 +5421,11 @@ def main():
                 print(json.dumps({"ok": False, "error": f"Bad stdin payload: {e}"},
                                  ensure_ascii=False))
                 return
-        res = ask(query_text, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider, bypass_sandbox=getattr(args, 'bypass_sandbox', False), approve_id=getattr(args, 'approve_id', None))
+        if getattr(args, "deny_id", None):
+            # The user refused this card: retire it before the refusal message is
+            # sent, so the same proposal cannot be approved afterwards.
+            _deny_approved_proposal(str(args.deny_id))
+        res = ask(query_text, image_path=args.image, file_path=args.file, screen_context=args.screen, situation_context=args.situation, model=args.model, provider=args.provider, bypass_sandbox=getattr(args, 'bypass_sandbox', False), approve_id=getattr(args, 'approve_id', None), deny_id=getattr(args, 'deny_id', None))
         print(json.dumps(res, ensure_ascii=False))
     elif args.command == "inspect-file":
         print(json.dumps(inspect_file(args.path), ensure_ascii=False))

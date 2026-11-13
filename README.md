@@ -114,7 +114,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 
 ## How it works
 
-**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window — and that enforcement depends on the profile's own approval gate (`approvals.single_query_mode`, `approvals.mode`, `command_allowlist`); when that config weakens the gate, Botty says so instead of claiming a boundary it cannot enforce.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is the human-approved proposal itself.
+**Sandbox Mode (Hermes engine) is technically enforced, with one explicit human-approved execution window — and that enforcement depends on the profile's own approval gate (`approvals.single_query_mode`, `approvals.mode`, `command_allowlist`); when that config weakens the gate, Botty says so instead of claiming a boundary it cannot enforce.** Sandboxed runs launch `hermes` without `--yolo`, so Hermes's own approval gate applies; when a task needs writes, the agent proposes concrete actions and Botty shows an approval card. The proposal is bound to a random token Botty generates for that turn and sends only inside the prompt, so text the agent merely quotes (a file, a page, a log) can never mint a card. Clicking **Approve** runs one follow-up in a fresh, empty session whose prompt is exactly that proposal; **Deny** retires the card, so a refused proposal cannot be approved later.
 
 | Layer | Guarantee |
 |---|---|
@@ -124,7 +124,8 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Memory files | Writable by any process running as you (`0600` owner-only) — staging is a review workflow, not integrity protection |
 | Manual CLI | The shell verbs still take their payload as positional arguments (`ask QUERY`, `copy TEXT`, `add-memory TEXT`, `create-skill ...`), so a hand-typed invocation is visible in `ps`; the widget never uses those forms |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
-| Non-Hermes engines | Refused while Sandbox Mode is on unless you approve a card for a concrete proposal (that single run then carries the bypass); with Sandbox Mode off they run under their own permission models |
+| Approval | The card is minted only by a marker line carrying the turn's random token, the executed prompt is that proposal alone, and one approval is good for one run |
+| Non-Hermes engines | Refused while Sandbox Mode is on unless you approve a card for a concrete proposal (the approval lifts Botty's refusal; those engines have their own permission model and get no `--yolo`); with Sandbox Mode off they run under that model |
 | Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |
 
 ## Docs

@@ -4088,7 +4088,7 @@ Panel {
                 Repeater {
                   model: settingsViewItem.allEngines
                   delegate: Button {
-                    text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.id === "hermes" ? "Hermes (Botty)" : (modelData.id === "omp" ? "OMP" : (modelData.id === "claude" ? "Claude" : "Codex")))
+                    text: (modelData.icon ? (modelData.icon + " ") : "") + (modelData.name || modelData.id)
                     tooltipText: modelData.name + " (" + modelData.desc + ")"
                     fontSize: Style.space(11)
                     selected: modelData.id === (root.rawStatus.active_engine || "hermes")

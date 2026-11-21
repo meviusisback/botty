@@ -383,6 +383,11 @@ HERMES_CONFIG_FILE = HERMES_BOTTY_DIR / "config.yaml"
 HERMES_MEMORY_DIR = HERMES_BOTTY_DIR / "memories"
 HERMES_SKILLS_DIR = HERMES_BOTTY_DIR / "skills"
 HERMES_STATE_DB = HERMES_BOTTY_DIR / "state.db"
+# Hermes stores its subscribed providers in auth.json (credential_pool), not in
+# .env: a subscription (copilot/opencode-go/commandcode) has no API key to find.
+HERMES_AUTH_FILE = HERMES_DIR / "auth.json"
+HERMES_PROFILE_AUTH_FILE = HERMES_BOTTY_DIR / "auth.json"
+HERMES_PROFILE_MODEL_CACHE = HERMES_BOTTY_DIR / "provider_models_cache.json"
 
 # Approved proposals staging directory — outside Hermes search roots.
 # Model-derived approved content lives here; nothing in this directory
@@ -478,6 +483,36 @@ OMP_DIR = Path.home() / ".omp"
 OMP_AGENT_DIR = OMP_DIR / "agent"
 OMP_CONFIG_FILE = OMP_AGENT_DIR / "config.yml"
 OMP_MODELS_DB = OMP_AGENT_DIR / "models.db"
+
+# Other local agent CLIs. Their subscriptions/models live in caches on disk;
+# reading those (bounded) keeps the models popup from depending on a network call.
+PI_DIR = Path.home() / ".pi" / "agent"
+PI_SETTINGS_FILE = PI_DIR / "settings.json"
+PI_AUTH_FILE = PI_DIR / "auth.json"
+PI_MODELS_STORE = PI_DIR / "models-store.json"
+OPENCODE_CONFIG_FILE = Path.home() / ".config" / "opencode" / "opencode.json"
+OPENCODE_AUTH_FILE = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+OPENCODE_MODELS_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
+
+ENGINE_IDS = ("hermes", "omp", "opencode", "pi", "claude", "codex")
+ENGINE_NAMES = {
+    "hermes": "Hermes (Botty)", "omp": "OMP (Oh My Pi)",
+    "opencode": "OpenCode", "pi": "Pi",
+    "claude": "Claude Code", "codex": "OpenAI Codex",
+}
+
+
+def _read_bounded_json(path: Path, default=None):
+    """Read a local JSON cache defensively: bounded size, never raises."""
+    if default is None:
+        default = {}
+    try:
+        if not path.exists() or path.stat().st_size > MAX_STATE_FILE_BYTES:
+            return default
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 # Redaction patterns for security
 REDACTION_PATTERNS = [
@@ -2151,7 +2186,7 @@ def get_active_engine() -> str:
     return cfg.get("agent_engine", "hermes")
 
 def set_active_engine(engine: str) -> Dict[str, Any]:
-    valid = ["hermes", "omp", "claude", "codex"]
+    valid = list(ENGINE_IDS)
     if engine not in valid:
         return {"ok": False, "error": f"Invalid engine '{engine}'. Valid options: {valid}"}
     cfg = get_config()
@@ -2178,6 +2213,20 @@ def get_agent_engines() -> Dict[str, Any]:
             "desc": "High-speed parallel coding harness and orchestrator",
             "icon": "󰘦",
             "available": bool(shutil.which("omp"))
+        },
+        {
+            "id": "opencode",
+            "name": "OpenCode",
+            "desc": "OpenCode coding agent with its own provider/model catalog",
+            "icon": "󰘧",
+            "available": bool(shutil.which("opencode"))
+        },
+        {
+            "id": "pi",
+            "name": "Pi",
+            "desc": "Pi coding agent with local provider subscriptions",
+            "icon": "󰘨",
+            "available": bool(shutil.which("pi"))
         },
         {
             "id": "claude",
@@ -2398,6 +2447,22 @@ def get_active_model_for_engine(engine: Optional[str] = None) -> Dict[str, str]:
             except Exception:
                 pass
         return engine_models.get("omp", {"model": "google-antigravity/gemini-3.7-flash", "provider": "google-antigravity"})
+    elif eng == "opencode":
+        config = _read_bounded_json(OPENCODE_CONFIG_FILE, {})
+        model = config.get("model") if isinstance(config, dict) else None
+        if isinstance(model, str) and "/" in model:
+            return {"model": model, "provider": model.split("/")[0]}
+        return engine_models.get("opencode",
+                                 {"model": "opencode-go/deepseek-v4-flash", "provider": "opencode-go"})
+    elif eng == "pi":
+        settings = _read_bounded_json(PI_SETTINGS_FILE, {})
+        provider = settings.get("defaultProvider") if isinstance(settings, dict) else None
+        model = settings.get("defaultModel") if isinstance(settings, dict) else None
+        if provider and model:
+            full = str(model) if "/" in str(model) else f"{provider}/{model}"
+            return {"model": full, "provider": str(provider)}
+        return engine_models.get("pi",
+                                 {"model": "opencode-go/deepseek-v4.1-flash", "provider": "opencode-go"})
     elif eng == "claude":
         return engine_models.get("claude", {"model": "claude-3-7-sonnet", "provider": "anthropic"})
     elif eng == "codex":
@@ -4321,6 +4386,18 @@ def _ask_body(query: str, image_path: Optional[str] = None, file_path: Optional[
             f"current_omp_prompt_{os.getpid()}_{uuid.uuid4().hex[:8]}.txt")
         _write_private_file(omp_prompt_file, final_prompt)
         cmd.extend(["--", "@" + str(omp_prompt_file)])
+    elif engine == "opencode":
+        cmd = ["opencode", "run"]
+        if selected_model:
+            cmd.extend(["--model", selected_model])
+        # opencode run reads a bare message from stdin when none is supplied.
+        stdin_text = f"[SYSTEM DIRECTIVE]\n{BOTTY_AGENT_DIRECTIVE}\n[END SYSTEM DIRECTIVE]\n\n{final_prompt}"
+    elif engine == "pi":
+        cmd = ["pi", "--print", "--append-system-prompt", BOTTY_AGENT_DIRECTIVE]
+        if selected_model:
+            cmd.extend(["--model", selected_model])
+        # pi --print reads the prompt from stdin when no message is supplied.
+        stdin_text = final_prompt
     elif engine == "claude":
         cmd = ["claude", "-p", "--append-system-prompt", BOTTY_AGENT_DIRECTIVE]
         if selected_model:
@@ -4667,6 +4744,37 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         return {"ok": False, "error": f"internal error: {detail}"}
 
 
+def _hermes_subscription_provider_ids() -> set:
+    """Subscribed Hermes providers from auth.json and the model caches.
+
+    A subscription (GitHub Copilot, OpenCode Go, Command Code, ...) has no API
+    key in .env — its credential lives in auth.json's credential_pool. Reading
+    only .env made the widget report a single empty "openai" provider.
+    Only provider NAMES are read; credential values are never returned.
+    """
+    ids = set()
+    for auth_file in (HERMES_PROFILE_AUTH_FILE, HERMES_AUTH_FILE):
+        data = _read_bounded_json(auth_file, {})
+        if not isinstance(data, dict):
+            continue
+        for section in ("credential_pool", "providers"):
+            block = data.get(section)
+            if isinstance(block, dict):
+                for name in block.keys():
+                    if isinstance(name, str) and _valid_engine_id(name):
+                        ids.add(name)
+        active = data.get("active_provider")
+        if isinstance(active, str) and _valid_engine_id(active):
+            ids.add(active)
+    for cache in (HERMES_PROFILE_MODEL_CACHE, HERMES_DIR / "provider_models_cache.json"):
+        data = _read_bounded_json(cache, {})
+        if isinstance(data, dict):
+            for name in data.keys():
+                if isinstance(name, str) and _valid_engine_id(name):
+                    ids.add(name)
+    return ids
+
+
 def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, Any]:
     """Returns dynamic provider and model choices checked strictly against each agent's real config."""
     engine = engine_name or get_active_engine()
@@ -4723,17 +4831,27 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
             except Exception:
                 pass
 
-        p_cache_file = HERMES_DIR / "provider_models_cache.json"
+        # Subscription providers (copilot, opencode-go, commandcode, ...) live in
+        # auth.json, not in .env. Merge both cache files so a profile-local cache
+        # cannot hide the providers the global one knows about.
+        active_provider_ids |= _hermes_subscription_provider_ids()
         p_data: Dict[str, Any] = {}
-        if p_cache_file.exists():
-            try:
-                # Same size guard as the state files: this is re-parsed on every
-                # models popup, and the cache is Hermes's (6 MB on this host).
-                if p_cache_file.stat().st_size <= MAX_STATE_FILE_BYTES:
-                    with open(p_cache_file, "r", encoding="utf-8") as f:
-                        p_data = json.load(f)
-            except Exception:
-                pass
+        for cache_file in (HERMES_DIR / "provider_models_cache.json", HERMES_PROFILE_MODEL_CACHE):
+            cached = _read_bounded_json(cache_file, {})
+            if not isinstance(cached, dict):
+                continue
+            for provider_id, entry in cached.items():
+                existing = p_data.get(provider_id, {})
+                models = list(existing.get("models", []))
+                seen = {m["id"] if isinstance(m, dict) else m for m in models}
+                for model in (entry.get("models", []) if isinstance(entry, dict) else []):
+                    model_id = model.get("id") if isinstance(model, dict) else model
+                    if not model_id or model_id in seen or not _valid_engine_id(str(model_id)):
+                        continue
+                    models.append(model if isinstance(model, dict) else
+                                  {"id": model_id, "name": model_id})
+                    seen.add(model_id)
+                p_data[provider_id] = {"models": models[:200]}
 
         if active_m.get("provider"):
             active_provider_ids.add(active_m["provider"])
@@ -4746,8 +4864,12 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
 
             if p_id in p_data:
                 for m in p_data[p_id].get("models", []):
-                    name = m.split("/")[-1].replace("-", " ").title() if "/" in m else m
-                    models_list.append({"id": m, "name": name})
+                    model_id = m.get("id") if isinstance(m, dict) else m
+                    if not model_id:
+                        continue
+                    name = (m.get("name") if isinstance(m, dict) and m.get("name") else
+                            str(model_id).split("/")[-1].replace("-", " ").title())
+                    models_list.append({"id": model_id, "name": name})
 
             if p_id == "opencode-go" and not models_list:
                 models_list = [
@@ -4770,7 +4892,8 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
                 }
 
         sorted_providers = []
-        priority = ["opencode-go", "openrouter", "opencode-free", "ollama", "google", "anthropic", "openai"]
+        priority = ["opencode-go", "copilot", "commandcode", "opencode-free", "openrouter",
+                    "ollama", "google", "anthropic", "openai"]
         for p in priority:
             if p in providers_dict:
                 sorted_providers.append(providers_dict.pop(p))
@@ -4807,25 +4930,36 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
             try:
                 conn = sqlite3.connect(str(OMP_MODELS_DB))
                 c = conn.cursor()
-                c.execute("SELECT provider, payload FROM model_cache LIMIT 500;")
-                for r in c.fetchall():
-                    p_id = r[0]
+                columns = {row[1] for row in c.execute("PRAGMA table_info(model_cache)")}
+                if "provider_id" in columns and "models" in columns:
+                    rows = c.execute("SELECT provider_id, models FROM model_cache LIMIT 500;").fetchall()
+                else:
+                    rows = c.execute("SELECT provider, payload FROM model_cache LIMIT 500;").fetchall()
+                by_provider = {}
+                for r in rows:
+                    p_id = str(r[0])
                     clean_pid = p_id.split(":")[0]
-                    m_json = r[-1]
                     try:
-                        m_data = json.loads(m_json)
-                        models = []
-                        for item in m_data:
-                            m_id = item.get("id")
-                            m_name = item.get("name", m_id)
-                            if m_id:
-                                full_id = f"{clean_pid}/{m_id}" if ("/" not in m_id and clean_pid not in ["ollama", "google-antigravity"]) else m_id
-                                models.append({"id": full_id, "name": m_name})
-                        if models:
-                            p_name = clean_pid.replace("-", " ").title()
-                            omp_providers.append({"id": clean_pid, "name": p_name, "models": models})
+                        m_data = json.loads(r[-1])
                     except Exception:
-                        pass
+                        continue
+                    if not isinstance(m_data, list):
+                        continue
+                    bucket = by_provider.setdefault(clean_pid, [])
+                    for item in m_data:
+                        if not isinstance(item, dict):
+                            continue
+                        m_id = item.get("id")
+                        if not m_id:
+                            continue
+                        full_id = f"{clean_pid}/{m_id}" if ("/" not in m_id and clean_pid not in ["ollama", "google-antigravity"]) else m_id
+                        if not any(x["id"] == full_id for x in bucket):
+                            bucket.append({"id": full_id, "name": item.get("name", m_id)})
+                for clean_pid, models in by_provider.items():
+                    if models:
+                        omp_providers.append({"id": clean_pid,
+                                              "name": clean_pid.replace("-", " ").title(),
+                                              "models": models[:200]})
             except Exception:
                 pass
 
@@ -4849,6 +4983,76 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
             "active_provider": omp_active_provider,
             "providers": omp_providers
         }
+
+    elif engine == "opencode":
+        cache = _read_bounded_json(OPENCODE_MODELS_CACHE, {})
+        configured = _read_bounded_json(OPENCODE_CONFIG_FILE, {})
+        auth = _read_bounded_json(OPENCODE_AUTH_FILE, {})
+        ids = set()
+        if isinstance(configured, dict) and isinstance(configured.get("provider"), dict):
+            ids.update(configured["provider"].keys())
+        if isinstance(auth, dict):
+            ids.update(auth.keys())
+        if active_m.get("provider"):
+            ids.add(active_m["provider"])
+        providers = []
+        for p_id in sorted(ids):
+            entry = cache.get(p_id, {}) if isinstance(cache, dict) else {}
+            models = []
+            raw = entry.get("models", {}) if isinstance(entry, dict) else {}
+            if isinstance(raw, dict):
+                items = raw.values()
+            elif isinstance(raw, list):
+                items = raw
+            else:
+                items = []
+            seen = set()
+            for key, item in (raw.items() if isinstance(raw, dict) else enumerate(items)):
+                m_id = (item.get("id") if isinstance(item, dict) else item)
+                if not m_id and isinstance(raw, dict):
+                    m_id = key  # OpenCode caches models keyed by id, value has no id
+                if not m_id or m_id in seen or not _valid_engine_id(str(m_id)):
+                    continue
+                seen.add(m_id)
+                models.append({"id": f"{p_id}/{m_id}" if "/" not in m_id else m_id,
+                               "name": (item.get("name") if isinstance(item, dict) else None) or str(m_id)})
+                if len(models) >= 200:
+                    break
+            if models:
+                providers.append({"id": p_id, "name": p_id.replace("-", " ").title(), "models": models})
+        return {"ok": True, "engine": "opencode", "active_engine": "opencode",
+                "active_model": active_m.get("model", ""),
+                "active_provider": active_m.get("provider", "opencode-go"),
+                "providers": providers}
+
+    elif engine == "pi":
+        store = _read_bounded_json(PI_MODELS_STORE, {})
+        auth = _read_bounded_json(PI_AUTH_FILE, {})
+        ids = set(store.keys()) if isinstance(store, dict) else set()
+        if isinstance(auth, dict):
+            ids.update(auth.keys())
+        if active_m.get("provider"):
+            ids.add(active_m["provider"])
+        providers = []
+        for p_id in sorted(ids):
+            entry = store.get(p_id, {}) if isinstance(store, dict) else {}
+            models = []
+            seen = set()
+            for item in (entry.get("models", []) if isinstance(entry, dict) else []):
+                m_id = item.get("id") if isinstance(item, dict) else item
+                if not m_id or m_id in seen or not _valid_engine_id(str(m_id)):
+                    continue
+                seen.add(m_id)
+                models.append({"id": f"{p_id}/{m_id}" if "/" not in m_id else m_id,
+                               "name": (item.get("name") if isinstance(item, dict) else None) or str(m_id)})
+                if len(models) >= 200:
+                    break
+            if models:
+                providers.append({"id": p_id, "name": p_id.replace("-", " ").title(), "models": models})
+        return {"ok": True, "engine": "pi", "active_engine": "pi",
+                "active_model": active_m.get("model", ""),
+                "active_provider": active_m.get("provider", "opencode-go"),
+                "providers": providers}
 
     elif engine == "claude":
         claude_providers = [

@@ -55,6 +55,68 @@ Panel {
   })
 
   property var historyData: ({ session_id: "botty-widget", messages: [] })
+
+  // HANCORE 1.0.10 resource gates. Every child process is now guarded: a hard
+  // runtime budget (watchdog) and a hard collectable-output budget. StdioCollector
+  // buffers its whole output when waitForEnd is true, so collectors stream
+  // incrementally and the owning process is killed the moment it crosses the cap.
+  // The backend still owns the full conversation; the UI only retains a window.
+  property int procTimeoutMs: 300000
+  property int maxCollectorChars: 4000000
+  property int maxHistoryMessages: 1000
+  property var procWatch: []
+
+  function procWatchStart(proc) {
+    if (!proc) return
+    for (var i = 0; i < root.procWatch.length; i++) {
+      if (root.procWatch[i].proc === proc) return
+    }
+    root.procWatch.push({proc: proc, deadline: Date.now() + root.procTimeoutMs})
+  }
+
+  function procWatchStop(proc) {
+    root.procWatch = root.procWatch.filter(function(e) { return e.proc !== proc })
+  }
+
+  function procOutputOverflow(proc) {
+    if (!proc || !proc.running) return
+    // SIGTERM then SIGKILL: a child flooding stdout must not pin the shell.
+    proc.running = false
+    proc.signal(9)
+  }
+
+  function clampHistory(data) {
+    if (data && Array.isArray(data.messages) && data.messages.length > root.maxHistoryMessages) {
+      var copy = Object.assign({}, data)
+      copy.messages = data.messages.slice(-root.maxHistoryMessages)
+      copy.truncated = true
+      return copy
+    }
+    return data
+  }
+
+  Timer {
+    id: procWatchdog
+    interval: 1000
+    repeat: true
+    running: true
+    onTriggered: {
+      var now = Date.now()
+      var keep = []
+      for (var i = 0; i < root.procWatch.length; i++) {
+        var entry = root.procWatch[i]
+        if (!entry.proc || !entry.proc.running) continue
+        if (now >= entry.deadline) {
+          entry.proc.running = false
+          entry.proc.signal(9)
+        } else {
+          keep.push(entry)
+        }
+      }
+      root.procWatch = keep
+    }
+  }
+
   // Id of the last assistant message that is a REAL sandbox proposal (a flag
   // written by the backend). Rows without the flag render no card at all, so
   // this is empty exactly when there is nothing to approve.
@@ -640,10 +702,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: pickFileProc
     command: ["python3", root.scriptPath(), "pick-file"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(pickFileProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -741,7 +805,7 @@ Panel {
           var newCount = msgs.length
           var shouldScroll = (newCount > root.lastMessageCount)
           root.lastMessageCount = newCount
-          root.historyData = data
+          root.historyData = root.clampHistory(data)
           root.historyRev = (data.rev || 0)
           if (root.opened) {
             root.unreadCount = 0
@@ -798,10 +862,12 @@ Panel {
 
   // ------------------------------------------------------------- Process Handlers
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: statusProc
     command: ["python3", root.scriptPath(), "status"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(statusProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -830,10 +896,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: historyProc
     command: ["python3", root.scriptPath(), "history"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(historyProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -844,7 +912,7 @@ Panel {
             var newCount = msgs.length
             var shouldScroll = (newCount > root.lastMessageCount)
             root.lastMessageCount = newCount
-            root.historyData = data.history
+            root.historyData = root.clampHistory(data.history)
             root.historyRev = rrev
             if (root.opened) {
               root.unreadCount = 0
@@ -864,9 +932,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: inspectProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(inspectProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -883,6 +953,7 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: askProc
     stdinEnabled: true
     onStarted: {
@@ -892,14 +963,16 @@ Panel {
       }
     }
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(askProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchHistory()
       }
     }
     stderr: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(askProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchHistory()
@@ -908,9 +981,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: captureProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(captureProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -930,10 +1005,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: situationProc
     command: ["python3", root.scriptPath(), "situation-context"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(situationProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -948,10 +1025,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: logsProc
     command: ["python3", root.scriptPath(), "logs"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(logsProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -964,10 +1043,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: clearLogsProc
     command: ["python3", root.scriptPath(), "clear-logs"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(clearLogsProc) }
       onStreamFinished: {
         root.fetchLogs()
       }
@@ -975,9 +1056,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: setSandboxProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(setSandboxProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -991,10 +1074,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: getSandboxProc
     command: ["python3", root.scriptPath(), "get-sandbox"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(getSandboxProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1007,9 +1092,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: setNotifProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(setNotifProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1023,10 +1110,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: getNotifProc
     command: ["python3", root.scriptPath(), "get-notifications"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(getNotifProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1039,16 +1128,20 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: testNotifProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(testNotifProc) }
     }
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: clipProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(clipProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1065,9 +1158,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: clearProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(clearProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchHistory()
@@ -1076,10 +1171,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: enginesProc
     command: ["python3", root.scriptPath(), "engines"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(enginesProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1093,9 +1190,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: setEngineProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(setEngineProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchModels(root.rawStatus.active_engine)
@@ -1104,10 +1203,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: modelsProc
     command: ["python3", root.scriptPath(), "models", "--engine", (root.rawStatus.active_engine || "hermes")]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(modelsProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1138,9 +1239,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: setModelProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(setModelProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1161,9 +1264,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: dictateStartProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(dictateStartProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1174,9 +1279,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: dictateStopProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(dictateStopProc) }
       onStreamFinished: {
         root.isRecordingVoice = false
         root.isTranscribingVoice = false
@@ -1193,10 +1300,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: memoriesProc
     command: ["python3", root.scriptPath(), "memories"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(memoriesProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1209,10 +1318,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: vaultProc
     command: ["python3", root.scriptPath(), "vault-status"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(vaultProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1225,9 +1336,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: delMemProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(delMemProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchMemories()
@@ -1236,9 +1349,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: proposalsProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(proposalsProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1260,9 +1375,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: reviewPropProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(reviewPropProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchMemories()
@@ -1272,10 +1389,12 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: skillsProc
     command: ["python3", root.scriptPath(), "skills"]
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(skillsProc) }
       onStreamFinished: {
         try {
           var data = JSON.parse(text || "{}")
@@ -1288,9 +1407,11 @@ Panel {
   }
 
   Process {
+    onRunningChanged: { if (running) root.procWatchStart(this); else root.procWatchStop(this) }
     id: compactProc
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(compactProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchMemories()
@@ -1309,6 +1430,7 @@ Panel {
       }
     }
     onRunningChanged: {
+      if (running) root.procWatchStart(this); else root.procWatchStop(this)
       if (running) return
       root.memBusy = false
       if (root.queuedMem !== null) {
@@ -1318,7 +1440,8 @@ Panel {
       }
     }
     stdout: StdioCollector {
-      waitForEnd: true
+      waitForEnd: false
+      onTextChanged: { if (text.length > root.maxCollectorChars) root.procOutputOverflow(addMemProc) }
       onStreamFinished: {
         root.fetchStatus()
         root.fetchMemories()
@@ -1336,6 +1459,7 @@ Panel {
       }
     }
     onRunningChanged: {
+      if (running) root.procWatchStart(this); else root.procWatchStop(this)
       if (running) return
       root.copyBusy = false
       if (root.queuedCopyText.length > 0) {

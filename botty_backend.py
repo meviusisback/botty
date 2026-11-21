@@ -351,6 +351,12 @@ SCREENSHOT_DIR = BOTTY_DATA_DIR / "captures"
 SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 os.chmod(SCREENSHOT_DIR, 0o700)
 MAX_CAPTURES = 20  # newest screen/clipboard PNGs kept in captures/
+# Resource ceilings for clipboard/archives (HANCORE 1.0.10 review gates). A
+# clipboard offer is attacker-influencable: never buffer it whole just to
+# truncate it afterwards, and never let the archive file grow without limit.
+MAX_SELECTION_CHARS = 400
+MAX_CLIPBOARD_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_ARCHIVE_LINES = 2000
 
 
 def _prune_captures() -> None:
@@ -1097,6 +1103,44 @@ def tail_text_file(path: Path, max_lines: int = 250, max_bytes: int = 200_000) -
         except Exception:
             return ""
 
+
+def _trim_archive(path: Path, max_lines: int = MAX_ARCHIVE_LINES) -> None:
+    """Bound the JSONL archive to its newest max_lines entries.
+
+    Compaction appends a line per archived message; without a ceiling the file
+    grows for the life of the profile. Reads a bounded tail (never the whole
+    file), drops a possibly-partial first line, and replaces atomically under
+    the caller's history lock.
+    """
+    tmp = None
+    try:
+        size = path.stat().st_size
+        read_bytes = min(size, max_lines * 8192 + 65536)
+        with open(path, "rb") as f:
+            f.seek(size - read_bytes)
+            data = f.read(read_bytes)
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        if read_bytes < size and lines:
+            lines = lines[1:]  # first line may be a half-written JSON record
+        keep = lines[-max_lines:]
+        if len(keep) == len(lines) and read_bytes == size:
+            return  # already within the bound
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "wb") as f:
+            f.write(("\n".join(keep) + "\n").encode("utf-8"))
+        os.replace(tmp, path)
+        tmp = None
+        secure_file_permissions(path)
+    except Exception:
+        pass
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+
 # ── Bounded subprocess runner (security) ─────────────────────────────────────────
 # All agent-engine and helper subprocesses go through run_bounded_process():
 # - own process group (start_new_session), so a timeout kills the WHOLE group
@@ -1344,6 +1388,79 @@ def run_bounded_process(
         _kill_process_group(proc)
         result["error"] = f"Process error: {str(e)}"
         return result
+
+
+def _capture_bounded_binary(cmd: List[str], max_bytes: int,
+                            timeout_s: float) -> Dict[str, Any]:
+    """Capture at most max_bytes of a child's stdout as RAW bytes.
+
+    Unlike run_bounded_process this never decodes the stream: PNG clipboard data
+    would be corrupted by a text round-trip. It reads in bounded chunks and kills
+    the child as soon as the cap is reached or the deadline passes, so an
+    oversized or endlessly streaming clipboard offer cannot exhaust memory.
+    Returns {"data", "overflow", "timed_out", "returncode", "error"}.
+    """
+    result: Dict[str, Any] = {
+        "data": b"", "overflow": False, "timed_out": False,
+        "returncode": None, "error": None,
+    }
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL)
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+    chunks: List[bytes] = []
+    total = 0
+    deadline = time.monotonic() + timeout_s
+    stream = proc.stdout
+    try:
+        if stream is None:
+            result["error"] = "Process pipe unavailable"
+            return result
+        while total < max_bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                result["timed_out"] = True
+                break
+            try:
+                ready, _, _ = _select.select([stream], [], [], min(remaining, 0.25))
+            except (OSError, ValueError):
+                break
+            if not ready:
+                continue
+            try:
+                # One extra byte is the overflow sentinel; never read past cap+1.
+                chunk = os.read(stream.fileno(), min(65536, max_bytes - total + 1))
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                result["overflow"] = True
+                chunks.append(chunk[: max_bytes - (total - len(chunk))])
+                break
+            chunks.append(chunk)
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.kill()  # wl-paste has no children; no need for a group kill.
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=0.5)
+        except Exception:
+            pass
+        result["returncode"] = proc.returncode
+        try:
+            stream.close()
+        except Exception:
+            pass
+    result["data"] = b"".join(chunks)
+    return result
+
 
 # Anchored to the CLI's own markers so arrows used as prose survive.
 _CLI_NOTICE_PATTERNS = (
@@ -2667,6 +2784,31 @@ def hypr_ipc_query(cmd: str) -> Any:
         pass
     return {}
 
+
+def _read_primary_selection(max_chars: int = MAX_SELECTION_CHARS) -> str:
+    """Read a bounded prefix of the primary selection, redacted for prompt use.
+
+    HANCORE 1.0.10: subprocess.run(capture_output=True) materialised the ENTIRE
+    selection before the old 400-char truncation. The bounded runner caps the
+    read at the source and kills wl-paste on overflow/timeout instead.
+    """
+    try:
+        sel = run_bounded_process(["wl-paste", "--primary"], timeout_s=0.3,
+                                  max_output_chars=max_chars)
+        sel_text = (sel.get("stdout") or "").strip()
+        if not sel_text:
+            return ""
+        marker = "… [truncated]"
+        if (sel.get("output_truncated") or sel.get("timed_out")
+                or len(sel_text) > max_chars):
+            keep = max(0, max_chars - len(marker))
+            sel_text = sel_text[:keep] + marker
+        # Security (T1 gap): selections routinely hold pasted secrets.
+        return redact_secrets(sel_text)
+    except Exception:
+        return ""
+
+
 def get_targeted_situation_context() -> Dict[str, Any]:
     """Derives visible tools & environment on the active workspace in <10ms without taking a screenshot."""
     start_t = time.perf_counter()
@@ -2778,17 +2920,7 @@ def get_targeted_situation_context() -> Dict[str, Any]:
         tools_list.append(tool_info)
 
     # Active selection (mouse highlight)
-    selection = ""
-    try:
-        r_sel = subprocess.run(["wl-paste", "--primary"], capture_output=True, text=True, timeout=0.3)
-        if r_sel.returncode == 0 and r_sel.stdout.strip():
-            sel_text = r_sel.stdout.strip()
-            if len(sel_text) > 400:
-                sel_text = sel_text[:400] + "… [truncated]"
-            # Security (T1 gap): selections routinely hold pasted secrets.
-            selection = redact_secrets(sel_text)
-    except Exception:
-        pass
+    selection = _read_primary_selection()
 
     elapsed_ms = int((time.perf_counter() - start_t) * 1000)
 
@@ -5597,6 +5729,9 @@ def _distill_and_compact_locked(force: bool, preserve_tail: Optional[int],
                         "message": m
                     }
                     f.write(json.dumps(archive_entry, ensure_ascii=False) + "\n")
+                # HANCORE 1.0.10: the archive is retained data too — cap it while
+                # still holding the history lock so no append can race the trim.
+                _trim_archive(HISTORY_ARCHIVE_FILE)
             secure_file_permissions(HISTORY_ARCHIVE_FILE)
         except Exception as e:
             append_botty_log(f"Archive write error: {str(e)}")
@@ -5765,19 +5900,26 @@ def get_clipboard_image() -> Dict[str, Any]:
     timestamp = int(time.time() * 1000)
     clip_path = SCREENSHOT_DIR / f"clip_{timestamp}.png"
     try:
-        # The handle must be closed: one descriptor leaked per clipboard attach, and
-        # the PNG existed at the umask mode until the chmod below.
+        # HANCORE 1.0.10: wl-paste's stdout used to be streamed straight into a
+        # file with NO byte limit, so a hostile clipboard offer could fill the
+        # disk. Capture a bounded prefix in memory first, refuse on overflow,
+        # then write the (already bounded) bytes under private permissions.
+        cap = _capture_bounded_binary(["wl-paste", "--type", "image/png"],
+                                      MAX_CLIPBOARD_IMAGE_BYTES, timeout_s=3)
+        data = cap["data"]
+        if (cap["error"] or cap["overflow"] or cap["timed_out"]
+                or cap["returncode"] not in (0, None) or not data):
+            return {"ok": False, "error": "Clipboard image is unavailable or exceeds the size limit."}
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return {"ok": False, "error": "Clipboard did not provide a PNG image."}
         with open(clip_path, "wb") as clip_out:
-            proc = subprocess.run(["wl-paste", "--type", "image/png"], stdout=clip_out,
-                                  stderr=subprocess.PIPE, timeout=3)
-        if proc.returncode == 0 and clip_path.exists() and clip_path.stat().st_size > 0:
-            secure_file_permissions(clip_path)
-            _prune_captures()
-            return {"ok": True, "image_path": str(clip_path), "filename": clip_path.name}
-        else:
-            if clip_path.exists():
-                clip_path.unlink()
-            return {"ok": False, "error": "No image found in clipboard."}
+            clip_out.write(data)
+        if clip_path.stat().st_size > MAX_CLIPBOARD_IMAGE_BYTES:
+            clip_path.unlink()
+            return {"ok": False, "error": "Clipboard image exceeds the size limit."}
+        secure_file_permissions(clip_path)
+        _prune_captures()
+        return {"ok": True, "image_path": str(clip_path), "filename": clip_path.name}
     except Exception as e:
         if clip_path.exists():
             clip_path.unlink()

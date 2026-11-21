@@ -4744,6 +4744,48 @@ def ask(query: str, image_path: Optional[str] = None, file_path: Optional[str] =
         return {"ok": False, "error": f"internal error: {detail}"}
 
 
+def _omp_active_provider_ids() -> set:
+    """Providers OMP has a live credential or a configured API key for.
+
+    OMP's model_cache lists every provider it knows about (40 on this host);
+    auth_credentials in agent.db and models.yml with a set API key are what the
+    user actually subscribed to. Only provider names are returned.
+    """
+    ids = set()
+    try:
+        if OMP_AGENT_DIR.joinpath("agent.db").exists():
+            conn = sqlite3.connect(f"file:{OMP_AGENT_DIR / 'agent.db'}?mode=ro", uri=True)
+            try:
+                for (provider,) in conn.execute(
+                        "SELECT DISTINCT provider FROM auth_credentials "
+                        "WHERE disabled_cause IS NULL"):
+                    if isinstance(provider, str) and _valid_engine_id(provider):
+                        ids.add(provider)
+            finally:
+                conn.close()
+    except Exception:
+        pass
+    try:
+        cfg = None
+        import yaml
+        for custom_file in (OMP_DIR / "models.yml", OMP_AGENT_DIR / "models.yml"):
+            if custom_file.exists():
+                with open(custom_file, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                break
+        if isinstance(cfg, dict):
+            for provider_id in (cfg.get("providers") or {}):
+                if not isinstance(provider_id, str) or not _valid_engine_id(provider_id):
+                    continue
+                key = str(cfg["providers"][provider_id].get("apiKey", ""))
+                env_name = key[4:-1] if key.startswith("{env:") and key.endswith("}") else key
+                if os.environ.get(env_name):
+                    ids.add(provider_id)
+    except Exception:
+        pass
+    return ids
+
+
 def _hermes_subscription_provider_ids() -> set:
     """Subscribed Hermes providers from auth.json and the model caches.
 
@@ -4766,12 +4808,9 @@ def _hermes_subscription_provider_ids() -> set:
         active = data.get("active_provider")
         if isinstance(active, str) and _valid_engine_id(active):
             ids.add(active)
-    for cache in (HERMES_PROFILE_MODEL_CACHE, HERMES_DIR / "provider_models_cache.json"):
-        data = _read_bounded_json(cache, {})
-        if isinstance(data, dict):
-            for name in data.keys():
-                if isinstance(name, str) and _valid_engine_id(name):
-                    ids.add(name)
+    # A model cache is a catalogue, not a subscription: it lists every provider
+    # Hermes has seen (including custom: endpoints). Only auth.json records a
+    # credential that is actually available to this profile.
     return ids
 
 
@@ -4853,7 +4892,9 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
                     seen.add(model_id)
                 p_data[provider_id] = {"models": models[:200]}
 
-        if active_m.get("provider"):
+        # The configured provider is only a subscription when a credential or
+        # API key exists for it; otherwise the panel showed a dead "openai" row.
+        if active_m.get("provider") and active_m["provider"] in active_provider_ids:
             active_provider_ids.add(active_m["provider"])
 
         providers_dict: Dict[str, Dict[str, Any]] = {}
@@ -4913,6 +4954,8 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
         # Check ~/.omp/agent/config.yml and ~/.omp/agent/models.db directly
         omp_active_model = "google-antigravity/gemini-3.7-flash"
         omp_active_provider = "google-antigravity"
+        active_ids = _omp_active_provider_ids()
+        active_ids.add(omp_active_provider)
 
         if OMP_CONFIG_FILE.exists():
             try:
@@ -4956,7 +4999,7 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
                         if not any(x["id"] == full_id for x in bucket):
                             bucket.append({"id": full_id, "name": item.get("name", m_id)})
                 for clean_pid, models in by_provider.items():
-                    if models:
+                    if clean_pid in active_ids and models:
                         omp_providers.append({"id": clean_pid,
                                               "name": clean_pid.replace("-", " ").title(),
                                               "models": models[:200]})
@@ -5028,9 +5071,8 @@ def get_dynamic_engine_models(engine_name: Optional[str] = None) -> Dict[str, An
     elif engine == "pi":
         store = _read_bounded_json(PI_MODELS_STORE, {})
         auth = _read_bounded_json(PI_AUTH_FILE, {})
-        ids = set(store.keys()) if isinstance(store, dict) else set()
-        if isinstance(auth, dict):
-            ids.update(auth.keys())
+        auth_ids = set(k for k in auth if isinstance(k, str)) if isinstance(auth, dict) else set()
+        ids = set(k for k in store if k in auth_ids) if isinstance(store, dict) else set()
         if active_m.get("provider"):
             ids.add(active_m["provider"])
         providers = []

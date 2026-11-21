@@ -48,6 +48,47 @@ class TestSubscriptionProviders(unittest.TestCase):
         self.assertFalse(any("secret" in str(x) or "token" in str(x) for x in ids))
 
 
+class TestOnlyActiveSubscriptions(unittest.TestCase):
+    def test_hermes_ignores_catalogue_only_providers(self):
+        with tempfile.TemporaryDirectory() as d:
+            auth = Path(d) / "auth.json"
+            auth.write_text(json.dumps({"credential_pool": {"copilot": {}}}), encoding="utf-8")
+            cache = Path(d) / "cache.json"
+            cache.write_text(json.dumps({
+                "copilot": {"models": ["a"]},
+                "copilot-acp": {"models": ["b"]},
+                "custom:http://x/v1#abc": {"models": ["c"]},
+            }), encoding="utf-8")
+            with mock.patch.object(botty_backend, "HERMES_PROFILE_AUTH_FILE", auth):
+                with mock.patch.object(botty_backend, "HERMES_AUTH_FILE", Path(d) / "missing.json"):
+                    with mock.patch.object(botty_backend, "HERMES_DIR", Path(d)):
+                        with mock.patch.object(botty_backend, "HERMES_PROFILE_MODEL_CACHE", cache):
+                            with mock.patch.object(botty_backend, "HERMES_CONFIG_FILE", Path(d) / "none.yaml"):
+                                result = botty_backend.get_dynamic_engine_models("hermes")
+        ids = [p["id"] for p in result["providers"]]
+        self.assertEqual(ids, ["copilot"])
+
+    def test_omp_ignores_catalogue_only_providers(self):
+        with tempfile.TemporaryDirectory() as d:
+            db = Path(d) / "agent.db"
+            conn = sqlite3.connect(str(db))
+            conn.execute("CREATE TABLE auth_credentials (provider TEXT, disabled_cause TEXT)")
+            conn.execute("INSERT INTO auth_credentials VALUES (?,?)", ("commandcode", None))
+            conn.execute("CREATE TABLE model_cache (provider_id TEXT, updated_at INTEGER, models TEXT)")
+            for provider in ("commandcode", "opencode-go", "groq", "openrouter"):
+                conn.execute("INSERT INTO model_cache VALUES (?,?,?)",
+                             (provider, 1, json.dumps([{"id": "m", "name": "M"}])))
+            conn.commit()
+            conn.close()
+            with mock.patch.object(botty_backend, "OMP_AGENT_DIR", Path(d)):
+                with mock.patch.object(botty_backend, "OMP_DIR", Path(d)):
+                    with mock.patch.object(botty_backend, "OMP_MODELS_DB", db):
+                        with mock.patch.object(botty_backend, "OMP_CONFIG_FILE", Path(d) / "none.yml"):
+                            result = botty_backend.get_dynamic_engine_models("omp")
+        ids = [p["id"] for p in result["providers"]]
+        self.assertEqual(ids, ["commandcode"])
+
+
 class TestOmpModelCacheSchema(unittest.TestCase):
     def test_current_provider_id_schema_is_parsed(self):
         with tempfile.TemporaryDirectory() as d:

@@ -1187,16 +1187,25 @@ def _trim_archive(path: Path, max_lines: int = MAX_ARCHIVE_LINES) -> None:
 import signal as _signal
 import select as _select
 
-# The UI watchdog SIGKILLs the backend on its own (shorter) budget. Every engine
-# child is started in its own session below, so a bare kill of the wrapper used
-# to leave the engine running orphaned — still holding the Hermes session, so
-# every later ask was refused with SESSION_NOT_OWNED. PR_SET_PDEATHSIG ties the
-# child's lifetime to this process even when we are killed outright.
+# The UI watchdog can SIGKILL the backend outright (its budget is deliberately
+# longer than ours for ask runs, so a normal timeout goes through killpg below).
+# Every engine child is started in its own session, so a bare kill of the wrapper
+# used to leave it orphaned — still holding the Hermes session, so every later ask
+# was refused with SESSION_NOT_OWNED. PR_SET_PDEATHSIG ties the DIRECT child's
+# lifetime to this process; grandchildren in that new session are not covered.
 try:
-    _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
-    _LIBC.prctl.restype = ctypes.c_int
-    _PR_SET_PDEATHSIG = 1
-except Exception:  # pragma: no cover - non-Linux or static libc
+    if sys.platform.startswith("linux"):
+        try:
+            _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+        except OSError:  # musl and other libc layouts
+            _LIBC = ctypes.CDLL(None, use_errno=True)
+        _LIBC.prctl.restype = ctypes.c_int
+        _LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
+                                ctypes.c_ulong, ctypes.c_ulong]
+        _PR_SET_PDEATHSIG = 1
+    else:
+        _LIBC = None
+except Exception:  # pragma: no cover - no usable libc
     _LIBC = None
 
 
@@ -1205,11 +1214,18 @@ def _child_dies_with_parent(parent_pid: int):
 
     Also covers the fork window before prctl ran (parent already gone). Returns
     a no-op on platforms without prctl so spawning never fails because of this.
+    preexec_fn runs Python between fork() and execve(), so callers must be
+    single-threaded at Popen time (the CLI ask path is).
     """
     def _apply() -> None:
         if _LIBC is not None:
             try:
-                _LIBC.prctl(_PR_SET_PDEATHSIG, int(_signal.SIGKILL), 0, 0, 0)
+                rc = _LIBC.prctl(_PR_SET_PDEATHSIG, int(_signal.SIGKILL), 0, 0, 0)
+                if rc != 0:
+                    append_botty_log(
+                        f"PDEATHSIG: prctl failed (errno={ctypes.get_errno()}); "
+                        "engine child may be orphaned if the wrapper is killed"
+                    )
             except Exception:
                 pass
         if os.getppid() != parent_pid:

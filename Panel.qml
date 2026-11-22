@@ -48,6 +48,9 @@ Panel {
     active_engine: "hermes",
     active_model: "ox-alpha-free",
     active_provider: "opencode-go",
+    // Default matches the backend; present from the first frame so an ask that
+    // starts before the first status poll still gets the correct watchdog budget.
+    request_timeout_seconds: 600,
     session_turns: 0,
     memory_count: 0,
     skills_count: 0,
@@ -61,19 +64,22 @@ Panel {
   // buffers its whole output when waitForEnd is true, so collectors stream
   // incrementally and the owning process is killed the moment it crosses the cap.
   // The backend still owns the full conversation; the UI only retains a window.
-  // Fallback only: for the ask wrapper the deadline comes from the backend's own
-  // request_timeout_seconds, so the backend gets to kill the engine process group
-  // (and report a real timeout) before this UI watchdog ever SIGKILLs the wrapper.
+  // Base gate for every child process. Only the ask wrapper gets a longer,
+  // backend-derived deadline: it must outlive the backend's own request timeout so
+  // the backend can kill the engine process group (and report a real timeout)
+  // before this UI watchdog ever SIGKILLs the wrapper. Other helpers keep 300 s.
   property int procTimeoutMs: 300000
   property int maxCollectorChars: 4000000
   property int maxHistoryMessages: 1000
   property var procWatch: []
 
   function procTimeoutMsFor(proc) {
-    // The ask backend owns the engine's runtime budget; stay above it so a kill
-    // here cannot orphan the engine child and leave the Hermes session locked.
+    // Only ask owns an engine child, so only its wrapper needs the longer budget.
+    // Helpers (compact has a fixed 90 s budget, the file picker stays open by
+    // design) must keep the old 300 s gate regardless of request_timeout_seconds.
+    if (proc !== askProc) return root.procTimeoutMs
     var backend = Number(root.rawStatus && root.rawStatus.request_timeout_seconds)
-    if (backend > 0) return backend * 1000 + 60000
+    if (backend > 0) return Math.max(root.procTimeoutMs, backend * 1000 + 60000)
     return root.procTimeoutMs
   }
 
@@ -82,7 +88,9 @@ Panel {
     for (var i = 0; i < root.procWatch.length; i++) {
       if (root.procWatch[i].proc === proc) return
     }
-    root.procWatch.push({proc: proc, deadline: Date.now() + root.procTimeoutMsFor(proc)})
+    // Store the start, not a frozen deadline: a late status poll (or a config
+    // edit) can change request_timeout_seconds while this process is still alive.
+    root.procWatch.push({proc: proc, startedAt: Date.now()})
   }
 
   function procWatchStop(proc) {
@@ -117,7 +125,7 @@ Panel {
       for (var i = 0; i < root.procWatch.length; i++) {
         var entry = root.procWatch[i]
         if (!entry.proc || !entry.proc.running) continue
-        if (now >= entry.deadline) {
+        if (now - entry.startedAt >= root.procTimeoutMsFor(entry.proc)) {
           entry.proc.running = false
           entry.proc.signal(9)
         } else {

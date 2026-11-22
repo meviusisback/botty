@@ -547,6 +547,8 @@ class TestCompactionAndDistillation(unittest.TestCase):
             return False
         return stat.rsplit(") ", 1)[-1].split(" ", 1)[0] != "Z"
 
+    @unittest.skipUnless(sys.platform.startswith("linux") and Path("/proc").is_dir(),
+                         "PDEATHSIG regression test requires Linux /proc")
     def test_engine_child_dies_when_wrapper_is_sigkilled(self):
         """Regression: the UI watchdog SIGKILLs the ask wrapper after its own
         shorter budget. Without PR_SET_PDEATHSIG the engine child survived in its

@@ -23,6 +23,7 @@ import mimetypes
 import hashlib
 import socket
 import fcntl
+import ctypes
 import secrets
 import uuid
 import tempfile
@@ -1186,6 +1187,37 @@ def _trim_archive(path: Path, max_lines: int = MAX_ARCHIVE_LINES) -> None:
 import signal as _signal
 import select as _select
 
+# The UI watchdog SIGKILLs the backend on its own (shorter) budget. Every engine
+# child is started in its own session below, so a bare kill of the wrapper used
+# to leave the engine running orphaned — still holding the Hermes session, so
+# every later ask was refused with SESSION_NOT_OWNED. PR_SET_PDEATHSIG ties the
+# child's lifetime to this process even when we are killed outright.
+try:
+    _LIBC = ctypes.CDLL("libc.so.6", use_errno=True)
+    _LIBC.prctl.restype = ctypes.c_int
+    _PR_SET_PDEATHSIG = 1
+except Exception:  # pragma: no cover - non-Linux or static libc
+    _LIBC = None
+
+
+def _child_dies_with_parent(parent_pid: int):
+    """preexec_fn for run_bounded_process: die if the backend dies.
+
+    Also covers the fork window before prctl ran (parent already gone). Returns
+    a no-op on platforms without prctl so spawning never fails because of this.
+    """
+    def _apply() -> None:
+        if _LIBC is not None:
+            try:
+                _LIBC.prctl(_PR_SET_PDEATHSIG, int(_signal.SIGKILL), 0, 0, 0)
+            except Exception:
+                pass
+        if os.getppid() != parent_pid:
+            os._exit(127)
+
+    return _apply
+
+
 MAX_PROCESS_OUTPUT_CHARS = 2_000_000   # per stream; kills the run past this
 MAX_PROCESS_OUTPUT_BYTES = MAX_PROCESS_OUTPUT_CHARS * 4
 
@@ -1229,7 +1261,10 @@ def run_bounded_process(
 
     Security properties (F4):
     - start_new_session=True → children live in the same new process group, so a
-      timeout kills the entire group (no orphaned child shells/tools).
+      timeout kills the entire group (no orphaned child shells/tools);
+    - PR_SET_PDEATHSIG → if this wrapper is killed outright (e.g. by the UI
+      watchdog), the engine child dies with it instead of orphaning off and
+      holding a Hermes session that every later ask needs.
     - stdout/stderr are read incrementally and hard-capped; a runaway agent that
       floods output is terminated instead of exhausting RAM.
     - stdin_text is fed via the pipe (never argv) — prompts with attachments,
@@ -1249,6 +1284,7 @@ def run_bounded_process(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            preexec_fn=_child_dies_with_parent(os.getpid()),
             env=env,
         )
     except FileNotFoundError as e:
@@ -2506,6 +2542,9 @@ def get_status() -> Dict[str, Any]:
         status["approved_proposals"] = 0
     status["sandbox_mode"] = get_sandbox_mode()
     status["hermes_enforcement"] = hermes_approval_enforcement().get("effective", "enforced")
+    # Exposed so the widget's process watchdog can stay above this budget: if the
+    # UI kills the wrapper first, the backend never gets to kill the engine group.
+    status["request_timeout_seconds"] = get_request_timeout_seconds()
     
     if LOCK_FILE.exists():
         # Single liveness helper for all call sites (F6): EPERM counts live.

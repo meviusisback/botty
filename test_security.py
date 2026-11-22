@@ -2287,6 +2287,16 @@ class TestRoundSixHardening(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.5)
         self.assertTrue(res.get("timed_out"), res)
 
+    def test_engine_children_die_with_their_wrapper(self):
+        """F4: a UI-watchdog SIGKILL of the wrapper must not orphan the engine
+        child in its own session (it would keep the Hermes session locked)."""
+        src = (Path(botty_backend.__file__).resolve().parent / "botty_backend.py").read_text(encoding="utf-8")
+        start = src.index("proc = subprocess.Popen(")
+        spawn = src[start:start + 600]
+        self.assertIn("start_new_session=True", spawn)
+        self.assertIn("preexec_fn=_child_dies_with_parent(os.getpid())", spawn)
+        self.assertIn("_LIBC.prctl(_PR_SET_PDEATHSIG", src)
+
     def test_private_file_is_owner_only_at_creation(self):
         import tempfile as _tf
         with _tf.TemporaryDirectory() as d:

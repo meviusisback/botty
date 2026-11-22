@@ -61,17 +61,28 @@ Panel {
   // buffers its whole output when waitForEnd is true, so collectors stream
   // incrementally and the owning process is killed the moment it crosses the cap.
   // The backend still owns the full conversation; the UI only retains a window.
+  // Fallback only: for the ask wrapper the deadline comes from the backend's own
+  // request_timeout_seconds, so the backend gets to kill the engine process group
+  // (and report a real timeout) before this UI watchdog ever SIGKILLs the wrapper.
   property int procTimeoutMs: 300000
   property int maxCollectorChars: 4000000
   property int maxHistoryMessages: 1000
   property var procWatch: []
+
+  function procTimeoutMsFor(proc) {
+    // The ask backend owns the engine's runtime budget; stay above it so a kill
+    // here cannot orphan the engine child and leave the Hermes session locked.
+    var backend = Number(root.rawStatus && root.rawStatus.request_timeout_seconds)
+    if (backend > 0) return backend * 1000 + 60000
+    return root.procTimeoutMs
+  }
 
   function procWatchStart(proc) {
     if (!proc) return
     for (var i = 0; i < root.procWatch.length; i++) {
       if (root.procWatch[i].proc === proc) return
     }
-    root.procWatch.push({proc: proc, deadline: Date.now() + root.procTimeoutMs})
+    root.procWatch.push({proc: proc, deadline: Date.now() + root.procTimeoutMsFor(proc)})
   }
 
   function procWatchStop(proc) {

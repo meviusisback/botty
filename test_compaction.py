@@ -20,6 +20,7 @@ import time
 import sqlite3
 import tempfile
 import unittest
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -536,6 +537,65 @@ class TestCompactionAndDistillation(unittest.TestCase):
             time.sleep(0.1)
         else:
             self.fail(f"child process {child_pid} survived the group kill")
+
+    @staticmethod
+    def _process_alive(pid: int) -> bool:
+        """A zombie is dead for our purposes — /proc lingers until a reaper runs."""
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return False
+        return stat.rsplit(") ", 1)[-1].split(" ", 1)[0] != "Z"
+
+    def test_engine_child_dies_when_wrapper_is_sigkilled(self):
+        """Regression: the UI watchdog SIGKILLs the ask wrapper after its own
+        shorter budget. Without PR_SET_PDEATHSIG the engine child survived in its
+        own session, kept holding the Hermes session and made every later ask fail
+        with SESSION_NOT_OWNED."""
+        marker = self.data_dir / "pdeathsig_child.txt"
+        # Stand-in for the Botty `ask` backend: call run_bounded_process with a
+        # long budget, then block. The test kills it the way Panel.qml does.
+        helper = Path(__file__).parent / "helper_sleeper.py"
+        wrapper_code = (
+            "import sys, time\n"
+            "sys.path.insert(0, %r)\n"
+            "import botty_backend\n"
+            "botty_backend.run_bounded_process([sys.executable, %r, %r], timeout_s=60)\n"
+        ) % (str(Path(__file__).resolve().parent), str(helper), str(marker))
+        wrapper = subprocess.Popen(
+            [sys.executable, "-c", wrapper_code],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        child_pid = None
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not marker.exists():
+                time.sleep(0.05)
+            self.assertTrue(marker.exists(), "engine child never started")
+            child_pid = int(marker.read_text().strip())
+            wrapper.kill()
+            wrapper.wait(timeout=5)
+            for _ in range(30):
+                if not self._process_alive(child_pid):
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail(f"engine child {child_pid} survived its wrapper's SIGKILL")
+        finally:
+            if wrapper.poll() is None:
+                wrapper.kill()
+                wrapper.wait(timeout=5)
+            if child_pid is not None:
+                try:
+                    os.kill(child_pid, 9)
+                except ProcessLookupError:
+                    pass
+
+    def test_status_exposes_request_timeout_for_ui_watchdog(self):
+        """The widget must be able to keep its watchdog above the backend's own
+        budget; otherwise it SIGKILLs the wrapper before the group kill runs."""
+        self.config_file.write_text(json.dumps({"request_timeout_seconds": 777}), encoding="utf-8")
+        self.assertEqual(botty_backend.get_status()["request_timeout_seconds"], 777)
 
     def test_proposal_schema_rejects_oversized_and_malformed(self):
         """F2: staged proposals must respect the bounded schema."""

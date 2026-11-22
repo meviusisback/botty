@@ -2,7 +2,7 @@
 
 # Botty
 
-**Your Omarchy bar widget for agentic work.** Instant screen awareness, file and voice context, model switching and persistent memory — chat with Hermes, OMP, Claude Code or Codex without leaving your top bar.
+**Your Omarchy bar widget for agentic work.** Instant screen awareness, file and voice context, model switching and persistent memory — chat with Hermes, OMP, OpenCode, Pi, Claude Code or Codex without leaving your top bar.
 
 [![License: MIT](https://img.shields.io/github/license/meviusisback/botty)](LICENSE)
 ![Linux](https://img.shields.io/badge/linux-supported-1793d1)
@@ -19,8 +19,8 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 
 | Read | Decide | Delegate |
 |---|---|---|
-| Ambient Hyprland window capture attached as visual context | Status-aware bar icon: ready, thinking, waiting, error | Hermes, OMP, Claude Code or Codex engines, switchable in Settings |
-| Universal `+` attachments: code, docs, media, clipboard screenshots | Searchable model catalog (on the Hermes engine: providers named in your config keys, the provider in use, and `ollama` when configured) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
+| Ambient Hyprland window capture attached as visual context | Status-aware bar icon: ready, thinking, waiting, error | Hermes, OMP, OpenCode, Pi, Claude Code or Codex engines, switchable in Settings |
+| Universal `+` attachments: code, docs, media, clipboard screenshots | Model catalog restricted to active subscriptions (see below) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
 | Persistent memory tab with single-click deletion | Voice dictation via local Whisper (`voxtype`) | Desktop automation actions: terminal, files, Hyprland, system apps |
 
 ## What it does
@@ -29,7 +29,12 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 - **Ambient visual screen awareness.** Captures active Hyprland windows and attaches screenshots directly for multimodal models — no raw OCR dump clutter.
 - **Universal file and context attachments (`+`).** One button for code files, documents and media; the file chooser floats centered without disturbing your tiling layout. Right-click `+` to attach a clipboard screenshot instantly.
 - **Voice dictation.** Record with PipeWire and transcribe locally via `voxtype` (Whisper).
-- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **Claude Code** and **OpenAI Codex**; on the Hermes engine the model catalog lists the providers the profile is set up for: those whose API key appears in `~/.hermes/.env` or in the profile's own `.env`, the provider the profile is currently using, and `ollama` when its `config.yaml` has an `ollama:` section (the OMP, Claude Code and Codex lists come from their own local caches or fixed provider lists).
+- **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **OpenCode**, **Pi**, **Claude Code** and **OpenAI Codex**. The model catalog shows only providers you actually have credentials for, not every provider an agent knows about:
+  - **Hermes** — credentials in `~/.hermes/profiles/botty/auth.json` (or `~/.hermes/auth.json`), API keys in either `.env`, and `ollama` when its `config.yaml` has an `ollama:` section. The profile and global model caches supply the model lists for those providers.
+  - **OMP** — providers with a live credential in `~/.omp/agent/agent.db`, plus custom providers in `models.yml` whose API key is set. Its `model_cache` table is only a catalogue.
+  - **OpenCode** — providers configured in `~/.config/opencode/opencode.json` or authenticated in `~/.local/share/opencode/auth.json`; models come from `~/.cache/opencode/models.json`.
+  - **Pi** — authenticated providers from `~/.pi/agent/auth.json`; models come from `~/.pi/agent/models-store.json`, with the default from `settings.json`.
+  - **Claude Code / Codex** — their fixed provider lists.
 - **Continuous learning and memory.** Single-click memory deletion from the Memories tab; AES-256 encrypted local vault backup (owner-only `0600`/`0700` permissions are the real protection — sources stay plaintext on disk).
 - **Desktop automation actions.** Runs terminal commands, manages files, and interacts with Hyprland and system apps.
 
@@ -98,7 +103,7 @@ Long-running requests get **600 seconds** by default before a timeout is reporte
 | `openssl` | AES-256 vault backup |
 | `ffmpeg` (PulseAudio/PipeWire input) | Voice dictation recording |
 
-Optional engines (switch in Settings): `omp`, `claude`, `codex`. Optional voice: [`voxtype`](https://github.com/NousResearch/voxtype) with a local Whisper model. Non-Omarchy Hyprland setups work if the binaries exist, but notifications and summons rely on Omarchy's shell helpers (`omarchy-shell`, `omarchy-notification-send`).
+Optional engines (switch in Settings): `omp`, `opencode`, `pi`, `claude`, `codex`. Optional voice: [`voxtype`](https://github.com/NousResearch/voxtype) with a local Whisper model. Non-Omarchy Hyprland setups work if the binaries exist, but notifications and summons rely on Omarchy's shell helpers (`omarchy-shell`, `omarchy-notification-send`).
 
 ## Configuration
 
@@ -125,7 +130,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 | Manual CLI | The shell verbs still take their payload as positional arguments (`ask QUERY`, `copy TEXT`, `add-memory TEXT`, `create-skill ...`), so a hand-typed invocation is visible in `ps`; the widget never uses those forms |
 | Screen captures | Written `0600` inside a `0700` folder and pruned to the newest 20, so old desktops do not stay on disk |
 | Approval | The card is minted only by a marker line carrying the turn's random token (the template in the prompt shows it); the card prints the exact executed text, which is that text plus Botty's fixed wrapper and mode line and nothing else from the conversation; the cap keeps whole actions (an action too long to fit is dropped, never truncated); one approval is good for one run, and a card older than 30 minutes must be asked for again |
-| Non-Hermes engines | Refused while Sandbox Mode is on: only a Hermes turn can mint a card, and an approved card lifts Botty's refusal for that one run (those engines have their own permission model, get no `--yolo`, and OMP runs with its own `--allow-home` flag, which lets it write anywhere in your home folder during that turn); with Sandbox Mode off they run under that model |
+| Non-Hermes engines | Refused while Sandbox Mode is on: only a Hermes turn can mint a card, and an approved card lifts Botty's refusal for that one run (OMP, OpenCode, Pi, Claude Code and Codex have their own permission model, get no `--yolo`, and OMP runs with its own `--allow-home` flag, which lets it write anywhere in your home folder during that turn); with Sandbox Mode off they run under that model |
 | Sandbox Mode off | Turns run without `--yolo` (the engine keeps its own permission model) and no approval card is shown automatically; approving a proposal still starts one explicit bypass run |
 
 ## Docs
@@ -136,7 +141,7 @@ Agent request timeout lives in `~/.local/share/botty/config.json` as `request_ti
 ## Contributing
 
 ```bash
-python -m unittest discover -p 'test_*.py'   # every backend suite (security, compaction, preamble, clear-chat, cleanup)
+python -m unittest discover -p 'test_*.py'   # every backend suite (security, compaction, preamble, clear-chat, cleanup, resource bounds, engine discovery)
 node test_model_sanitize.js   # Model.js sanitizer, pure JS, no Qt needed
 ./redeploy-botty.sh           # copy Panel.qml + botty_backend.py to the installed plugin and restart the shell
 ```

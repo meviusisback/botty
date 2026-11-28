@@ -71,7 +71,10 @@ if (!/procWatch\.push\(\{proc: proc, startedAt: Date\.now\(\)\}\)/.test(src)) {
 }
 
 // No reader or writer of the old frozen-deadline field may survive the migration.
-if (/entry\.deadline|deadline:\s*Date\.now\(\)/.test(src)) {
+// Comments are stripped first: documentation that mentions the old field is not a
+// reader or a writer, and a guard that trips on prose is a guard people delete.
+const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+if (/entry\.deadline|deadline:\s*Date\.now\(\)/.test(code)) {
   failures++;
   console.log('FAIL a reader or writer of the old frozen .deadline remains');
 } else {

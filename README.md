@@ -20,7 +20,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 | Read | Decide | Delegate |
 |---|---|---|
 | Ambient Hyprland window capture attached as visual context | Status-aware bar icon: ready, thinking, waiting, error | Hermes, OMP, OpenCode, Pi, Claude Code or Codex engines, switchable in Settings |
-| Universal `+` attachments: code, docs, media, clipboard screenshots | Model catalog restricted to active subscriptions (see below) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
+| Universal `+` attachments: code, docs, media, clipboard screenshots | Model catalog restricted to providers you have credentials for (Claude Code and Codex list their own fixed provider sets) | Sandbox Mode with proposal-gated writes and one explicit approval per execution |
 | Persistent memory tab with single-click deletion | Voice dictation via local Whisper (`voxtype`) | Desktop automation actions: terminal, files, Hyprland, system apps |
 
 ## What it does
@@ -31,7 +31,7 @@ The loop is always the same: **read** what's on screen, **decide** what to ask, 
 - **Voice dictation.** Record with PipeWire and transcribe locally via `voxtype` (Whisper).
 - **Multi-agent and model switching.** Toggle between **Hermes Agent (Botty)**, **OMP**, **OpenCode**, **Pi**, **Claude Code** and **OpenAI Codex**. The model catalog shows only providers you actually have credentials for, not every provider an agent knows about:
   - **Hermes** — credentials in `~/.hermes/profiles/botty/auth.json` (or `~/.hermes/auth.json`), API keys in either `.env`, and `ollama` when its `config.yaml` has an `ollama:` section. The profile and global model caches supply the model lists for those providers.
-  - **OMP** — providers with a live credential in `~/.omp/agent/agent.db`, plus custom providers in `models.yml` whose API key is set. Its `model_cache` table is only a catalogue.
+  - **OMP** — providers with a live credential in `~/.omp/agent/agent.db`, plus custom providers in `models.yml` whose `apiKey` names an environment variable that is set for the widget (a literal key written in that file is not read). Its `model_cache` table is only a catalogue.
   - **OpenCode** — providers configured in `~/.config/opencode/opencode.json` or authenticated in `~/.local/share/opencode/auth.json`; models come from `~/.cache/opencode/models.json`.
   - **Pi** — authenticated providers from `~/.pi/agent/auth.json`; models come from `~/.pi/agent/models-store.json`, with the default from `settings.json`.
   - **Claude Code / Codex** — their fixed provider lists.

@@ -54,11 +54,28 @@ c = deadlines({ request_timeout_seconds: 0 }, 300000);
 check('zero field -> 300s', c.ask, 300000);
 
 // The watchdog must re-evaluate the deadline each tick rather than freezing it.
-if (!/now - entry\.startedAt >= root\.procTimeoutMsFor\(entry\.proc\)/.test(src)) {
+if (!/now\s+-\s+entry\.startedAt\s*>=\s*root\.procTimeoutMsFor\(\s*entry\.proc\s*\)/.test(src)) {
   failures++;
   console.log('FAIL watchdog re-evaluates deadline dynamically');
 } else {
   console.log('ok   watchdog re-evaluates deadline dynamically');
+}
+
+// ...and the entry must actually STORE the start. A frozen deadline here plus the
+// dynamic tick above compares undefined, which never fires: a silent dead watchdog.
+if (!/procWatch\.push\(\{proc: proc, startedAt: Date\.now\(\)\}\)/.test(src)) {
+  failures++;
+  console.log('FAIL procWatchStart stores startedAt, not a frozen deadline');
+} else {
+  console.log('ok   procWatchStart stores startedAt, not a frozen deadline');
+}
+
+// No reader or writer of the old frozen-deadline field may survive the migration.
+if (/entry\.deadline|deadline:\s*Date\.now\(\)/.test(src)) {
+  failures++;
+  console.log('FAIL a reader or writer of the old frozen .deadline remains');
+} else {
+  console.log('ok   no reader or writer of the old frozen .deadline remains');
 }
 
 if (failures) {
